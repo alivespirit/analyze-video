@@ -28,12 +28,18 @@ This project is a Python-based application that monitors a folder for new video 
    cd analyze-video
    ```
 
-2. Install the required dependencies:
+2. Create a virtual environment and activate it:
+   ```bash
+   python3 -m venv venv
+   source venv/bin/activate
+   ```
+
+3. Install the required dependencies:
    ```bash
    pip install -r requirements.txt
    ```
 
-3. Create a `.env` file in the project directory and add the following environment variables:
+4. Create a `.env` file in the project directory and add the following environment variables:
    ```env
    GEMINI_API_KEY=your_gemini_api_key
    TELEGRAM_TOKEN=your_telegram_bot_token
@@ -55,7 +61,14 @@ This project is a Python-based application that monitors a folder for new video 
 
 ## How It Works
 
-1. **File Monitoring**: The application uses the `watchdog` library to monitor the specified folder for new `.mp4` files.
-2. **Video Analysis**: When a new video is detected, it is uploaded to Gemini AI for analysis. The AI generates a description of the motion detected in the video.
-3. **Telegram Notification**: The analysis results are sent to a Telegram chat
-4. **Callback Handling**: When a button is clicked, the button_callback function sends the corresponding video as a reply to the message with the button.
+1. **File Monitoring**: 
+    - The script uses `watchdog` to monitor the folder specified in `VIDEO_FOLDER`.
+    - When a new `.mp4` file is detected, it triggers the `handle_event` method.
+2. **Video Analysis**: 
+    - The `analyze_video` function uploads the video to the Gemini AI API and retrieves the analysis results.
+    - If the analysis detects specific keywords (e.g., "Отакої!"), it uses a more advanced Gemini model for better results.
+3. **Telegram Notification**: 
+    - The script uses the `python-telegram-bot` library to send messages and videos to Telegram.
+    - Interactive buttons are created using `InlineKeyboardMarkup` and `InlineKeyboardButton`.
+4. **Callback Handling**: 
+    - When a button is clicked, the `button_callback` function sends the corresponding video as a reply to the message with the button.
