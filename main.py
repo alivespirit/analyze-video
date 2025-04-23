@@ -1,25 +1,26 @@
 import os
 import time
-import google.generativeai as genai
-from dotenv import load_dotenv
-from telegram import Bot, InlineKeyboardMarkup, InlineKeyboardButton
-from telegram.ext import Application, CallbackQueryHandler
 import datetime
 import asyncio
 from random import randint
+
+from dotenv import load_dotenv
+from telegram import Bot, InlineKeyboardMarkup, InlineKeyboardButton
+from telegram.ext import Application, CallbackQueryHandler
+import google.generativeai as genai
 
 from watchdog.events import FileSystemEventHandler
 from watchdog.observers.polling import PollingObserver as Observer
 
 load_dotenv()  ## load all the environment variables
 
-api_key = os.getenv("GEMINI_API_KEY")
-genai.configure(api_key=api_key)
-
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 USERNAME = os.getenv("TELEGRAM_NOTIFY_USERNAME")
 VIDEO_FOLDER = os.getenv("VIDEO_FOLDER")
+
+genai.configure(api_key=GEMINI_API_KEY)
 telegram_bot = Bot(token=TELEGRAM_TOKEN)
 
 # Initialize the Application with a larger connection pool size and timeout
@@ -37,9 +38,9 @@ class FileHandler(FileSystemEventHandler):
         asyncio.run_coroutine_threadsafe(self.handle_event(event), self.loop)
 
     async def handle_event(self, event):  # Asynchronous method
-        await asyncio.sleep(randint(10, 15))  # Wait for the file to be fully written
         print(f"New file detected: {event.src_path}")
         if event.src_path.endswith('.mp4'):
+            await asyncio.sleep(randint(10, 15))  # Wait for the file to be fully written
             file_path = event.src_path
             video_response = analyze_video(file_path)
             
@@ -83,7 +84,7 @@ class FileHandler(FileSystemEventHandler):
             print("Not a video file, skipping...")
 
 def analyze_video(video_path):
-    """Extract insights from the video using Gemini Flash."""
+    """Extract insights from the video using Gemini 2.0."""
     timestamp = f"_{os.path.basename(video_path)[:6]}:_ "
     try:
         video_file = genai.upload_file(path=video_path)
