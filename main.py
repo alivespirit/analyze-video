@@ -209,8 +209,7 @@ async def button_callback(update, context):
          except Exception: pass
     except Exception as e:
         print(f"[{file_basename}] Failed to send video from callback: {e}")
-        try: await query.edit_message_text(text=f"{query.message.text}\n\n_Помилка відправки відео._", parse_mode='Markdown')
-        except Exception: pass
+        pass
 
 # Add the callback handler
 application.add_handler(CallbackQueryHandler(button_callback))
