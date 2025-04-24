@@ -3,6 +3,7 @@ import time
 import datetime
 import asyncio
 from random import randint
+import concurrent.futures # Needed for executor
 
 from dotenv import load_dotenv
 from telegram import Bot, InlineKeyboardMarkup, InlineKeyboardButton
@@ -21,186 +22,306 @@ USERNAME = os.getenv("TELEGRAM_NOTIFY_USERNAME")
 VIDEO_FOLDER = os.getenv("VIDEO_FOLDER")
 
 genai.configure(api_key=GEMINI_API_KEY)
-telegram_bot = Bot(token=TELEGRAM_TOKEN)
 
-# Initialize the Application with a larger connection pool size and timeout
+# Initialize the Application
 application = Application.builder() \
     .token(TELEGRAM_TOKEN) \
     .http_version("1.1") \
+    .get_updates_http_version("1.1") \
     .connection_pool_size(32) \
+    .pool_timeout(60) \
     .build()
 
-class FileHandler(FileSystemEventHandler):
-    def __init__(self, loop):
-        self.loop = loop  # Pass the main asyncio event loop
+# Thread Pool Executor for Blocking Tasks
+executor = concurrent.futures.ThreadPoolExecutor(max_workers=os.cpu_count() or 4)
 
-    def on_created(self, event):  # Synchronous wrapper
-        asyncio.run_coroutine_threadsafe(self.handle_event(event), self.loop)
-
-    async def handle_event(self, event):  # Asynchronous method
-        print(f"New file detected: {event.src_path}")
-        if event.src_path.endswith('.mp4'):
-            await asyncio.sleep(randint(10, 15))  # Wait for the file to be fully written
-            file_path = event.src_path
-            video_response = analyze_video(file_path)
-            
-            now = datetime.datetime.now()
-
-            if False: #("Отакої!" in video_response) and (9 <= now.hour <= 14):
-                print("Sending video to Telegram...")
-                try:
-                    with open(file_path, 'rb') as video_file:
-                        await telegram_bot.send_video(
-                            chat_id=CHAT_ID,
-                            video=video_file,
-                            caption=video_response,
-                            parse_mode='Markdown'
-                        )
-                except Exception as e:
-                    print(f"Failed to send video to Telegram: {e}")
-            else:
-                print("Sending message with button to Telegram...")
-                try:
-                    callback_file = file_path.removeprefix(VIDEO_FOLDER)
-
-                    # Create an inline button
-                    keyboard = [
-                        [InlineKeyboardButton("Глянути", callback_data=callback_file)]
-                    ]
-                    reply_markup = InlineKeyboardMarkup(keyboard)
-
-                    await asyncio.sleep(randint(0, 9))  # Random delay before sending the message
-                    # Send the message with the button
-                    await telegram_bot.send_message(
-                        chat_id=CHAT_ID,
-                        text=video_response,
-                        reply_markup=reply_markup,
-                        parse_mode='Markdown'
-                    )
-                except Exception as e:
-                    print(f"Failed to send message with button to Telegram: {e}")
-            print(f"Done processing: {file_path}")
-        else:
-            print("Not a video file, skipping...")
-
+# --- analyze_video function (remains synchronous, uses original models) ---
 def analyze_video(video_path):
-    """Extract insights from the video using Gemini 2.0."""
+    """Extract insights from the video using Gemini. Runs in executor."""
+    print(f"[{os.path.basename(video_path)}] Starting analysis...")
     timestamp = f"_{os.path.basename(video_path)[:6]}:_ "
+    video_file = None
     try:
         video_file = genai.upload_file(path=video_path)
-    except:
+    except Exception as e:
+        print(f"[{os.path.basename(video_path)}] Video upload failed: {e}")
         return timestamp + "Video upload failed."
-    print(f"Completed upload: {video_file.uri}")
 
-    while video_file.state.name == "PROCESSING":
-        time.sleep(10)
-        video_file = genai.get_file(video_file.name)
-
-    if video_file.state.name == "FAILED":
-        return timestamp + "Video processing failed."
-    
-    prompt = """This video is from a surveillance camera, located on the second floor above the entrance to the house.
-      The camera is facing the street. Camera is set to record only when there is motion. Audio is unrelated and should be ignored.
-      Describe in one sentence what motion triggered recording. Don't mention that this triggered recording, just describe the action.
-      If any dog is present in the video, describe it and the person, include keyword "*Отакої!*" and state confidence level.
-      If a dog is not present in the video, ensure that the phrase "*Отакої!*" is NOT included in the response.
-      If someone is doing something to the parked red Tesla (not just passing by), describe what they are doing and include keyword "Хм...".
-      Only return the output and nothing else. Respond in Ukrainian.
-      """
-
-    model = genai.GenerativeModel(model_name="models/gemini-2.0-flash")
+    print(f"[{os.path.basename(video_path)}] Completed upload: {video_file.uri}")
 
     try:
-        response = model.generate_content([prompt, video_file],
-                                        request_options={"timeout": 600})
-    except:
-        genai.delete_file(video_file.name)
+        while video_file.state.name == "PROCESSING":
+            print(f"[{os.path.basename(video_path)}] Waiting for processing...")
+            time.sleep(10)
+            video_file = genai.get_file(video_file.name)
+
+        if video_file.state.name == "FAILED":
+            print(f"[{os.path.basename(video_path)}] Video processing failed state.")
+            return timestamp + "Video processing failed."
+
+        prompt = """This video is from a surveillance camera, located on the second floor above the entrance to the house.
+        The camera is facing the street. Camera is set to record only when there is motion. Audio is unrelated and should be ignored.
+        Describe in one sentence what motion triggered recording. Don't mention that this triggered recording, just describe the action.
+        If any dog is present in the video, describe it and the person, include keyword "*Отакої!*" and state confidence level.
+        If a dog is not present in the video, ensure that the phrase "*Отакої!*" is NOT included in the response.
+        If someone is doing something to the parked red Tesla (not just passing by), describe what they are doing and include keyword "Хм...".
+        Only return the output and nothing else. Respond in Ukrainian.
+        """
+
+        model_flash = genai.GenerativeModel(model_name="models/gemini-2.0-flash")
+        analysis_result = ""
+        additional_text = ""
+
+        print(f"[{os.path.basename(video_path)}] Generating content (Flash 2.0)...")
+        response = model_flash.generate_content([prompt, video_file],
+                                                request_options={"timeout": 600})
+        analysis_result = response.text
+        print(f"[{os.path.basename(video_path)}] Gemini Flash 2.0 response received.")
+
+        now = datetime.datetime.now()
+        if ("Отакої!" in analysis_result) and (9 <= now.hour <= 15):
+            model_pro = genai.GenerativeModel(model_name="models/gemini-2.5-pro-exp-03-25")
+            print(f"[{os.path.basename(video_path)}] Trying Gemini 2.5 Pro...")
+            try:
+                response_new = model_pro.generate_content([prompt, video_file],
+                                                          request_options={"timeout": 600})
+                print(f"[{os.path.basename(video_path)}] Gemini Pro 2.5 response received.")
+                additional_text = "\n_Gemini 2.5:_ " + response_new.text + "\n" + USERNAME
+            except Exception as e_pro:
+                print(f"[{os.path.basename(video_path)}] Error in Gemini 2.5 Pro: {e_pro}")
+                additional_text = "\n_Gemini 2.5:_ Failed.\n" + USERNAME
+
+        return timestamp + analysis_result + additional_text
+
+    except Exception as e_analysis:
+        print(f"[{os.path.basename(video_path)}] Video analysis failed: {e_analysis}")
         return timestamp + "Video analysis failed."
 
-    print(response.text)
-    
-    additional_text = ""
-    now = datetime.datetime.now()
-    if ("Отакої!" in response.text) and (9 <= now.hour <= 15):
-        model = genai.GenerativeModel(model_name="models/gemini-2.5-pro-exp-03-25")
-        print("Trying Gemini 2.5 Pro for better results.")
+    finally:
+        if video_file and hasattr(video_file, 'name'):
+            try:
+                print(f"[{os.path.basename(video_path)}] Deleting Gemini file {video_file.name}...")
+                genai.delete_file(video_file.name)
+                print(f"[{os.path.basename(video_path)}] Gemini file deleted.")
+            except Exception as del_e:
+                print(f"[{os.path.basename(video_path)}] Failed to delete Gemini file {video_file.name}: {del_e}")
+
+# --- FileHandler (uses executor) ---
+class FileHandler(FileSystemEventHandler):
+    def __init__(self, loop, app):
+        self.loop = loop
+        self.app = app
+
+    def on_created(self, event):
+        coro = self.handle_event(event)
+        asyncio.run_coroutine_threadsafe(coro, self.loop)
+
+    async def handle_event(self, event):
+        if not event.src_path.endswith('.mp4'):
+            return
+
+        file_path = event.src_path
+        file_basename = os.path.basename(file_path)
+        print(f"[{file_basename}] New file detected: {file_path}")
+
+        await asyncio.sleep(randint(10, 15))
+        print(f"[{file_basename}] Finished waiting, starting analysis via executor...")
+
         try:
-            response_new = model.generate_content([prompt, video_file],
-                                                request_options={"timeout": 600})
-            print(response_new.text)
-            additional_text = "\n_Gemini 2.5:_ " + response_new.text + "\n" + USERNAME
+            current_loop = asyncio.get_running_loop()
+            video_response = await current_loop.run_in_executor(
+                executor, analyze_video, file_path
+            )
+            print(f"[{file_basename}] Analysis complete.")
         except Exception as e:
-            print(f"Error in Gemini 2.5 Pro: {e}")
-            additional_text = "\n_Gemini 2.5:_ Failed.\n" + USERNAME
+            print(f"[{file_basename}] Error running analyze_video in executor: {e}")
+            video_response = f"_{file_basename[:6]}:_ Failed to analyze video due to system error."
 
-    try:
-        genai.delete_file(video_file.name)
-    except: 
-        pass
-    return timestamp + response.text + additional_text
+        try:
+            if False: # Original logic for direct video send
+                print(f"[{file_basename}] Sending video to Telegram...")
+                try:
+                    with open(file_path, 'rb') as video_file:
+                        await self.app.bot.send_video(
+                            chat_id=CHAT_ID, video=video_file, caption=video_response, parse_mode='Markdown'
+                        )
+                except FileNotFoundError:
+                    print(f"[{file_basename}] File not found when trying to send video: {file_path}")
+                except Exception as e:
+                    print(f"[{file_basename}] Failed to send video to Telegram: {e}")
+            else:
+                print(f"[{file_basename}] Sending message with button to Telegram...")
+                try:
+                    safe_video_folder = VIDEO_FOLDER if VIDEO_FOLDER.endswith(os.path.sep) else VIDEO_FOLDER + os.path.sep
+                    if file_path.startswith(safe_video_folder):
+                         callback_file = file_path[len(safe_video_folder):]
+                    else:
+                         print(f"[{file_basename}] WARNING: File path does not start with VIDEO_FOLDER.")
+                         callback_file = file_basename
 
-# Callback handler for the button click
+                    keyboard = [[InlineKeyboardButton("Глянути", callback_data=callback_file)]]
+                    reply_markup = InlineKeyboardMarkup(keyboard)
+
+                    await asyncio.sleep(randint(0, 5))
+
+                    await self.app.bot.send_message(
+                        chat_id=CHAT_ID, text=video_response, reply_markup=reply_markup, parse_mode='Markdown'
+                    )
+                except Exception as e:
+                    print(f"[{file_basename}] Failed to send message with button to Telegram: {e}")
+
+        except Exception as e:
+            print(f"[{file_basename}] Error during Telegram sending block: {e}")
+        finally:
+             print(f"[{file_basename}] Telegram interaction finished.")
+
+
+# --- Callback Handler ---
 async def button_callback(update, context):
     query = update.callback_query
-    await query.answer()  # Acknowledge the callback (await is required)
+    await query.answer()
 
-    # Get the callback data and map it to the file path
     callback_file = query.data
-    print(f"Callback data received: {callback_file}")  # Debug print
-    file_path = VIDEO_FOLDER + callback_file
+    file_path = os.path.join(VIDEO_FOLDER, callback_file)
+    file_basename = os.path.basename(file_path)
 
-    if not file_path:
-        print(f"Invalid callback data: {file_path}")
+    print(f"[{file_basename}] Button callback received for: {callback_file}")
+
+    if not os.path.exists(file_path):
+        print(f"[{file_basename}] Video file not found for callback: {file_path}")
+        try:
+            await query.edit_message_text(text=f"{query.message.text}\n\n_Відео файл не знайдено._")
+        except Exception as edit_e:
+            print(f"[{file_basename}] Error editing message for not found file: {edit_e}")
         return
 
-    print(f"Button clicked, sending video: {file_path}")
-
+    print(f"[{file_basename}] Sending video from callback...")
     try:
         with open(file_path, 'rb') as video_file:
-            await context.bot.send_video(  # Await the async method
-                chat_id=query.message.chat_id,
-                video=video_file,
-                parse_mode='Markdown',
-                caption="Осьо відео",
-                reply_to_message_id=query.message.message_id  # Reply to the message with the button
+            await context.bot.send_video(
+                chat_id=query.message.chat_id, video=video_file, parse_mode='Markdown',
+                caption="Осьо відео", reply_to_message_id=query.message.message_id
             )
+        print(f"[{file_basename}] Video sent successfully from callback.")
+    except FileNotFoundError:
+         print(f"[{file_basename}] Video file disappeared before sending from callback: {file_path}")
+         try: await query.edit_message_text(text=f"{query.message.text}\n\n_Помилка: Відео файл зник._")
+         except Exception: pass
     except Exception as e:
-        print(f"Failed to send video: {e}")
+        print(f"[{file_basename}] Failed to send video from callback: {e}")
+        try: await query.edit_message_text(text=f"{query.message.text}\n\n_Помилка відправки відео._")
+        except Exception: pass
 
-# Add the callback handler to the application
+# Add the callback handler
 application.add_handler(CallbackQueryHandler(button_callback))
 
-async def run_telegram_bot():
-    """Run the Telegram bot."""
-    print("Starting Telegram bot...")
-    await application.initialize()  # Initialize the application
-    await application.start()       # Start the application
-    await application.updater.start_polling()  # Start polling for updates
-    #await application.stop()        # Stop the application when done
 
-async def run_file_watcher():
-    """Run the file-watching logic."""
-    print("Watching for new files...")
-    loop = asyncio.get_event_loop()  # Get the main asyncio event loop
-    event_handler = FileHandler(loop)  # Pass the loop to the handler
-    observer = Observer()
-    observer.schedule(event_handler, path=VIDEO_FOLDER, recursive=True)
-    observer.start()
+# --- Main Execution and Shutdown Logic ---
 
+# FIX: Corrected shutdown logic inside finally block
+async def run_telegram_bot(stop_event):
+    """Run the Telegram bot until stop_event is set."""
+    print("Starting Telegram bot polling...")
     try:
-        while True:
-            await asyncio.sleep(1)  # Keep the loop running
-    except KeyboardInterrupt:
-        observer.stop()
-    observer.join()
+        await application.initialize()
+        await application.start()
+        await application.updater.start_polling(poll_interval=1.0, timeout=20)
+        print("Telegram bot started.")
+        await stop_event.wait()
+    except asyncio.CancelledError:
+        print("Telegram bot task cancelled.")
+    except Exception as e:
+        print(f"Error in Telegram bot task: {e}")
+        stop_event.set() # Signal shutdown on error
+    finally:
+        print("Stopping Telegram bot...")
+        # Stop the updater first if it exists
+        if application.updater:
+            await application.updater.stop() # No .is_running check needed
+        # Then stop the application itself if it's running
+        if application.running:
+            await application.stop()
+        print("Telegram bot stopped.")
+
+# FIX: Changed recursive back to True
+async def run_file_watcher(stop_event):
+    """Run the file-watching logic until stop_event is set."""
+    print("Starting file watcher...")
+    observer = None
+    try:
+        loop = asyncio.get_running_loop()
+        event_handler = FileHandler(loop, application)
+        observer = Observer()
+        if not os.path.isdir(VIDEO_FOLDER):
+            print(f"ERROR: VIDEO_FOLDER '{VIDEO_FOLDER}' does not exist or is not a directory.")
+            stop_event.set()
+            return
+
+        observer.schedule(event_handler, path=VIDEO_FOLDER, recursive=True) # WATCH RECURSIVELY
+        observer.start()
+        print(f"Watching for new files in: {VIDEO_FOLDER} (Recursive Mode)")
+
+        while not stop_event.is_set() and observer.is_alive():
+            await asyncio.sleep(1)
+
+    except asyncio.CancelledError:
+        print("File watcher task cancelled.")
+    except Exception as e:
+        print(f"Error in File watcher task: {e}")
+        stop_event.set() # Signal shutdown on error
+    finally:
+        print("Stopping file watcher...")
+        if observer and observer.is_alive():
+            observer.stop()
+            observer.join(timeout=5.0)
+            if observer.is_alive():
+                 print("Warning: Observer thread did not stop cleanly after 5 seconds.")
+        print("File watcher stopped.")
 
 async def main():
-    """Run both the Telegram bot and file watcher concurrently."""
-    await asyncio.gather(
-        run_telegram_bot(),
-        run_file_watcher()
-    )
+    """Run bot and watcher, handle graceful shutdown."""
+    stop_event = asyncio.Event()
+    telegram_task = asyncio.create_task(run_telegram_bot(stop_event), name="TelegramBotTask")
+    watcher_task = asyncio.create_task(run_file_watcher(stop_event), name="FileWatcherTask")
 
-# Run the main function using the existing event loop
+    tasks = {telegram_task, watcher_task}
+    print("Application started. Press Ctrl+C to exit.")
+
+    try:
+        done, pending = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
+        if pending:
+            print("A task finished unexpectedly. Initiating shutdown...")
+            stop_event.set()
+            await asyncio.wait(pending) # Wait for the remaining task(s)
+
+    except KeyboardInterrupt:
+        print("\nCtrl+C detected. Initiating graceful shutdown...")
+        stop_event.set()
+
+    except asyncio.CancelledError:
+        print("Main task cancelled.")
+        stop_event.set()
+
+    finally:
+        print("Shutdown sequence started.")
+        if not stop_event.is_set():
+            stop_event.set()
+
+        print("Waiting for tasks to finish...")
+        await asyncio.gather(*tasks, return_exceptions=True)
+        print("All application tasks have finished.")
+
+        print("Shutting down thread pool executor (allowing current analysis to finish)...")
+        executor.shutdown(wait=True)
+        print("Executor shut down.")
+        print("Main application finished cleanly.")
+
+
+# Run the main function
 if __name__ == "__main__":
-    asyncio.run(main())
+    try:
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        # We expect KeyboardInterrupt to be handled gracefully inside main()
+        # This outer catch simply prevents the final traceback from asyncio.run()
+        print("\nExiting application.") # Or just 'pass' if you don't want any extra message
