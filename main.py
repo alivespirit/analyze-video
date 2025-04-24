@@ -23,7 +23,7 @@ log_formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s', d
 log_file = LOG_PATH + 'video_processor.log'
 
 # File Handler
-file_handler = logging.FileHandler(log_file, mode='a') # Append mode
+file_handler = logging.FileHandler(log_file, mode='a', encoding='utf8') # Append mode
 file_handler.setFormatter(log_formatter)
 file_handler.setLevel(logging.INFO) # Log INFO level and above to file
 
