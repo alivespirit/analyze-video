@@ -46,6 +46,7 @@ This project is a Python-based application that monitors a folder for new video 
    TELEGRAM_CHAT_ID=your_telegram_chat_id
    TELEGRAM_NOTIFY_USERNAME=your_telegram_username
    VIDEO_FOLDER=/path/to/your/video/folder
+   LOG_PATH=logs/
    ```
 
 ## Usage
