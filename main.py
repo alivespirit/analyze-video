@@ -190,7 +190,7 @@ async def button_callback(update, context):
     if not os.path.exists(file_path):
         print(f"[{file_basename}] Video file not found for callback: {file_path}")
         try:
-            await query.edit_message_text(text=f"{query.message.text}\n\n_Відео файл не знайдено._")
+            await query.edit_message_text(text=f"{query.message.text}\n\n_Відео файл не знайдено._", parse_mode='Markdown')
         except Exception as edit_e:
             print(f"[{file_basename}] Error editing message for not found file: {edit_e}")
         return
@@ -205,11 +205,11 @@ async def button_callback(update, context):
         print(f"[{file_basename}] Video sent successfully from callback.")
     except FileNotFoundError:
          print(f"[{file_basename}] Video file disappeared before sending from callback: {file_path}")
-         try: await query.edit_message_text(text=f"{query.message.text}\n\n_Помилка: Відео файл зник._")
+         try: await query.edit_message_text(text=f"{query.message.text}\n\n_Помилка: Відео файл зник._", parse_mode='Markdown')
          except Exception: pass
     except Exception as e:
         print(f"[{file_basename}] Failed to send video from callback: {e}")
-        try: await query.edit_message_text(text=f"{query.message.text}\n\n_Помилка відправки відео._")
+        try: await query.edit_message_text(text=f"{query.message.text}\n\n_Помилка відправки відео._", parse_mode='Markdown')
         except Exception: pass
 
 # Add the callback handler
