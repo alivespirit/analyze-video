@@ -253,7 +253,7 @@ class FileHandler(FileSystemEventHandler):
              self.logger.info(f"[{file_basename}] Telegram interaction finished.")
 
 
-    async def wait_for_file_stable(self, file_path, file_basename, wait_seconds=3, checks=3):
+    async def wait_for_file_stable(self, file_path, file_basename, wait_seconds=2, checks=2):
         """Waits until the file size hasn't changed for a certain period."""
         self.logger.debug(f"[{file_basename}] Checking file stability for: {file_path}")
         last_size = -1
