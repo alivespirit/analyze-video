@@ -125,15 +125,28 @@ def analyze_video(video_path):
         Only return the output and nothing else. Respond in Ukrainian.
         """
 
-        model_flash = genai.GenerativeModel(model_name="models/gemini-2.0-flash") # Adjusted model name
+        model_flash = genai.GenerativeModel(model_name="models/gemini-2.5-flash-preview-04-17")
         analysis_result = ""
         additional_text = ""
 
-        logger.info(f"[{file_basename}] Generating content (Flash)...") # Removed version from log
-        response = model_flash.generate_content([prompt, video_file],
-                                                request_options={"timeout": 600})
-        analysis_result = response.text
-        logger.info(f"[{file_basename}] Gemini Flash response received.")
+        logger.info(f"[{file_basename}] Generating content (2.5 Flash)...")
+        try:
+            response = model_flash.generate_content([prompt, video_file],
+                      request_options={"timeout": 600})
+            analysis_result = response.text
+            logger.info(f"[{file_basename}] Gemini 2.5 Flash response received.")
+        except Exception as e_flash:
+            logger.warning(f"[{file_basename}] Gemini 2.5 Flash failed: {e_flash}. Falling back to Gemini 2.0 Flash.", exc_info=True)
+            try:
+                model_flash_2_0 = genai.GenerativeModel(model_name="models/gemini-2.0-flash")
+                response = model_flash_2_0.generate_content([prompt, video_file],
+                              request_options={"timeout": 600})
+                logger.info(f"[{file_basename}] Gemini 2.0 Flash response received.")
+                analysis_result = "_[2.0]_ " + response.text
+            except Exception as e_flash_2_0:
+                logger.error(f"[{file_basename}] Gemini 2.0 Flash also failed: {e_flash_2_0}", exc_info=True)
+                raise  # Re-raise the exception to handle it in the outer scope
+
         logger.info(f"[{file_basename}] {analysis_result}")
 
         now = datetime.datetime.now()
@@ -146,11 +159,11 @@ def analyze_video(video_path):
                                                           request_options={"timeout": 600})
                 logger.info(f"[{file_basename}] Gemini Pro 2.5 response received.")
                 logger.info(f"[{file_basename}] {response_new.text}")
-                additional_text = "\n_Gemini 2.5:_ " + response_new.text + "\n" + USERNAME
+                additional_text = "\n_Gemini 2.5 Pro:_ " + response_new.text + "\n" + USERNAME
             except Exception as e_pro:
                 # Log as warning since Flash result is still available
                 logger.warning(f"[{file_basename}] Error in Gemini 2.5 Pro: {e_pro}", exc_info=True)
-                additional_text = "\n_Gemini 2.5:_ Failed.\n" + USERNAME
+                additional_text = "\n_Gemini 2.5 Pro:_ Failed.\n" + USERNAME
 
         return timestamp + analysis_result + additional_text
 
@@ -209,8 +222,6 @@ class FileHandler(FileSystemEventHandler):
             self.logger.error(f"[{file_basename}] Error waiting for file stability: {e_wait}", exc_info=True)
             return # Don't proceed if stability check fails
 
-        self.logger.info(f"[{file_basename}] File stable, starting analysis via executor...")
-
         try:
             current_loop = asyncio.get_running_loop()
             # Use the globally configured logger within analyze_video
@@ -238,8 +249,6 @@ class FileHandler(FileSystemEventHandler):
 
             keyboard = [[InlineKeyboardButton("Глянути", callback_data=callback_file)]]
             reply_markup = InlineKeyboardMarkup(keyboard)
-
-            #await asyncio.sleep(randint(0, 5)) # Keep random delay?
 
             await self.app.bot.send_message(
                 chat_id=CHAT_ID, text=video_response, reply_markup=reply_markup, parse_mode='Markdown'
