@@ -121,10 +121,10 @@ def analyze_video(video_path):
         prompt = """This video is from the surveillance camera, located on the second floor above the entrance to the building.
         The camera is facing the street. Recording is triggered by motion. Audio is unrelated and should be ignored.
         Analyze the video. Focus on the foreground with a fence and a gate, and a sidewalk. Take note of vehicles, people, and pets.
-        Describe only the main action in the video in 1 sentence in a non-official manner. If there are multiple actions, briefly describe all of them.
-        If any dog is present in the video, describe it, include keyword "*Отакої!*" and state confidence level.
-        If any person is going through the gate, include keyword "*Отакої!*" and state confidence level.
-        If someone is doing something to the parked red Tesla (not just passing by), describe what they are doing and include keyword "Хм...".
+        Describe only the main action in the video in 1 sentence in a casual manner. If there are multiple actions, briefly describe all of them.
+        If no significant action is present, state "Ніц цікавого.".
+        If any dog is present in the video, or any person is going through the gate - include keyword "*Отакої!*".
+        If someone is doing something to the parked red Tesla (not just passing by) - describe what they are doing and include keyword "Хм...".
         Only return the output and nothing else. Respond in Ukrainian.
         """
 
