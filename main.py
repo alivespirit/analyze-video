@@ -73,6 +73,8 @@ try:
         .get_updates_http_version("1.1") \
         .connection_pool_size(32) \
         .pool_timeout(60) \
+        .read_timeout(60) \
+        .write_timeout(60) \
         .build()
     logger.info("Telegram Application built successfully.")
 except Exception as e:
@@ -116,11 +118,12 @@ def analyze_video(video_path):
             logger.error(f"[{file_basename}] Video processing failed state.")
             return timestamp + "Video processing failed."
 
-        prompt = """This video is from a surveillance camera, located on the second floor above the entrance to the house.
-        The camera is facing the street. Camera is set to record only when there is motion. Audio is unrelated and should be ignored.
-        Describe in one sentence what motion triggered recording. Don't mention that this triggered recording, just describe the action.
-        If any dog is present in the video, describe it and the person, include keyword "*Отакої!*" and state confidence level.
-        If a dog is not present in the video, ensure that the phrase "*Отакої!*" is NOT included in the response.
+        prompt = """This video is from the surveillance camera, located on the second floor above the entrance to the building.
+        The camera is facing the street. Recording is triggered by motion. Audio is unrelated and should be ignored.
+        Analyze the video. Focus on the foreground with a fence and a gate, and a sidewalk. Take note of vehicles, people, and pets.
+        Describe the main action in the video in 1-2 sentences. If there are multiple actions, briefly describe all of them.
+        If any dog is present in the video, describe it, include keyword "*Отакої!*" and state confidence level.
+        If any person is going through the gate, include keyword "*Отакої!*" and state confidence level.
         If someone is doing something to the parked red Tesla (not just passing by), describe what they are doing and include keyword "Хм...".
         Only return the output and nothing else. Respond in Ukrainian.
         """
