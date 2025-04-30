@@ -162,11 +162,11 @@ def analyze_video(video_path):
                                                           request_options={"timeout": 600})
                 logger.info(f"[{file_basename}] Gemini Pro 2.5 response received.")
                 logger.info(f"[{file_basename}] {response_new.text}")
-                additional_text = "\n_Gemini 2.5 Pro:_ " + response_new.text + "\n" + USERNAME
+                additional_text = "\n_[2.5 Pro]_ " + response_new.text + "\n" + USERNAME
             except Exception as e_pro:
                 # Log as warning since Flash result is still available
                 logger.warning(f"[{file_basename}] Error in Gemini 2.5 Pro: {e_pro}", exc_info=True)
-                additional_text = "\n_Gemini 2.5 Pro:_ Failed.\n" + USERNAME
+                additional_text = "\n_[2.5 Pro]_ Failed.\n" + USERNAME
 
         return timestamp + analysis_result + additional_text
 
