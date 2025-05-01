@@ -118,15 +118,17 @@ def analyze_video(video_path):
             logger.error(f"[{file_basename}] Video processing failed state.")
             return timestamp + "Video processing failed."
 
-        prompt = """This video is from the surveillance camera, located on the second floor above the entrance to the building.
-        The camera is facing the street. Recording is triggered by motion. Audio is unrelated and should be ignored.
-        Analyze the video. Focus on the foreground with a fence and a gate, and a sidewalk. Take note of vehicles, people, and pets.
-        Describe only the main action in the video in 1 sentence in a casual manner. If there are multiple actions, briefly describe all of them.
-        If no significant action is present, state "Ніц цікавого.".
-        If any dog is present in the video, or any person is going through the gate - include keyword "*Отакої!*".
-        If someone is doing something to the parked red Tesla (not just passing by) - describe what they are doing and include keyword "Хм...".
-        Only return the output and nothing else. Respond in Ukrainian.
-        """
+        prompt_file_path = os.path.join(os.path.dirname(__file__), "prompt.txt")
+        try:
+            with open(prompt_file_path, "r", encoding="utf-8") as prompt_file:
+                prompt = prompt_file.read().strip()
+            logger.debug(f"[{file_basename}] Prompt loaded successfully from {prompt_file_path}.")
+        except FileNotFoundError:
+            logger.error(f"[{file_basename}] Prompt file not found: {prompt_file_path}")
+            return timestamp + "Prompt file not found."
+        except Exception as e:
+            logger.error(f"[{file_basename}] Error reading prompt file: {e}", exc_info=True)
+            return timestamp + "Error reading prompt file."
 
         model_flash = genai.GenerativeModel(model_name="models/gemini-2.5-flash-preview-04-17")
         analysis_result = ""
@@ -154,7 +156,7 @@ def analyze_video(video_path):
 
         now = datetime.datetime.now()
         # Consider Gemini Pro 2.5 experimental, log potential issues
-        if ("Отакої!" in analysis_result) and (9 <= now.hour <= 15):
+        if ("Отакої!" in analysis_result) and (9 <= now.hour <= 13):
             model_pro = genai.GenerativeModel(model_name="models/gemini-2.5-pro-exp-03-25")
             logger.info(f"[{file_basename}] Trying Gemini 2.5 Pro...")
             try:
