@@ -109,13 +109,17 @@ def analyze_video(video_path):
     logger.info(f"[{file_basename}] Completed upload: {video_file.uri}")
 
     try:
+        start_time = time.time()
         while video_file.state.name == "PROCESSING":
+            if time.time() - start_time > 600:  # 600 seconds = 10 minutes
+                logger.error(f"[{file_basename}] Timeout reached while waiting for Gemini processing.")
+                return timestamp + "Video processing timeout."
             logger.info(f"[{file_basename}] Waiting for Gemini processing...")
             time.sleep(10)
-            video_file = genai.get_file(video_file.name) # Refresh state
+            video_file = genai.get_file(video_file.name)  # Refresh state
 
         if video_file.state.name == "FAILED":
-            logger.error(f"[{file_basename}] Video processing failed state.")
+            logger.error(f"[{file_basename}] Video processing failed.")
             return timestamp + "Video processing failed."
 
         prompt_file_path = os.path.join(os.path.dirname(__file__), "prompt.txt")
@@ -162,7 +166,7 @@ def analyze_video(video_path):
             try:
                 response_new = model_pro.generate_content([prompt, video_file],
                                                           request_options={"timeout": 600})
-                logger.info(f"[{file_basename}] Gemini Pro 2.5 response received.")
+                logger.info(f"[{file_basename}] Gemini 2.5 Pro response received.")
                 logger.info(f"[{file_basename}] {response_new.text}")
                 additional_text = "\n_[2.5 Pro]_ " + response_new.text + "\n" + USERNAME
             except Exception as e_pro:
