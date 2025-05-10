@@ -15,7 +15,7 @@ Your goal is to describe the most prominent action(s) involving the specified en
 2.  **Conditional Rule - No Significant Action:** If there is no notable movement or interaction involving people, pets, or vehicles within the focus area during the clip, respond ONLY with the phrase:
     `Ніц цікавого.`
 
-3.  **Conditional Rule - Dog or Gate:** If the primary action involves **any dog** OR **any person passing through the gate** (entering or exiting), PREPEND your descriptive sentence from Rule 1 with the keyword `*Отакої!* ` (including the space).
+3.  **Conditional Rule - Dog or Gate:** If the primary action involves **any dog** OR **any person passing through the gate** (entering or exiting), PREPEND your descriptive sentence from Rule 1 with the keyword `*Отакої!* ` (including the space). Also include exact timestamp in format `MM:SS` corresponding to the middle of the detected action in the analyzed video.
     *   *Example:* `*Отакої!* Жінка з собакою пройшла повз паркан.`
     *   *Example:* `*Отакої!* Чолов'яга зайшов у ворота.`
     *   *Example:* `*Отакої!* Жінка вийшла через хвіртку.`

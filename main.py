@@ -5,6 +5,8 @@ import asyncio
 from random import randint
 import concurrent.futures # Needed for executor
 import logging # <<< IMPORT LOGGING
+import cv2
+import re
 
 from dotenv import load_dotenv
 from telegram import Bot, InlineKeyboardMarkup, InlineKeyboardButton
@@ -20,7 +22,7 @@ LOG_PATH = os.getenv("LOG_PATH", default="")
 
 # --- Logging Setup ---
 log_formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s', datefmt='%Y-%m-%d %H:%M:%S')
-log_file = LOG_PATH + 'video_processor.log'
+log_file = os.path.join(LOG_PATH, f"video_processor_{datetime.datetime.now().strftime('%Y-%m-%d')}.log")
 
 # File Handler
 file_handler = logging.FileHandler(log_file, mode='a', encoding='utf8') # Append mode
@@ -191,6 +193,46 @@ def analyze_video(video_path):
                 logger.warning(f"[{file_basename}] Failed to delete Gemini file {video_file.name}: {del_e}", exc_info=True)
                 pass
 
+def extract_frame(video_path, timestamp):
+    """
+    Extracts a frame from the video at the specified timestamp.
+    :param video_path: Path to the video file.
+    :param timestamp: Timestamp in the format MM:SS.
+    :return: The extracted frame as an image file path.
+    """
+    try:
+        # Convert MM:SS to seconds
+        minutes, seconds = map(int, timestamp.split(":"))
+        target_time = minutes * 60 + seconds
+
+        # Open the video file
+        cap = cv2.VideoCapture(video_path)
+        if not cap.isOpened():
+            raise FileNotFoundError(f"Cannot open video file: {video_path}")
+
+        # Get the frame rate of the video
+        fps = cap.get(cv2.CAP_PROP_FPS)
+        if fps == 0:
+            raise ValueError("Cannot determine FPS of the video.")
+
+        # Calculate the frame number to extract
+        frame_number = int(target_time * fps)
+        cap.set(cv2.CAP_PROP_POS_FRAMES, frame_number)
+
+        # Read the frame
+        success, frame = cap.read()
+        if not success:
+            raise ValueError(f"Failed to read frame at timestamp {timestamp}.")
+
+        # Save the frame as an image
+        output_image_path = f"{os.path.splitext(video_path)[0]}_{timestamp.replace(':', '-')}.jpg"
+        cv2.imwrite(output_image_path, frame)
+        cap.release()
+        return output_image_path
+    except Exception as e:
+        logger.error(f"Error extracting frame from video: {e}", exc_info=True)
+        return None
+
 # --- FileHandler (uses executor) ---
 class FileHandler(FileSystemEventHandler):
     def __init__(self, loop, app):
@@ -244,7 +286,6 @@ class FileHandler(FileSystemEventHandler):
 
         # --- Telegram Sending Logic ---
         try:
-            self.logger.info(f"[{file_basename}] Sending message with button to Telegram...")
             # Ensure VIDEO_FOLDER ends with a separator for clean path joining/stripping
             safe_video_folder = os.path.join(VIDEO_FOLDER, '') # Adds separator if missing
 
@@ -259,10 +300,47 @@ class FileHandler(FileSystemEventHandler):
             keyboard = [[InlineKeyboardButton("Глянути", callback_data=callback_file)]]
             reply_markup = InlineKeyboardMarkup(keyboard)
 
-            await self.app.bot.send_message(
-                chat_id=CHAT_ID, text=video_response, reply_markup=reply_markup, parse_mode='Markdown'
-            )
-            self.logger.info(f"[{file_basename}] Message with button sent successfully.")
+            send_plain_message = True
+            if "Отакої!" in video_response:
+                # Extract timestamp from video_response
+                match = re.search(r"\b(\d{2}:\d{2})\b", video_response)
+                if match:
+                    timestamp = match.group(1)
+                    self.logger.info(f"[{file_basename}] Extracting frame at timestamp {timestamp}...")
+                    frame_path = extract_frame(file_path, timestamp)
+                    if frame_path:
+                        self.logger.info(f"[{file_basename}] Frame extracted successfully: {frame_path}")
+                        self.logger.info(f"[{file_basename}] Sending photo with button to Telegram...")
+                        try:
+                            with open(frame_path, 'rb') as frame_file:
+                                await self.app.bot.send_photo(
+                                    chat_id=CHAT_ID,
+                                    photo=frame_file,
+                                    caption=video_response,
+                                    reply_markup=reply_markup,
+                                    parse_mode='Markdown'
+                                )
+                            self.logger.info(f"[{file_basename}] Photo with button sent successfully.")
+                            send_plain_message = False
+                        except:
+                            self.logger.error(f"[{file_basename}] Error sending photo: {e}", exc_info=True)
+                        # Delete the frame file after sending
+                        os.remove(frame_path)
+                        self.logger.info(f"[{file_basename}] Frame file deleted after sending.")
+                    else:
+                        self.logger.warning(f"[{file_basename}] Failed to extract frame at timestamp {timestamp}. Sending message instead.")
+                else:
+                    self.logger.warning(f"[{file_basename}] No valid timestamp found in video_response. Sending message instead.")
+            if send_plain_message:
+                # Send a message with a button
+                self.logger.info(f"[{file_basename}] Sending message with button to Telegram...")
+                await self.app.bot.send_message(
+                    chat_id=CHAT_ID,
+                    text=video_response,
+                    reply_markup=reply_markup,
+                    parse_mode='Markdown'
+                )
+                self.logger.info(f"[{file_basename}] Message with button sent successfully.")
 
         except Exception as e:
             # Log the specific error during Telegram sending
