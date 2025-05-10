@@ -10,7 +10,9 @@ import re
 
 from dotenv import load_dotenv
 from telegram import Bot, InlineKeyboardMarkup, InlineKeyboardButton
+import telegram.error
 from telegram.ext import Application, CallbackQueryHandler
+from telegram.helpers import escape_markdown
 import google.generativeai as genai
 
 from watchdog.events import FileSystemEventHandler
@@ -303,9 +305,9 @@ class FileHandler(FileSystemEventHandler):
             send_plain_message = True
             if "Отакої!" in video_response:
                 # Extract timestamp from video_response
-                match = re.search(r"\b(\d{2}:\d{2})\b", video_response)
-                if match:
-                    timestamp = match.group(1)
+                matches = re.findall(r"\b(\d{2}:\d{2})\b", video_response)
+                if matches:
+                    timestamp = matches[-1]  # Use the last timestamp
                     self.logger.info(f"[{file_basename}] Extracting frame at timestamp {timestamp}...")
                     frame_path = extract_frame(file_path, timestamp)
                     if frame_path:
@@ -316,17 +318,35 @@ class FileHandler(FileSystemEventHandler):
                                 await self.app.bot.send_photo(
                                     chat_id=CHAT_ID,
                                     photo=frame_file,
-                                    caption=video_response,
+                                    caption=video_response,  # Initially send without escaping
                                     reply_markup=reply_markup,
                                     parse_mode='Markdown'
                                 )
                             self.logger.info(f"[{file_basename}] Photo with button sent successfully.")
                             send_plain_message = False
-                        except:
+                        except telegram.error.BadRequest as bad_request_error:
+                            # Retry with escaped Markdown if BadRequest occurs
+                            self.logger.warning(f"[{file_basename}] BadRequest error: {bad_request_error}. Retrying with escaped Markdown.")
+                            try:
+                                with open(frame_path, 'rb') as frame_file:
+                                    await self.app.bot.send_photo(
+                                        chat_id=CHAT_ID,
+                                        photo=frame_file,
+                                        caption=escape_markdown(video_response, version=1),  # Escape Markdown entities
+                                        reply_markup=reply_markup,
+                                        parse_mode='Markdown'
+                                    )
+                                self.logger.info(f"[{file_basename}] Photo with button sent successfully after escaping Markdown.")
+                                send_plain_message = False
+                            except Exception as retry_error:
+                                self.logger.error(f"[{file_basename}] Failed to send photo after escaping Markdown: {retry_error}", exc_info=True)
+                        except Exception as e:
                             self.logger.error(f"[{file_basename}] Error sending photo: {e}", exc_info=True)
-                        # Delete the frame file after sending
-                        os.remove(frame_path)
-                        self.logger.info(f"[{file_basename}] Frame file deleted after sending.")
+                        finally:
+                            # Delete the frame file after sending or if an error occurs
+                            if os.path.exists(frame_path):
+                                os.remove(frame_path)
+                                self.logger.info(f"[{file_basename}] Frame file deleted after sending.")
                     else:
                         self.logger.warning(f"[{file_basename}] Failed to extract frame at timestamp {timestamp}. Sending message instead.")
                 else:
@@ -334,13 +354,29 @@ class FileHandler(FileSystemEventHandler):
             if send_plain_message:
                 # Send a message with a button
                 self.logger.info(f"[{file_basename}] Sending message with button to Telegram...")
-                await self.app.bot.send_message(
-                    chat_id=CHAT_ID,
-                    text=video_response,
-                    reply_markup=reply_markup,
-                    parse_mode='Markdown'
-                )
-                self.logger.info(f"[{file_basename}] Message with button sent successfully.")
+                try:
+                    await self.app.bot.send_message(
+                        chat_id=CHAT_ID,
+                        text=video_response,  # Initially send without escaping
+                        reply_markup=reply_markup,
+                        parse_mode='Markdown'
+                    )
+                    self.logger.info(f"[{file_basename}] Message with button sent successfully.")
+                except telegram.error.BadRequest as bad_request_error:
+                    # Retry with escaped Markdown if BadRequest occurs
+                    self.logger.warning(f"[{file_basename}] BadRequest error: {bad_request_error}. Retrying with escaped Markdown.")
+                    try:
+                        await self.app.bot.send_message(
+                            chat_id=CHAT_ID,
+                            text=escape_markdown(video_response, version=1),  # Escape Markdown entities
+                            reply_markup=reply_markup,
+                            parse_mode='Markdown'
+                        )
+                        self.logger.info(f"[{file_basename}] Message with button sent successfully after escaping Markdown.")
+                    except Exception as retry_error:
+                        self.logger.error(f"[{file_basename}] Failed to send message after escaping Markdown: {retry_error}", exc_info=True)
+                except Exception as e:
+                    self.logger.error(f"[{file_basename}] Error sending message: {e}", exc_info=True)
 
         except Exception as e:
             # Log the specific error during Telegram sending
