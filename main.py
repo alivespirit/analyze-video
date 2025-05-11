@@ -305,7 +305,7 @@ class FileHandler(FileSystemEventHandler):
             send_plain_message = True
             if "Отакої!" in video_response:
                 # Extract timestamp from video_response
-                matches = re.findall(r"\b(\d{2}:\d{2})\b", video_response)
+                matches = re.findall(r"\s+(\d{2}:\d{2})\s+", video_response) # Find only MM:SS timestamps
                 if matches:
                     timestamp = matches[-1]  # Use the last timestamp
                     self.logger.info(f"[{file_basename}] Extracting frame at timestamp {timestamp}...")
@@ -318,7 +318,7 @@ class FileHandler(FileSystemEventHandler):
                                 await self.app.bot.send_photo(
                                     chat_id=CHAT_ID,
                                     photo=frame_file,
-                                    caption=re.sub(r"( \d{2}:)(\d{2})", r" _@\g<2>s_", video_response),
+                                    caption=re.sub(r"(\s+)(\d{2}:)(\d{2})(\s+)", r"\g<1>_@\g<3>s_\g<4>", video_response), # Remove minutes from timestamp and make seconds italic
                                     reply_markup=reply_markup,
                                     parse_mode='Markdown'
                                 )
@@ -357,7 +357,7 @@ class FileHandler(FileSystemEventHandler):
                 try:
                     await self.app.bot.send_message(
                         chat_id=CHAT_ID,
-                        text=re.sub(r"( \d{2}:)(\d{2})", r" _@\g<2>s_", video_response),
+                        text=re.sub(r"(\s+)(\d{2}:)(\d{2})(\s+)", r"\g<1>_@\g<3>s_\g<4>", video_response), # Remove minutes from timestamp and make seconds italic
                         reply_markup=reply_markup,
                         parse_mode='Markdown'
                     )
