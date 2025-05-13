@@ -6,7 +6,8 @@ This project is a Python-based application that monitors a folder for new video 
 
 - **Folder Monitoring**: Automatically detects new `.mp4` files in a specified folder.
 - **Video Analysis**: Uses Gemini AI to analyze the content of the video and generate a description of the motion detected.
-- **Telegram Integration**: Sends the analysis results to a Telegram chat, either as a message with an inline button or by uploading the video.
+- **Frame Extraction**: Extracts frame at the timestamp specified by Gemini AI showcasing the detected action.
+- **Telegram Integration**: Sends the analysis results to a Telegram chat, optionally including extracted frame, with an inline button to request full video.
 - **Customizable Prompts**: Tailored prompts for specific use cases, such as identifying dogs or suspicious activity near a parked car.
 
 ## Requirements
@@ -19,6 +20,7 @@ This project is a Python-based application that monitors a folder for new video 
   - `python-dotenv`
   - `watchdog`
   - `google-generativeai`
+  - `opencv-python`
 
 ## Installation
 
@@ -70,6 +72,7 @@ This project is a Python-based application that monitors a folder for new video 
     - If the analysis detects specific keywords (e.g., "Отакої!"), it uses a more advanced Gemini model for better results.
 3. **Telegram Notification**: 
     - The script uses the `python-telegram-bot` library to send messages and videos to Telegram.
+    - If the analysis detects specific keywords, it checks response for timestamps, extracts frame at the timestamp, and attaches this frame to the message.
     - Interactive buttons are created using `InlineKeyboardMarkup` and `InlineKeyboardButton`.
 4. **Callback Handling**: 
     - When a button is clicked, the `button_callback` function sends the corresponding video as a reply to the message with the button.
