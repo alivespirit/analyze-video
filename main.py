@@ -14,6 +14,7 @@ import telegram.error
 from telegram.ext import Application, CallbackQueryHandler
 from telegram.helpers import escape_markdown
 import google.generativeai as genai
+from google.api_core.exceptions import ResourceExhausted
 
 from watchdog.events import FileSystemEventHandler
 from watchdog.observers.polling import PollingObserver as Observer
@@ -165,7 +166,7 @@ def analyze_video(video_path):
         now = datetime.datetime.now()
         # Consider Gemini Pro 2.5 experimental, log potential issues
         if ("Отакої!" in analysis_result) and (9 <= now.hour <= 13):
-            model_pro = genai.GenerativeModel(model_name="models/gemini-2.5-pro-exp-03-25")
+            model_pro = genai.GenerativeModel(model_name="models/gemini-2.5-pro-preview-05-06")
             logger.info(f"[{file_basename}] Trying Gemini 2.5 Pro...")
             try:
                 response_new = model_pro.generate_content([prompt, video_file],
@@ -173,6 +174,9 @@ def analyze_video(video_path):
                 logger.info(f"[{file_basename}] Gemini 2.5 Pro response received.")
                 logger.info(f"[{file_basename}] {response_new.text}")
                 additional_text = "\n_[2.5 Pro]_ " + response_new.text + "\n" + USERNAME
+            except ResourceExhausted as quota_exc:
+                logger.warning(f"[{file_basename}] Gemini 2.5 Pro quota exceeded: {quota_exc}")
+                additional_text = "\n_[2.5 Pro]_ Quota exceeded.\n" + USERNAME
             except Exception as e_pro:
                 # Log as warning since Flash result is still available
                 logger.warning(f"[{file_basename}] Error in Gemini 2.5 Pro: {e_pro}", exc_info=True)
