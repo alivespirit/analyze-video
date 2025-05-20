@@ -174,8 +174,8 @@ def analyze_video(video_path):
                 logger.info(f"[{file_basename}] Gemini 2.5 Pro response received.")
                 logger.info(f"[{file_basename}] {response_new.text}")
                 additional_text = "\n_[2.5 Pro]_ " + response_new.text + "\n" + USERNAME
-            except ResourceExhausted as quota_exc:
-                logger.warning(f"[{file_basename}] Gemini 2.5 Pro quota exceeded: {quota_exc}")
+            except ResourceExhausted as e_quota_pro:
+                logger.warning(f"[{file_basename}] Gemini 2.5 Pro API quota exceeded. Message: {str(e_quota_pro).splitlines()[0]}")
                 additional_text = "\n_[2.5 Pro]_ Quota exceeded.\n" + USERNAME
             except Exception as e_pro:
                 # Log as warning since Flash result is still available
