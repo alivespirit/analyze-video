@@ -139,7 +139,7 @@ def analyze_video(video_path):
             logger.error(f"[{file_basename}] Error reading prompt file: {e}", exc_info=True)
             return timestamp + "Error reading prompt file."
 
-        model_flash = genai.GenerativeModel(model_name="models/gemini-2.5-flash-preview-04-17")
+        model_flash = genai.GenerativeModel(model_name="models/gemini-2.5-flash-preview-05-20")
         analysis_result = ""
         additional_text = ""
 
