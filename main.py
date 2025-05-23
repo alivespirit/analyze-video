@@ -349,8 +349,9 @@ class FileHandler(FileSystemEventHandler):
                         finally:
                             # Delete the frame file after sending or if an error occurs
                             if os.path.exists(frame_path):
-                                os.remove(frame_path)
-                                self.logger.info(f"[{file_basename}] Frame file deleted after sending.")
+                              await asyncio.sleep(10)
+                              os.remove(frame_path)
+                              self.logger.info(f"[{file_basename}] Frame file deleted after sending.")
                     else:
                         self.logger.warning(f"[{file_basename}] Failed to extract frame at timestamp {timestamp}. Sending message instead.")
                 else:
