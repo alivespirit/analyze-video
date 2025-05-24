@@ -2,11 +2,11 @@ import os
 import time
 import datetime
 import asyncio
-from random import randint
 import concurrent.futures
 import logging
 import cv2
 import re
+import sys
 
 from dotenv import load_dotenv
 from telegram import Bot, InlineKeyboardMarkup, InlineKeyboardButton
@@ -20,6 +20,28 @@ from watchdog.events import FileSystemEventHandler
 from watchdog.observers.polling import PollingObserver as Observer
 
 from logging.handlers import TimedRotatingFileHandler
+
+RESTART_REQUESTED = False
+MAIN_SCRIPT_PATH = os.path.abspath(__file__)
+
+class MainScriptChangeHandler(FileSystemEventHandler):
+    def __init__(self, stop_event_ref, script_path_ref):
+        self.stop_event = stop_event_ref
+        self.script_path = script_path_ref
+        self.triggered_restart = False # Ensure we only trigger once
+
+    def on_modified(self, event):
+        if self.triggered_restart:
+            return
+
+        # Watchdog might trigger for .pyc or other related files if watching a directory
+        # So explicitly check if the main script itself was modified
+        if os.path.abspath(event.src_path) == self.script_path:
+            logger.info(f"Detected change in {self.script_path}. Initiating graceful restart...")
+            global RESTART_REQUESTED
+            RESTART_REQUESTED = True
+            self.stop_event.set() # Signal all other components to stop
+            self.triggered_restart = True # Prevent further triggers from this handler instance
 
 load_dotenv()  ## load all the environment variables
 
@@ -546,16 +568,61 @@ async def run_file_watcher(stop_event):
 
         logger.info("File watcher stopped.")
 
+async def run_main_script_watcher(stop_event, script_to_watch):
+    """Run a watcher for the main script file."""
+    logger.info(f"Starting self-watcher for script: {script_to_watch}")
+    observer = None
+    try:
+        # Watch the directory containing the script, as watching a single file can be tricky
+        # with how editors save (e.g., delete and rename)
+        watch_dir = os.path.dirname(script_to_watch)
+        event_handler = MainScriptChangeHandler(stop_event, script_to_watch)
+        observer = Observer() # Using PollingObserver for consistency with your video watcher
+        observer.schedule(event_handler, path=watch_dir, recursive=False) # Don't need recursive
+        observer.start()
+        logger.info(f"Self-watcher started for directory: {watch_dir} (monitoring {os.path.basename(script_to_watch)})")
+
+        while not stop_event.is_set():
+            if not observer.is_alive():
+                logger.error("Self-watcher observer thread died unexpectedly.")
+                stop_event.set() # Trigger shutdown if self-watcher fails
+                break
+            await asyncio.sleep(1)
+        # If stop_event is set by MainScriptChangeHandler, this loop will also terminate.
+
+    except asyncio.CancelledError:
+        logger.info("Main script watcher task cancelled.")
+    except Exception as e:
+        logger.error(f"Error in Main script watcher task: {e}", exc_info=True)
+        stop_event.set() # Signal shutdown on error
+    finally:
+        logger.info("Stopping main script watcher...")
+        if observer and observer.is_alive():
+            observer.stop()
+            try:
+                observer.join(timeout=2.0) # Shorter timeout for self-watcher
+                if observer.is_alive():
+                    logger.warning("Self-watcher observer thread did not stop cleanly after 2 seconds.")
+            except Exception as e_join:
+                logger.error(f"Error joining self-watcher observer thread: {e_join}", exc_info=True)
+        logger.info("Main script watcher stopped.")
+
 async def main():
-    """Run bot and watcher, handle graceful shutdown."""
+    """Run bot and watcher, handle graceful shutdown and potential restart."""
     stop_event = asyncio.Event()
+    global RESTART_REQUESTED # Allow main to modify it if needed, though not strictly necessary here
+    RESTART_REQUESTED = False # Ensure it's reset if main is somehow called again in same process (unlikely)
 
     # Use task names for better debugging if needed
     telegram_task = asyncio.create_task(run_telegram_bot(stop_event), name="TelegramBotTask")
     watcher_task = asyncio.create_task(run_file_watcher(stop_event), name="FileWatcherTask")
+    main_script_monitor_task = asyncio.create_task(
+        run_main_script_watcher(stop_event, MAIN_SCRIPT_PATH),
+        name="MainScriptWatcherTask"
+    )
 
-    tasks = {telegram_task, watcher_task}
-    logger.info("Application started. Press Ctrl+C to exit.")
+    tasks = {telegram_task, watcher_task, main_script_monitor_task}
+    logger.info("Application started. Press Ctrl+C to exit. Will auto-restart on main.py change.")
 
     # Monitor tasks
     try:
@@ -566,17 +633,23 @@ async def main():
         for task in done:
             task_name = task.get_name()
             try:
-                result = task.result() # Raises exception if task failed
-                logger.warning(f"Task '{task_name}' completed unexpectedly without error. Result: {result}")
+                result = task.result()
+                # If the main_script_monitor_task finishes because stop_event was set by its handler,
+                # RESTART_REQUESTED will be True.
+                # If another task finishes due to an error, RESTART_REQUESTED might be False.
+                if task == main_script_monitor_task and RESTART_REQUESTED:
+                     logger.info(f"Task '{task_name}' completed, restart was requested.")
+                else:
+                     logger.warning(f"Task '{task_name}' completed unexpectedly. Result: {result}")
             except asyncio.CancelledError:
-                 logger.info(f"Task '{task_name}' was cancelled.") # Expected during shutdown
+                logger.info(f"Task '{task_name}' was cancelled.")
             except Exception as task_exc:
                 logger.error(f"Task '{task_name}' failed with exception:", exc_info=task_exc)
 
         # If any task finished (unexpectedly or due to error), signal shutdown
         if not stop_event.is_set():
-             logger.warning("A task finished unexpectedly. Initiating shutdown...")
-             stop_event.set()
+            logger.warning("A task finished unexpectedly (not due to restart or Ctrl+C). Initiating shutdown...")
+            stop_event.set()
 
     except KeyboardInterrupt:
         logger.info("\nCtrl+C detected. Initiating graceful shutdown...")
@@ -611,7 +684,23 @@ async def main():
         logger.info("Shutting down thread pool executor (allowing current analysis to finish)...")
         executor.shutdown(wait=True, cancel_futures=False) # wait=True ensures running tasks finish
         logger.info("Executor shut down.")
-        logger.info("Main application finished cleanly.")
+
+        if RESTART_REQUESTED:
+            logger.info("RESTART_REQUESTED is True. Executing self-restart...")
+            # Flush standard streams before exec, as they might be inherited
+            sys.stdout.flush()
+            sys.stderr.flush()
+            # Replace the current process with a new one
+            # sys.executable is the path to the Python interpreter
+            # sys.argv are the original command-line arguments
+            try:
+                os.execv(sys.executable, [sys.executable] + sys.argv)
+            except Exception as e_exec:
+                # This part will only be reached if os.execv fails, which is rare
+                logger.critical(f"FATAL: os.execv failed during restart attempt: {e_exec}", exc_info=True)
+                # At this point, the script cannot restart itself and will exit.
+        else:
+            logger.info("Main application finished cleanly (no restart requested).")
 
 
 # Run the main function
