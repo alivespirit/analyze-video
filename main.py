@@ -626,34 +626,57 @@ async def main():
 
     # Monitor tasks
     try:
-        # Wait for either task to complete (normally shouldn't happen unless error or stop)
         done, pending = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
 
-        # Check which task finished and log potential errors
         for task in done:
             task_name = task.get_name()
             try:
-                result = task.result()
-                # If the main_script_monitor_task finishes because stop_event was set by its handler,
-                # RESTART_REQUESTED will be True.
-                # If another task finishes due to an error, RESTART_REQUESTED might be False.
-                if task == main_script_monitor_task and RESTART_REQUESTED:
-                     logger.info(f"Task '{task_name}' completed, restart was requested.")
+                result = task.result() # Re-raises exception if task failed
+
+                if RESTART_REQUESTED and stop_event.is_set(): # Primary check: Is a restart underway?
+                    if task == main_script_monitor_task:
+                        logger.info(f"Task '{task_name}' (script monitor) completed, as it initiated the restart sequence.")
+                    else:
+                        # Other tasks are completing because stop_event was set by the script monitor for restart
+                        logger.info(f"Task '{task_name}' completed as part of the graceful shutdown for restart. Result: {result}")
+                elif stop_event.is_set(): # If not a restart, but stop_event is set (e.g., Ctrl+C or error in another task)
+                    logger.info(f"Task '{task_name}' completed during a general shutdown sequence. Result: {result}")
                 else:
-                     logger.warning(f"Task '{task_name}' completed unexpectedly. Result: {result}")
+                    # No restart requested, and stop_event wasn't set before this task completed.
+                    # This implies the task finished on its own, which is unexpected for long-running tasks.
+                    logger.warning(f"Task '{task_name}' completed unexpectedly (no global stop signal was active). Result: {result}")
+                    # Since this task finished unexpectedly, ensure the global stop_event is set to terminate others.
+                    # This will be handled by the block after this loop if not already set by an exception.
+
             except asyncio.CancelledError:
-                logger.info(f"Task '{task_name}' was cancelled.")
+                  logger.info(f"Task '{task_name}' was cancelled.")
+                  # Cancellation is usually part of a stop sequence.
             except Exception as task_exc:
                 logger.error(f"Task '{task_name}' failed with exception:", exc_info=task_exc)
+                if RESTART_REQUESTED: # If a restart was pending, cancel it due to this error
+                    logger.warning("Task failure detected, cancelling pending script restart.")
+                    RESTART_REQUESTED = False
+                # Ensure stop_event is set on failure, if not already.
+                if not stop_event.is_set():
+                    stop_event.set()
 
-        # If any task finished (unexpectedly or due to error), signal shutdown
+        # After processing tasks in 'done':
+        # If stop_event is not set, it means a task in 'done' completed cleanly but unexpectedly
+        # (and wasn't the restart monitor, and didn't cause an exception that set stop_event).
+        # Or, it could mean 'done' is empty, which shouldn't happen with FIRST_COMPLETED unless tasks is empty.
         if not stop_event.is_set():
-            logger.warning("A task finished unexpectedly (not due to restart or Ctrl+C). Initiating shutdown...")
-            stop_event.set()
+              # This implies a task from 'done' finished cleanly, and the 'else' for unexpected completion above was hit.
+              # The warning for that specific task was logged. Now ensure overall shutdown for pending tasks.
+              logger.warning("An unexpected task completion occurred. Initiating shutdown of remaining tasks...")
+              stop_event.set()
+        # If RESTART_REQUESTED is true, stop_event is already set by MainScriptChangeHandler.
+        # If Ctrl+C happened, stop_event is set by the KeyboardInterrupt handler.
+        # If a task errored/cancelled, the loop above likely set stop_event.
 
     except KeyboardInterrupt:
         logger.info("\nCtrl+C detected. Initiating graceful shutdown...")
         stop_event.set()
+        RESTART_REQUESTED = False # Ctrl+C should not trigger a restart
 
     except asyncio.CancelledError:
         logger.info("Main task cancelled.")
