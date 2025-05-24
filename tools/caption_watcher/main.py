@@ -5,7 +5,7 @@ import subprocess
 import threading
 from watchdog.observers import Observer
 from watchdog.events import FileSystemEventHandler
-import pygetwindow as gw # For finding, activating, and closing the window
+import pygetwindow as gw # For finding, activating, maximizing, and closing the window
 
 # --- Configuration ---
 MONITOR_FOLDER = r"\\UX305CA\nas\xiaomi_camera_videos\04cf8c6b201d"
@@ -25,9 +25,9 @@ class NewFileHandler(FileSystemEventHandler):
             print(f"New file detected: {event.src_path}")
             file_queue.put(event.src_path)
 
-def find_activate_and_close_window(image_filepath, duration_seconds):
+def find_activate_maximize_and_close_window(image_filepath, duration_seconds): # Renamed function
     """
-    Tries to find the window that opened the image_filepath, activate it (bring to front),
+    Tries to find the window that opened the image_filepath, activate it, maximize it,
     and close it after duration_seconds.
     """
     opened_window = None
@@ -56,25 +56,43 @@ def find_activate_and_close_window(image_filepath, duration_seconds):
                 window_title_for_messages = opened_window.title
                 print(f"Found window: '{window_title_for_messages}' for {filename_stem}")
                 
-                # --- Activate window ---
                 if opened_window:
+                    # --- Activate window ---
                     try:
-                        opened_window.activate() # Bring to foreground and give focus
+                        opened_window.activate()
                         print(f"Window '{window_title_for_messages}' activated.")
-                        time.sleep(0.1) # Small delay for activation to take effect
-                    except Exception as e_activate:
-                        print(f"Error trying to activate window '{window_title_for_messages}': {e_activate}")
-                # --- End activate window ---
+                        time.sleep(0.1) # Small delay for activation
+                    except gw.PyGetWindowException as e_activate:
+                        if "Error code from Windows: 0" in str(e_activate):
+                            print(f"Warning during activation for '{window_title_for_messages}': {e_activate}. OS reported success (code 0), proceeding.")
+                        else:
+                            print(f"Error trying to activate window '{window_title_for_messages}' with pygetwindow: {e_activate}")
+                    except Exception as e_general_activate:
+                        print(f"Unexpected error during window activation for '{window_title_for_messages}': {e_general_activate}")
+
+                    # --- Maximize window ---
+                    # Ensure window object is still valid before trying to maximize
+                    try:
+                        if opened_window.visible: # Check if still visible before maximizing
+                            opened_window.maximize()
+                            print(f"Window '{window_title_for_messages}' maximized.")
+                            time.sleep(0.1) # Small delay for maximization
+                        else:
+                            print(f"Window '{window_title_for_messages}' not visible, skipping maximization.")
+                    except gw.PyGetWindowException as e_maximize: # Catch errors if window closed or handle invalid
+                        print(f"Error trying to maximize window '{window_title_for_messages}' with pygetwindow: {e_maximize}")
+                    except Exception as e_general_maximize:
+                        print(f"Unexpected error during window maximization for '{window_title_for_messages}': {e_general_maximize}")
+                # --- End activate and maximize window ---
                 break
         except Exception as e_find:
-            # Catch broad exceptions during window search (e.g., if a window closes abruptly)
             print(f"Error while searching for window for {filename_stem}: {e_find}")
-            pass # Continue trying
+            pass
         time.sleep(0.5)
 
     print(f"Displaying '{os.path.basename(image_filepath)}' for {duration_seconds} seconds...")
     
-    for _ in range(duration_seconds * 2): # Check every 0.5s
+    for _ in range(duration_seconds * 2):
         if stop_event.is_set():
             break
         time.sleep(0.5)
@@ -84,34 +102,38 @@ def find_activate_and_close_window(image_filepath, duration_seconds):
 
     if opened_window:
         try:
-            # Refresh title, as it might have changed or to ensure it's the correct one for messages
             window_title_for_messages = opened_window.title
-        except gw.PyGetWindowException: # Window might have closed
+        except gw.PyGetWindowException:
             print(f"Window for {filename_stem} closed before explicit close attempt.")
-            return # Nothing more to do with this specific window
-        except Exception: # Other errors accessing title
-             pass # Use the last known title or placeholder
+            return
+        except Exception:
+            pass
 
         print(f"Attempting to close window: '{window_title_for_messages}'")
         try:
-            # Check .visible. If window is gone, this might raise PyGetWindowException.
+            # Before closing, it might be good to restore if it was maximized by us
+            # However, simply closing is usually fine. If you want to restore:
+            # try:
+            #     if opened_window.isMaximized: # Check if it's actually maximized
+            #         opened_window.restore()
+            #         time.sleep(0.1)
+            # except Exception: pass # Ignore errors during restore
+
             if opened_window.visible:
                 opened_window.close()
                 print("Window close command sent via pygetwindow.")
-                time.sleep(0.5) # Give it a moment to process
-
+                time.sleep(0.5)
                 try:
-                    if opened_window.visible: # If still visible, it didn't close
+                    if opened_window.visible:
                         print(f"Warning: Window '{window_title_for_messages}' still appears to be visible.")
-                    else: # Not visible, but object might still exist if only hidden
+                    else:
                         print(f"Window '{window_title_for_messages}' is no longer visible.")
-                except gw.PyGetWindowException: # This is the expected outcome if closed
+                except gw.PyGetWindowException:
                     print(f"Window '{window_title_for_messages}' confirmed closed (access failed).")
             else:
-                print(f"Window '{window_title_for_messages}' was found but is no longer visible. Assuming already closed/hidden.")
-
+                print(f"Window '{window_title_for_messages}' was found but is no longer visible.")
         except gw.PyGetWindowException as e:
-            print(f"pygetwindow error for '{window_title_for_messages}' (e.g., window already closed): {e}")
+            print(f"pygetwindow error for '{window_title_for_messages}': {e}")
         except Exception as e_generic:
             print(f"Unexpected error closing window '{window_title_for_messages}' with pygetwindow: {e_generic}")
     else:
@@ -141,7 +163,7 @@ def file_processor_worker():
             try:
                 print(f"Opening {filepath} with default application...")
                 os.startfile(filepath)
-                find_activate_and_close_window(filepath, VIEW_DURATION) # Changed function name
+                find_activate_maximize_and_close_window(filepath, VIEW_DURATION) # Renamed function call
             except Exception as e:
                 print(f"Error processing file {filepath}: {e}")
             finally:

@@ -3,8 +3,8 @@ import time
 import datetime
 import asyncio
 from random import randint
-import concurrent.futures # Needed for executor
-import logging # <<< IMPORT LOGGING
+import concurrent.futures
+import logging
 import cv2
 import re
 
@@ -19,23 +19,40 @@ from google.api_core.exceptions import ResourceExhausted
 from watchdog.events import FileSystemEventHandler
 from watchdog.observers.polling import PollingObserver as Observer
 
+from logging.handlers import TimedRotatingFileHandler
+
 load_dotenv()  ## load all the environment variables
 
 LOG_PATH = os.getenv("LOG_PATH", default="")
 
+class CustomTimedRotatingFileHandler(TimedRotatingFileHandler):
+    def doRollover(self):
+        super().doRollover()
+        # Find the most recent rotated file
+        dirname, basename = os.path.split(self.baseFilename)
+        for filename in os.listdir(dirname or "."):
+            if filename.startswith(basename + "."):
+                # e.g., video_processor.log.2025-05-25
+                old_path = os.path.join(dirname, filename)
+                # e.g., video_processor_2025-05-25.log
+                new_name = filename.replace(".log.", "_") + ".log"
+                new_path = os.path.join(dirname, new_name)
+                if not os.path.exists(new_path):
+                    os.rename(old_path, new_path)
+
 # --- Logging Setup ---
 log_formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s', datefmt='%Y-%m-%d %H:%M:%S')
-log_file = os.path.join(LOG_PATH, f"video_processor_{datetime.datetime.now().strftime('%Y-%m-%d')}.log")
-
-# File Handler
-file_handler = logging.FileHandler(log_file, mode='a', encoding='utf8') # Append mode
+log_file = os.path.join(LOG_PATH, "video_processor.log")  # No date in filename; handler adds it
+file_handler = CustomTimedRotatingFileHandler(
+    log_file, when="midnight", interval=1, backupCount=30, encoding='utf8', utc=False
+)
 file_handler.setFormatter(log_formatter)
-file_handler.setLevel(logging.INFO) # Log INFO level and above to file
+file_handler.setLevel(logging.INFO)
 
 # Console Handler
 console_handler = logging.StreamHandler()
 console_handler.setFormatter(log_formatter)
-console_handler.setLevel(logging.INFO) # Log INFO level and above to console
+console_handler.setLevel(logging.INFO)
 
 # Get the root logger and add handlers
 logger = logging.getLogger()
@@ -560,10 +577,6 @@ async def main():
         if not stop_event.is_set():
              logger.warning("A task finished unexpectedly. Initiating shutdown...")
              stop_event.set()
-
-        # Wait for remaining tasks if any (should be handled by finally block now)
-        # if pending:
-        #    await asyncio.wait(pending)
 
     except KeyboardInterrupt:
         logger.info("\nCtrl+C detected. Initiating graceful shutdown...")
