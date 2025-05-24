@@ -9,6 +9,7 @@ This project is a Python-based application that monitors a folder for new video 
 - **Frame Extraction**: Extracts frame at the timestamp specified by Gemini AI showcasing the detected action.
 - **Telegram Integration**: Sends the analysis results to a Telegram chat, optionally including extracted frame, with an inline button to request full video.
 - **Customizable Prompts**: Tailored prompts for specific use cases, such as identifying dogs or suspicious activity near a parked car.
+- **Self monitoring**: Automatically restart process if `main.py` was changed (useful if it is running on the remote server).
 
 ## Requirements
 
