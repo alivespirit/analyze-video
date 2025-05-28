@@ -205,7 +205,7 @@ def analyze_video(video_path):
         now = datetime.datetime.now()
         # Consider Gemini Pro 2.5 experimental, log potential issues
         if ("Отакої!" in analysis_result) and (9 <= now.hour <= 13):
-            model_pro = genai.GenerativeModel(model_name="models/gemini-2.5-pro-preview-05-06")
+            model_pro = genai.GenerativeModel(model_name="models/gemini-2.5-pro-exp-03-25")
             logger.info(f"[{file_basename}] Trying Gemini 2.5 Pro...")
             try:
                 response_new = model_pro.generate_content([prompt, video_file],
