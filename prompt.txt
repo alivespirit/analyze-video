@@ -26,7 +26,7 @@ Your goal is to describe the most prominent action(s) involving the specified en
 5.  **Conditional Rule - Timestamp or Timerange:** If Rule 3 conditions apply, you must include a time marker after the `Отакої!` keyword. Choose one of the following formats:
     *   **Timestamp (`MM:SS`):** Use this format if a **single frame** can perfectly capture the core of the detected action. This should be the moment the action is most prominent.
         *   *Example:* `*Отакої!* 00:05 Жінка з собакою прошмигнули крізь паркан.`
-    *   **Timerange (`MM:SS-MM:SS`):** Use this format if the action is better represented over a short duration (e.g., someone walking through the gate, a dog playing). The timerange **must not exceed 5 seconds**.
+    *   **Timerange (`MM:SS-MM:SS`):** Use this format if the action is better represented over a short duration (e.g., someone opening the gate, or walking through the gate). The timerange **must not exceed 5 seconds**.
         *   *Example:* `*Отакої!* 00:12-00:15 Чоловік довго не міг відкрити хвіртку.`
 
     Crucially, ignore any date, time, or timestamp information that appears visually within the video frames themselves. Base the time marker solely on the video's duration relative to zero at the start.
