@@ -8,8 +8,8 @@ from watchdog.events import FileSystemEventHandler
 import pygetwindow as gw # For finding, activating, maximizing, and closing the window
 
 # --- Configuration ---
-MONITOR_FOLDER = r"\\UX305CA\nas\xiaomi_camera_videos\04cf8c6b201d"
-FILE_EXTENSION = ".jpg"
+MONITOR_FOLDER = r"\\UX305CA\nas\analyze_video\temp"
+FILE_EXTENSIONS = [".jpg", ".mp4"]
 VIEW_DURATION = 5  # seconds
 KNOWN_VIEWER_PROCESS_FALLBACK = ["Photos.exe", "mspaint.exe", "PhotoViewer.dll", "ImageGlass.exe"]
 # --- End Configuration ---
@@ -18,10 +18,10 @@ file_queue = queue.Queue()
 stop_event = threading.Event()
 
 class NewFileHandler(FileSystemEventHandler):
-    def on_created(self, event):
-        if stop_event.is_set():
-            return
-        if not event.is_directory and event.src_path.lower().endswith(FILE_EXTENSION):
+  def on_created(self, event):
+    if stop_event.is_set():
+      return
+    if not event.is_directory and any(event.src_path.lower().endswith(ext) for ext in FILE_EXTENSIONS):
             print(f"New file detected: {event.src_path}")
             file_queue.put(event.src_path)
 
@@ -177,7 +177,7 @@ def file_processor_worker():
             time.sleep(1)
 
 if __name__ == "__main__":
-    print(f"Monitoring folder: {MONITOR_FOLDER} for new {FILE_EXTENSION} files.")
+    print(f"Monitoring folder: {MONITOR_FOLDER} for new {FILE_EXTENSIONS} files.")
     print(f"Files will be displayed for {VIEW_DURATION} seconds each.")
     print("Press Ctrl+C to stop.")
 

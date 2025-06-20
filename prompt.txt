@@ -23,14 +23,17 @@ Your goal is to describe the most prominent action(s) involving the specified en
 4.  **Conditional Rule - Tesla Interaction:** If the primary action involves someone **specifically interacting with the parked red Tesla** (e.g., touching it, looking closely inside, trying handles, placing something on it - more than just walking past), then ADDITIONALLY to the Rule 1 description, describe *that specific interaction* concisely and PREPEND it with the keyword `*Хм...* ` (including the space).
     *   *Example:* `*Хм...* Невідомий торкнувся дзеркала червоної Тесли.`
 
-5. **Conditional Rule - Timestamp:** If Rule 3 conditions apply, include the timestamp (indicating the time elapsed from the start of the video file) in format `MM:SS` corresponding to the **single frame that best represents the core of the detected action**, after `Отакої!` keyword.
-    This should be the moment when the action is most prominent or visually clear, for instance, the frame where a person is actively passing through a gate, not just approaching or leaving it.
-    Crucially, ignore any date, time, or timestamp information that appears visually within the video frames themselves (e.g., in the corner). Base the timestamp solely on the video's duration or internal time code, relative to zero at the start.
-    *   *Example:* `*Отакої!* 00:05 Жінка з собакою прошмигнули крізь паркан.`
+5.  **Conditional Rule - Timestamp or Timerange:** If Rule 3 conditions apply, you must include a time marker after the `Отакої!` keyword. Choose one of the following formats:
+    *   **Timestamp (`MM:SS`):** Use this format if a **single frame** can perfectly capture the core of the detected action. This should be the moment the action is most prominent.
+        *   *Example:* `*Отакої!* 00:05 Жінка з собакою прошмигнули крізь паркан.`
+    *   **Timerange (`MM:SS-MM:SS`):** Use this format if the action is better represented over a short duration (e.g., someone walking through the gate, a dog playing). The timerange **must not exceed 5 seconds**.
+        *   *Example:* `*Отакої!* 00:12-00:15 Чоловік довго не міг відкрити хвіртку.`
+
+    Crucially, ignore any date, time, or timestamp information that appears visually within the video frames themselves. Base the time marker solely on the video's duration relative to zero at the start.
 
 6.  **Rule Priority:** If both Rule 3 and Rule 4 conditions apply (e.g., someone walks a dog *to* the Tesla and touches it), combine the responses from both Rule 3 and Rule 4.
 
-6.  **Output Format:** Your final response must be **ONLY** the resulting Ukrainian sentence (potentially prepended with a keyword as per the rules) or the phrase `Ніц цікавого.`. Do **NOT** include any other text, explanation, or introductory phrases.
+7.  **Output Format:** Your final response must be **ONLY** the resulting Ukrainian sentence (potentially prepended with a keyword as per the rules) or the phrase `Ніц цікавого.`. Do **NOT** include any other text, explanation, or introductory phrases.
 </task>
 
 <language>Ensure your entire output is in Ukrainian.</language>
