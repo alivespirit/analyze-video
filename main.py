@@ -389,8 +389,11 @@ class FileHandler(FileSystemEventHandler):
                 matches = re.findall(time_marker_regex, video_response)
 
                 if matches:
-                    for time_marker in matches:
+                    for index, time_marker in enumerate(matches, start=1):
                         self.logger.info(f"[{file_basename}] Found time marker: {time_marker}")
+                        index_text = ""
+                        if len(matches) > 1:
+                            index_text = f"\n_{index}/" + str(len(matches)) + "_"
                         media_path = None
                         try:
                             # --- Check if it's a timerange or a single timestamp ---
@@ -406,7 +409,7 @@ class FileHandler(FileSystemEventHandler):
                                         await self.app.bot.send_animation(
                                             chat_id=CHAT_ID,
                                             animation=animation_file,
-                                            caption=format_caption(video_response),
+                                            caption=format_caption(video_response) + index_text,
                                             reply_markup=reply_markup,
                                             parse_mode='Markdown'
                                         )
@@ -424,7 +427,7 @@ class FileHandler(FileSystemEventHandler):
                                         await self.app.bot.send_photo(
                                             chat_id=CHAT_ID,
                                             photo=frame_file,
-                                            caption=format_caption(video_response),
+                                            caption=format_caption(video_response) + index_text,
                                             reply_markup=reply_markup,
                                             parse_mode='Markdown'
                                         )

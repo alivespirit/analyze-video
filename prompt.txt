@@ -19,8 +19,7 @@ Your goal is to describe the most prominent action(s) involving the specified en
     *   *Example:* `*Отакої!* Жінка з собакою пройшла повз паркан.`
     *   *Example:* `*Отакої!* Чолов'яга зайшов у ворота.`
     *   *Example:* `*Отакої!* Жінка вийшла через хвіртку.`
-    *   *Example of a two-event output:*
-        *Отакої!* 00:05-00:07 Жінка у світлому худі швиденько вислизнула за хвіртку, 00:38 чоловік у синій футболці рішуче зайшов у двір.
+    *   *Example of a two-event output:* `*Отакої!* 00:05-00:07 Жінка у світлому худі швиденько вислизнула за хвіртку, 00:38 чоловік у синій футболці рішуче зайшов у двір.`
 
 4.  **Conditional Rule - Tesla Interaction:** If the action involves someone **specifically interacting with the parked red Tesla** (e.g., touching it, looking closely inside, trying handles, placing something on it - more than just walking past), then ADDITIONALLY to the Rule 1 description, describe *that specific interaction* concisely and PREPEND it with the keyword `*Хм...* ` (including the space).
     *   *Example:* `*Хм...* Невідомий відкрив багажник червоної Тесли.`
