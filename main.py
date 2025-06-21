@@ -283,7 +283,6 @@ def extract_frame(video_path, timestamp):
         if not success:
             raise ValueError(f"Failed to read frame at timestamp {timestamp}.")
 
-        # --- MODIFIED LINE ---
         # Use the local TEMP_DIR instead of the system's temp directory
         output_image_path = os.path.join(TEMP_DIR, f"{os.path.splitext(os.path.basename(video_path))[0]}_{timestamp.replace(':', '')}.jpg")
 
@@ -307,7 +306,6 @@ def extract_video_clip(video_path, start_time_str, end_time_str):
         start_sec = time_to_seconds(start_time_str)
         end_sec = time_to_seconds(end_time_str)
 
-        # --- MODIFIED LINE ---
         # Use the local TEMP_DIR instead of the system's temp directory
         output_mp4_path = os.path.join(TEMP_DIR, f"{os.path.splitext(os.path.basename(video_path))[0]}_{start_time_str.replace(':', '')}-{end_time_str.replace(':', '')}.mp4")
 
@@ -380,84 +378,84 @@ class FileHandler(FileSystemEventHandler):
             keyboard = [[InlineKeyboardButton("Глянути", callback_data=callback_file)]]
             reply_markup = InlineKeyboardMarkup(keyboard)
 
-            # --- NEW: More robust time marker formatting for captions ---
             def format_caption(text):
                 # Makes `MM:SS` or `MM:SS-MM:SS` appear as code block in Markdown
-                return re.sub(r"(\s+)(\d{2}:\d{2}(?:-\d{2}:\d{2})?)(\s+)", r"\g<1>`\g<2>`\g<3>", text)
+                return re.sub(r"(\s+)(\d{2}:\d{2}(?:-\d{2}:\d{2})?),?(\s+)", r"\g<1>`\g<2>`\g<3>", text)
 
             send_plain_message = True
             if "Отакої!" in video_response:
                 # Regex to find MM:SS or MM:SS-MM:SS
-                time_marker_regex = r"\s+(\d{2}:\d{2}(?:-\d{2}:\d{2})?)\s+"
+                time_marker_regex = r"\s+(\d{2}:\d{2}(?:-\d{2}:\d{2})?),?\s+"
                 matches = re.findall(time_marker_regex, video_response)
 
                 if matches:
-                    time_marker = matches[-1] # Use the last match
-                    media_path = None
-                    try:
-                        # --- Check if it's a timerange or a single timestamp ---
-                        if '-' in time_marker:
-                            # It's a timerange, create a GIF
-                            start_str, end_str = time_marker.split('-')
-                            self.logger.info(f"[{file_basename}] Extracting video clip for range {time_marker}...")
-                            media_path = extract_video_clip(file_path, start_str, end_str) 
-                            if media_path:
-                                self.logger.info(f"[{file_basename}] Video clip extracted: {media_path}")
-                                self.logger.info(f"[{file_basename}] Sending animation (MP4) with button to Telegram...")
-                                with open(media_path, 'rb') as animation_file:
-                                    await self.app.bot.send_animation(
-                                        chat_id=CHAT_ID,
-                                        animation=animation_file,
-                                        caption=format_caption(video_response),
-                                        reply_markup=reply_markup,
-                                        parse_mode='Markdown'
-                                    )
-                                self.logger.info(f"[{file_basename}] Animation sent successfully.")
-                                send_plain_message = False
-
-                        else:
-                            # It's a single timestamp, extract a frame
-                            self.logger.info(f"[{file_basename}] Extracting frame at timestamp {time_marker}...")
-                            media_path = extract_frame(file_path, time_marker)
-                            if media_path:
-                                self.logger.info(f"[{file_basename}] Frame extracted: {media_path}")
-                                self.logger.info(f"[{file_basename}] Sending photo with button to Telegram...")
-                                with open(media_path, 'rb') as frame_file:
-                                    await self.app.bot.send_photo(
-                                        chat_id=CHAT_ID,
-                                        photo=frame_file,
-                                        caption=format_caption(video_response),
-                                        reply_markup=reply_markup,
-                                        parse_mode='Markdown'
-                                    )
-                                self.logger.info(f"[{file_basename}] Photo sent successfully.")
-                                send_plain_message = False
-
-                    except telegram.error.BadRequest as bad_request_error:
-                        self.logger.warning(f"[{file_basename}] BadRequest error: {bad_request_error}. Retrying with escaped Markdown.")
+                    for time_marker in matches:
+                        self.logger.info(f"[{file_basename}] Found time marker: {time_marker}")
+                        media_path = None
                         try:
-                            # Universal retry logic for both photo and animation
-                            if media_path.endswith('.gif'):
-                                with open(media_path, 'rb') as animation_file:
-                                    await self.app.bot.send_animation(chat_id=CHAT_ID, animation=animation_file, caption=escape_markdown(video_response, version=1), reply_markup=reply_markup, parse_mode='Markdown')
-                            else:
-                                with open(media_path, 'rb') as frame_file:
-                                     await self.app.bot.send_photo(chat_id=CHAT_ID, photo=frame_file, caption=escape_markdown(video_response, version=1), reply_markup=reply_markup, parse_mode='Markdown')
-                            self.logger.info(f"[{file_basename}] Media sent successfully after escaping Markdown.")
-                            send_plain_message = False
-                        except Exception as retry_error:
-                            self.logger.error(f"[{file_basename}] Failed to send media after escaping Markdown: {retry_error}", exc_info=True)
-                    except Exception as e:
-                        self.logger.error(f"[{file_basename}] Error sending media: {e}", exc_info=True)
-                    finally:
-                        # Delete the generated frame/gif after sending or if an error occurs
-                        if media_path and os.path.exists(media_path):
-                            await asyncio.sleep(15) # Give a moment before deleting
-                            os.remove(media_path)
-                            self.logger.info(f"[{file_basename}] Temporary media file deleted: {media_path}")
+                            # --- Check if it's a timerange or a single timestamp ---
+                            if '-' in time_marker:
+                                # It's a timerange, create a video clip
+                                start_str, end_str = time_marker.split('-')
+                                self.logger.info(f"[{file_basename}] Extracting video clip for range {time_marker}...")
+                                media_path = extract_video_clip(file_path, start_str, end_str) 
+                                if media_path:
+                                    self.logger.info(f"[{file_basename}] Video clip extracted: {media_path}")
+                                    self.logger.info(f"[{file_basename}] Sending animation (MP4) with button to Telegram...")
+                                    with open(media_path, 'rb') as animation_file:
+                                        await self.app.bot.send_animation(
+                                            chat_id=CHAT_ID,
+                                            animation=animation_file,
+                                            caption=format_caption(video_response),
+                                            reply_markup=reply_markup,
+                                            parse_mode='Markdown'
+                                        )
+                                    self.logger.info(f"[{file_basename}] Animation sent successfully.")
+                                    send_plain_message = False
 
-                    if send_plain_message: # This will be true if media creation or sending failed
-                         self.logger.warning(f"[{file_basename}] Failed to create/send media for {time_marker}. Sending message instead.")
+                            else:
+                                # It's a single timestamp, extract a frame
+                                self.logger.info(f"[{file_basename}] Extracting frame at timestamp {time_marker}...")
+                                media_path = extract_frame(file_path, time_marker)
+                                if media_path:
+                                    self.logger.info(f"[{file_basename}] Frame extracted: {media_path}")
+                                    self.logger.info(f"[{file_basename}] Sending photo with button to Telegram...")
+                                    with open(media_path, 'rb') as frame_file:
+                                        await self.app.bot.send_photo(
+                                            chat_id=CHAT_ID,
+                                            photo=frame_file,
+                                            caption=format_caption(video_response),
+                                            reply_markup=reply_markup,
+                                            parse_mode='Markdown'
+                                        )
+                                    self.logger.info(f"[{file_basename}] Photo sent successfully.")
+                                    send_plain_message = False
+
+                        except telegram.error.BadRequest as bad_request_error:
+                            self.logger.warning(f"[{file_basename}] BadRequest error: {bad_request_error}. Retrying with escaped Markdown.")
+                            try:
+                                # Universal retry logic for both photo and animation
+                                if media_path.endswith('.mp4'):
+                                    with open(media_path, 'rb') as animation_file:
+                                        await self.app.bot.send_animation(chat_id=CHAT_ID, animation=animation_file, caption=escape_markdown(video_response, version=1), reply_markup=reply_markup, parse_mode='Markdown')
+                                else:
+                                    with open(media_path, 'rb') as frame_file:
+                                        await self.app.bot.send_photo(chat_id=CHAT_ID, photo=frame_file, caption=escape_markdown(video_response, version=1), reply_markup=reply_markup, parse_mode='Markdown')
+                                self.logger.info(f"[{file_basename}] Media sent successfully after escaping Markdown.")
+                                send_plain_message = False
+                            except Exception as retry_error:
+                                self.logger.error(f"[{file_basename}] Failed to send media after escaping Markdown: {retry_error}", exc_info=True)
+                        except Exception as e:
+                            self.logger.error(f"[{file_basename}] Error sending media: {e}", exc_info=True)
+                        finally:
+                            # Delete the generated frame/gif after sending or if an error occurs
+                            if media_path and os.path.exists(media_path):
+                                await asyncio.sleep(15) # Give a moment before deleting
+                                os.remove(media_path)
+                                self.logger.info(f"[{file_basename}] Temporary media file deleted: {media_path}")
+
+                        if send_plain_message: # This will be true if media creation or sending failed
+                            self.logger.warning(f"[{file_basename}] Failed to create/send media for {time_marker}. Sending message instead.")
                 else:
                     self.logger.warning(f"[{file_basename}] No valid time marker found in response. Sending message instead.")
 
