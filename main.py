@@ -379,8 +379,8 @@ class FileHandler(FileSystemEventHandler):
             reply_markup = InlineKeyboardMarkup(keyboard)
 
             def format_caption(text):
-                # Makes `MM:SS` or `MM:SS-MM:SS` appear as code block in Markdown
-                return re.sub(r"(\s+)(\d{2}:\d{2}(?:-\d{2}:\d{2})?),?(\s+)", r"\g<1>`\g<2>`\g<3>", text)
+                # Remove timestamps from response text
+                return re.sub(r"(\s+)(\d{2}:\d{2}(?:-\d{2}:\d{2})?),?(\s+)", " ", text)
 
             send_plain_message = True
             if "Отакої!" in video_response:
@@ -391,9 +391,10 @@ class FileHandler(FileSystemEventHandler):
                 if matches:
                     for index, time_marker in enumerate(matches, start=1):
                         self.logger.info(f"[{file_basename}] Found time marker: {time_marker}")
-                        index_text = ""
                         if len(matches) > 1:
-                            index_text = f"\n_{index}/" + str(len(matches)) + "_"
+                            index_text = f"\n_({index}/{str(len(matches))})_ `{time_marker}`"
+                        else:
+                            index_text = f"\n`{time_marker}`"
                         media_path = None
                         try:
                             # --- Check if it's a timerange or a single timestamp ---
