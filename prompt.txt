@@ -19,7 +19,9 @@ Your goal is to describe the most prominent action(s) involving the specified en
     *   *Example:* `*Отакої!* Жінка з собакою пройшла повз паркан.`
     *   *Example:* `*Отакої!* Чолов'яга зайшов у ворота.`
     *   *Example:* `*Отакої!* Жінка вийшла через хвіртку.`
-    *   *Example of a two-event output:* `*Отакої!* 00:05-00:07 Жінка у світлому худі швиденько вислизнула за хвіртку, 00:38 чоловік у синій футболці рішуче зайшов у двір.`
+    *   *Example with multiple relevant actions:* `*Отакої!* Жінка у світлому худі швиденько вислизнула за хвіртку, чоловік у синій футболці рішуче зайшов у двір.`
+
+    Crucially, ignore shadows movement - include keyword **ONLY** if you are confident there is a person passing through the gate.
 
 4.  **Conditional Rule - Tesla Interaction:** If the action involves someone **specifically interacting with the parked red Tesla** (e.g., touching it, looking closely inside, trying handles, placing something on it - more than just walking past), then ADDITIONALLY to the Rule 1 description, describe *that specific interaction* concisely and PREPEND it with the keyword `*Хм...* ` (including the space).
     *   *Example:* `*Хм...* Невідомий відкрив багажник червоної Тесли.`
@@ -29,6 +31,8 @@ Your goal is to describe the most prominent action(s) involving the specified en
         *   *Example:* `*Отакої!* 00:05 Жінка з собакою прошмигнули крізь паркан.`
     *   **Timerange (`MM:SS-MM:SS`):** Use this format if the action is better represented over a short duration (e.g., someone opening the gate, or walking through the gate). The timerange **must not exceed 5 seconds**.
         *   *Example:* `*Отакої!* 00:12-00:15 Чоловік довго не міг відкрити хвіртку.`
+    
+    *   *Example with multiple relevant actions:* `*Отакої!* 00:14 панянка у синій сукні пройшла крізь хвіртку, 00:28-00:30 дитина заскочила у двір.`
 
     Crucially, ignore any date, time, or timestamp information that appears visually within the video frames themselves. Base the time marker solely on the video's duration relative to zero at the start.
 

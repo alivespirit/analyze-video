@@ -454,7 +454,7 @@ class FileHandler(FileSystemEventHandler):
                         finally:
                             # Delete the generated frame/gif after sending or if an error occurs
                             if media_path and os.path.exists(media_path):
-                                await asyncio.sleep(15) # Give a moment before deleting
+                                await asyncio.sleep(30) # Give a moment before deleting
                                 os.remove(media_path)
                                 self.logger.info(f"[{file_basename}] Temporary media file deleted: {media_path}")
 

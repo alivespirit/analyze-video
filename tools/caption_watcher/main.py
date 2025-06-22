@@ -8,7 +8,7 @@ from watchdog.events import FileSystemEventHandler
 import pygetwindow as gw # For finding, activating, maximizing, and closing the window
 
 # --- Configuration ---
-MONITOR_FOLDER = r"\\UX305CA\nas\analyze_video\temp"
+MONITOR_FOLDER = r"\\UX305CA\nas\analyze-video\temp"
 FILE_EXTENSIONS = [".jpg", ".mp4"]
 VIEW_DURATION = 5  # seconds
 KNOWN_VIEWER_PROCESS_FALLBACK = ["Photos.exe", "mspaint.exe", "PhotoViewer.dll", "ImageGlass.exe"]
