@@ -197,7 +197,7 @@ def analyze_video(video_path):
             logger.error(f"[{file_basename}] Error reading prompt file: {e}", exc_info=True)
             return timestamp + "Error reading prompt file."
 
-        model_flash = genai.GenerativeModel(model_name="models/gemini-2.5-flash-preview-05-20")
+        model_flash = genai.GenerativeModel(model_name="models/gemini-2.5-flash")
         analysis_result = ""
         additional_text = ""
 
@@ -208,22 +208,22 @@ def analyze_video(video_path):
             analysis_result = response.text
             logger.info(f"[{file_basename}] Gemini 2.5 Flash response received.")
         except Exception as e_flash:
-            logger.warning(f"[{file_basename}] Gemini 2.5 Flash failed: {e_flash}. Falling back to Gemini 2.0 Flash.", exc_info=True)
+            logger.warning(f"[{file_basename}] Gemini 2.5 Flash failed: {e_flash}. Falling back to Gemini 2.5 Flash-Lite.", exc_info=True)
             try:
-                model_flash_2_0 = genai.GenerativeModel(model_name="models/gemini-2.0-flash")
-                response = model_flash_2_0.generate_content([prompt, video_file],
+                model_2_5_flash_lite = genai.GenerativeModel(model_name="models/gemini-2.5-flash-lite-preview-06-17")
+                response = model_2_5_flash_lite.generate_content([prompt, video_file],
                               request_options={"timeout": 600})
-                logger.info(f"[{file_basename}] Gemini 2.0 Flash response received.")
-                analysis_result = "_[2.0]_ " + response.text
-            except Exception as e_flash_2_0:
-                logger.error(f"[{file_basename}] Gemini 2.0 Flash also failed: {e_flash_2_0}", exc_info=True)
+                logger.info(f"[{file_basename}] Gemini 2.5 Flash-Lite response received.")
+                analysis_result = "_[2.5 FL]_ " + response.text
+            except Exception as e_flash_2_5_fl:
+                logger.error(f"[{file_basename}] Gemini 2.5 Flash-Lite also failed: {e_flash_2_5_fl}", exc_info=True)
                 raise  # Re-raise the exception to handle it in the outer scope
 
         logger.info(f"[{file_basename}] {analysis_result}")
 
         now = datetime.datetime.now()
-        # Consider Gemini Pro 2.5 experimental, log potential issues
-        if ("Отакої!" in analysis_result) and (9 <= now.hour <= 13):
+        # Disabled 2.5 Pro for now, as it has no free tier quota
+        if False: #("Отакої!" in analysis_result) and (9 <= now.hour <= 13):
             model_pro = genai.GenerativeModel(model_name="models/gemini-2.5-pro-exp-03-25")
             logger.info(f"[{file_basename}] Trying Gemini 2.5 Pro...")
             try:
@@ -239,6 +239,8 @@ def analyze_video(video_path):
                 # Log as warning since Flash result is still available
                 logger.warning(f"[{file_basename}] Error in Gemini 2.5 Pro: {e_pro}", exc_info=True)
                 additional_text = "\n_[2.5 Pro]_ Failed.\n" + USERNAME
+        if ("Отакої!" in analysis_result) and (9 <= now.hour <= 13):
+            additional_text = "\n" + USERNAME
 
         return timestamp + analysis_result + additional_text
 

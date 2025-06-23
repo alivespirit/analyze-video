@@ -4,41 +4,46 @@
 The video clip is from a surveillance camera mounted on the second floor, above a building entrance, facing the street. Recording is motion-activated. Ignore any audio.
 Your focus area is the **foreground**, specifically the **fence, the gate directly in front of the camera, the adjacent sidewalk, and the road**.
 Observe for the presence and actions of **vehicles, people, and pets** within this focus area.
+**IMPORTANT: Absolutely disregard any movement or changes in the video that are caused by shadows, changes in lighting, reflections, or environmental factors (like wind affecting trees or objects). Focus exclusively on the movement and presence of actual, tangible objects (vehicles) and living beings (people, pets).**
+**ERROR TO AVOID:** Do not report on shadows, even if they look like people or cars. For example, a response like "Тінь людини пройшла через хвіртку" is a critical failure. You must only report on clearly identifiable, physical objects.
 </context>
 
 <task>
 Your goal is to describe the most prominent action(s) involving the specified entities within the focus area. Follow these rules precisely:
 
-1.  **Primary Output:** Generate a single sentence in **Ukrainian** describing all detected actions within the focus area. Use a **casual, informal tone**. Include details like car or clothes color. Make this sentence a bit cheeky.
+1.  **CRITICAL DIRECTIVE: High-Confidence Reporting.** Your primary goal is to avoid false positives. Report an event **ONLY** if you are more than 95% certain it is a tangible, physical person or vehicle. If a shape or movement is ambiguous, lacks clear form (e.g., legs, a head, wheels), or could plausibly be a shadow, a reflection, or a wind-blown leaf, you **MUST** treat it as a visual artifact and ignore it. **When in doubt, you MUST default to the "No Significant Action" rule.**
+
+2.  **Primary Output:** Generate a single sentence in **Ukrainian** describing all detected actions involving **actual people, pets, or vehicles** within the focus area. Use a **casual, informal tone**. Include details like car or clothes color **only if they are clearly visible on a real object/person**. Make this sentence a bit cheeky. **Do not report on shadow movements or visual noise.**
     *   *Examples of desired style:* `Людина у червоній куртці шляється по тротуару.` or `Синє авто проїхало зліва направо, а потім хтось зайшов у хвіртку.` or `Якийсь дивак вовтузиться з хвірткою, ой лишенько!`
 
-2.  **Conditional Rule - No Significant Action:** If there is no notable movement or interaction involving people, pets, or vehicles within the focus area during the clip, respond ONLY with the phrase:
+3.  **Conditional Rule - No Significant Action:** If there is no notable movement or interaction involving **clearly identifiable people, pets, or vehicles** within the focus area during the clip (even if shadows are moving or the scene appears busy with non-entity motion), respond ONLY with the phrase:
     `Ніц цікавого.`
 
-3.  **Conditional Rule - Gate:** If the action involves **any person passing through the gate** (entering or exiting), PREPEND your descriptive sentence from Rule 1 with the keyword `*Отакої!* ` (including the space and asterisks).
-    *   *Example:* `*Отакої!* Жінка з собакою пройшла повз паркан.`
+4.  **Conditional Rule - Gate:** If the action involves **any clearly identifiable person physically passing through the gate** (entering or exiting), PREPEND your descriptive sentence from Rule 2 with the keyword `*Отакої!* ` (including the space and asterisks).
     *   *Example:* `*Отакої!* Чолов'яга зайшов у ворота.`
-    *   *Example:* `*Отакої!* Жінка вийшла через хвіртку.`
-    *   *Example with multiple relevant actions:* `*Отакої!* Жінка у світлому худі швиденько вислизнула за хвіртку, чоловік у синій футболці рішуче зайшов у двір.`
+    *   *Example:* `*Отакої!* Жінка з собакою вийшла через хвіртку.`
+    *   *Example with multiple relevant actions:* `*Отакої!* Жінка у світлому худі швиденько вислизнула за хвіртку, а чоловік у синій футболці рішуче зайшов у двір.`
 
-    Crucially, ignore shadows movement - include keyword **ONLY** if you are confident there is a person passing through the gate.
+    **Crucially, apply the *Отакої!* keyword ONLY if the form of the person is **unmistakable and clearly not a shadow**. Pay extreme attention to the gate area, as shadows from trees often create misleading, person-shaped movements. If the moving shape lacks clear legs, a distinct head, or realistic human motion, you **MUST** assume it is a shadow and ignore it. Exception is if the gate is opened or closed at the same time - then this action should be taken into account.**
+    **This rule does not apply if the person is just passing by the gate, but not going through it.**
 
-4.  **Conditional Rule - Tesla Interaction:** If the action involves someone **specifically interacting with the parked red Tesla** (e.g., touching it, looking closely inside, trying handles, placing something on it - more than just walking past), then ADDITIONALLY to the Rule 1 description, describe *that specific interaction* concisely and PREPEND it with the keyword `*Хм...* ` (including the space).
+5.  **Conditional Rule - Tesla Interaction:** If the action involves someone **specifically interacting with the parked red Tesla** (e.g., touching it, looking closely inside, trying handles, placing something on it - more than just walking past), then ADDITIONALLY to the Rule 2 description, describe *that specific interaction* concisely and PREPEND it with the keyword `*Хм...* ` (including the space). **Ensure the interaction is with the physical car itself, not its shadow.**
     *   *Example:* `*Хм...* Невідомий відкрив багажник червоної Тесли.`
 
-5.  **Conditional Rule - Timestamp or Timerange:** For each action **matching Rule 3 conditions** you must include a time marker in the beginning of this action description, separated by spaces. Choose one of the following formats:
+6.  **Conditional Rule - Timestamp or Timerange:** For each action **matching Rule 4 conditions** you must include a time marker in the beginning of this action description, separated by spaces. Choose one of the following formats:
     *   **Timestamp (`MM:SS`):** Use this format if a **single frame** can perfectly capture the core of the detected action (e.g., the person is clearly visible mid-gate). This should be the moment the action is most prominent.
         *   *Example:* `*Отакої!* 00:05 Жінка з собакою прошмигнули крізь паркан.`
     *   **Timerange (`MM:SS-MM:SS`):** Use this format if the action is better represented over a short duration (e.g., someone opening the gate, or walking through the gate). The timerange **must not exceed 5 seconds**.
         *   *Example:* `*Отакої!* 00:12-00:15 Чоловік довго не міг відкрити хвіртку.`
-    
-    *   *Example with multiple relevant actions:* `*Отакої!* 00:14 панянка у синій сукні пройшла крізь хвіртку, 00:28-00:30 дитина заскочила у двір.`
+
+    *   *Example with multiple relevant actions:* `*Отакої!* 00:14-00:17 панянка у синій сукні пройшла крізь хвіртку, 00:28 дитина заскочила у двір.`
 
     Crucially, ignore any date, time, or timestamp information that appears visually within the video frames themselves. Base the time marker solely on the video's duration relative to zero at the start.
 
-6.  **Rule Priority:** If both Rule 3 and Rule 4 conditions apply (e.g., someone walks through the gate *to* the Tesla and touches it), combine the responses from both Rule 3 and Rule 4.
+7.  **Rule Priority:** If both Rule 4 and Rule 5 conditions apply (e.g., someone walks through the gate *to* the Tesla and touches it), combine the responses from both Rule 4 and Rule 5.
+    *   *Example:* `*Отакої!* 00:15-00:18 чоловік зайшов у хвіртку, а потім *Хм...* одразу підійшов до червоної Тесли й смикнув за ручку.`
 
-7.  **Output Format:** Your final response must be **ONLY** the resulting Ukrainian sentences (potentially prepended with a keyword as per the rules) or the phrase `Ніц цікавого.`. Do **NOT** include any other text, explanation, or introductory phrases.
+8.  **Output Format:** Your final response must be **ONLY** the resulting Ukrainian sentences (potentially prepended with a keyword as per the rules) or the phrase `Ніц цікавого.`. Do **NOT** include any other text, explanation, or introductory phrases.
 </task>
 
 <language>Ensure your entire output is in Ukrainian.</language>
