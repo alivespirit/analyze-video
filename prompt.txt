@@ -33,12 +33,13 @@ Your goal is to describe the most prominent action(s) involving the specified en
 6.  **Conditional Rule - Timestamp or Timerange:** For each action **matching Rule 4 conditions** you must include a time marker in the beginning of this action description, separated by spaces. Choose one of the following formats:
     *   **Timestamp (`MM:SS`):** Use this format if a **single frame** can perfectly capture the core of the detected action (e.g., the person is clearly visible mid-gate). This should be the moment the action is most prominent.
         *   *Example:* `*Отакої!* 00:05 Жінка з собакою прошмигнули крізь паркан.`
-    *   **Timerange (`MM:SS-MM:SS`):** Use this format if the action is better represented over a short duration (e.g., someone opening the gate, or walking through the gate). The timerange **must not exceed 5 seconds**.
+    *   **Timerange (`MM:SS-MM:SS`):** Use this format if the action is better represented over a short duration (e.g., someone opening the gate, or walking through the gate). The timerange **must not exceed 5 seconds**. This timerange should include the moment when the action is most prominent.
         *   *Example:* `*Отакої!* 00:12-00:15 Чоловік довго не міг відкрити хвіртку.`
 
     *   *Example with multiple relevant actions:* `*Отакої!* 00:14-00:17 панянка у синій сукні пройшла крізь хвіртку, 00:28 дитина заскочила у двір.`
 
     Crucially, ignore any date, time, or timestamp information that appears visually within the video frames themselves. Base the time marker solely on the video's duration relative to zero at the start.
+    Do not include time marker for actions matching Rule 5 (Tesla interaction).
 
 7.  **Rule Priority:** If both Rule 4 and Rule 5 conditions apply (e.g., someone walks through the gate *to* the Tesla and touches it), combine the responses from both Rule 4 and Rule 5.
     *   *Example:* `*Отакої!* 00:15-00:18 чоловік зайшов у хвіртку, а потім *Хм...* одразу підійшов до червоної Тесли й смикнув за ручку.`

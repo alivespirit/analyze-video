@@ -214,7 +214,7 @@ def analyze_video(video_path):
                 response = model_2_5_flash_lite.generate_content([prompt, video_file],
                               request_options={"timeout": 600})
                 logger.info(f"[{file_basename}] Gemini 2.5 Flash-Lite response received.")
-                analysis_result = "_[2.5 FL]_ " + response.text
+                analysis_result = "_[2.5FL]_ " + response.text
             except Exception as e_flash_2_5_fl:
                 logger.error(f"[{file_basename}] Gemini 2.5 Flash-Lite also failed: {e_flash_2_5_fl}", exc_info=True)
                 raise  # Re-raise the exception to handle it in the outer scope
