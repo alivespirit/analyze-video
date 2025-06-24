@@ -244,7 +244,7 @@ def analyze_video(video_path):
                     analysis_result = "_[2.5FL]_ " + response.text
                     break
                 except Exception as e_flash_2_5_fl:
-                    logger.error(f"[{file_basename}] Gemini 2.5 Flash-Lite also failed: {e_flash_2_5_fl}")
+                    logger.warning(f"[{file_basename}] Gemini 2.5 Flash-Lite also failed: {e_flash_2_5_fl}")
                     if attempt < max_retries - 1:
                         wait_time = 10 * (2 ** attempt)  # Exponential backoff: 10s, 20s, 40s
                         logger.warning(f"[{file_basename}] Retrying in {wait_time}s...")
