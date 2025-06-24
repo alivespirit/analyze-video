@@ -13,7 +13,7 @@ import telegram.error
 from telegram.ext import Application, CallbackQueryHandler
 from telegram.helpers import escape_markdown
 from google import genai
-from google.genai import typesntError
+from google.genai import types
 
 from watchdog.events import FileSystemEventHandler
 from watchdog.observers.polling import PollingObserver as Observer
