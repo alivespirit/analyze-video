@@ -5,6 +5,7 @@ import concurrent.futures
 import logging
 import re
 import sys
+import time
 
 from dotenv import load_dotenv
 from telegram import Bot, InlineKeyboardMarkup, InlineKeyboardButton
@@ -23,6 +24,10 @@ from logging.handlers import TimedRotatingFileHandler
 # Importing VideoFileClip from moviepy for MP4 extraction
 from moviepy import VideoFileClip, concatenate_videoclips
 
+import threading
+
+GEMINI_CONCURRENCY_LIMIT = 2  # Only one Gemini call at a time (adjust if safe)
+gemini_semaphore = threading.Semaphore(GEMINI_CONCURRENCY_LIMIT)
 
 RESTART_REQUESTED = False
 MAIN_SCRIPT_PATH = os.path.abspath(__file__)
@@ -167,6 +172,9 @@ def analyze_video(video_path):
     model_fallback = 'models/gemini-2.5-flash-lite-preview-06-17'
     model_pro = 'models/gemini-2.5-pro-exp-03-25'
 
+    sampling_rate = 5  # sampling rate in FPS
+    max_retries = 3
+
     try:
         prompt_file_path = os.path.join(os.path.dirname(__file__), "prompt.txt")
         try:
@@ -184,82 +192,101 @@ def analyze_video(video_path):
         additional_text = ""
 
         logger.info(f"[{file_basename}] Generating content (2.5 Flash)...")
-        try:
-            response = client.models.generate_content(
-                          model=model_main,
-                          contents=types.Content(
-                              parts=[
-                                  types.Part(
-                                      inline_data=types.Blob(
-                                          data=video_bytes,
-                                          mime_type='video/mp4'),
-                                      video_metadata=types.VideoMetadata(fps=5)
+        for attempt in range(max_retries):
+            try:
+                with gemini_semaphore:
+                    response = client.models.generate_content(
+                                  model=model_main,
+                                  contents=types.Content(
+                                      parts=[
+                                          types.Part(
+                                              inline_data=types.Blob(
+                                                  data=video_bytes,
+                                                  mime_type='video/mp4'),
+                                              video_metadata=types.VideoMetadata(fps=sampling_rate)
+                                          ),
+                                          types.Part(text=prompt)
+                                      ]
                                   ),
-                                  types.Part(text=prompt)
-                              ]
-                          ),
-                          config=types.GenerateContentConfig(
-                              automatic_function_calling=types.AutomaticFunctionCallingConfig(
-                                  disable=True
-                              )
-                          )
-                      )
-            analysis_result = response.text
-            logger.info(f"[{file_basename}] Gemini 2.5 Flash response received.")
-        except ResourceExhausted as e_quota_flash:
-            logger.warning(f"[{file_basename}] Gemini 2.5 Flash API quota exceeded. Message: {str(e_quota_flash).splitlines()[0]}")
-            try:
-                response = client.models.generate_content(
-                              model=model_fallback,
-                              contents=types.Content(
-                                  parts=[
-                                      types.Part(
-                                          inline_data=types.Blob(
-                                              data=video_bytes,
-                                              mime_type='video/mp4'),
-                                          video_metadata=types.VideoMetadata(fps=5)
-                                      ),
-                                      types.Part(text=prompt)
-                                  ]
-                              ),
-                              config=types.GenerateContentConfig(
-                                  automatic_function_calling=types.AutomaticFunctionCallingConfig(
-                                      disable=True
+                                  config=types.GenerateContentConfig(
+                                      automatic_function_calling=types.AutomaticFunctionCallingConfig(
+                                          disable=True
+                                      )
                                   )
                               )
-                          )
-                logger.info(f"[{file_basename}] Gemini 2.5 Flash-Lite response received.")
-                analysis_result = "_[2.5FL]_ " + response.text
-            except Exception as e_flash_2_5_fl:
-                logger.error(f"[{file_basename}] Gemini 2.5 Flash-Lite also failed: {e_flash_2_5_fl}")
-                raise  # Re-raise the exception to handle it in the outer scope
-        except Exception as e_flash:
-            logger.warning(f"[{file_basename}] Gemini 2.5 Flash failed: {e_flash}. Falling back to Gemini 2.5 Flash-Lite.")
-            try:
-                response = client.models.generate_content(
-                              model=model_fallback,
-                              contents=types.Content(
-                                  parts=[
-                                      types.Part(
-                                          inline_data=types.Blob(
-                                              data=video_bytes,
-                                              mime_type='video/mp4'),
-                                          video_metadata=types.VideoMetadata(fps=5)
+                logger.info(f"[{file_basename}] Gemini 2.5 Flash response received.")
+                analysis_result = response.text
+                break
+            except ResourceExhausted as e_quota_flash:
+                logger.warning(f"[{file_basename}] Gemini 2.5 Flash API quota exceeded. Falling back to Gemini 2.5 Flash-Lite. Message: {str(e_quota_flash).splitlines()[0]}")
+                try:
+                    with gemini_semaphore:
+                        response = client.models.generate_content(
+                                      model=model_fallback,
+                                      contents=types.Content(
+                                          parts=[
+                                              types.Part(
+                                                  inline_data=types.Blob(
+                                                      data=video_bytes,
+                                                      mime_type='video/mp4'),
+                                                  video_metadata=types.VideoMetadata(fps=sampling_rate)
+                                              ),
+                                              types.Part(text=prompt)
+                                          ]
                                       ),
-                                      types.Part(text=prompt)
-                                  ]
-                              ),
-                              config=types.GenerateContentConfig(
-                                  automatic_function_calling=types.AutomaticFunctionCallingConfig(
-                                      disable=True
+                                      config=types.GenerateContentConfig(
+                                          automatic_function_calling=types.AutomaticFunctionCallingConfig(
+                                              disable=True
+                                          )
+                                      )
                                   )
-                              )
-                          )
-                logger.info(f"[{file_basename}] Gemini 2.5 Flash-Lite response received.")
-                analysis_result = "_[2.5FL]_ " + response.text
-            except Exception as e_flash_2_5_fl:
-                logger.error(f"[{file_basename}] Gemini 2.5 Flash-Lite also failed: {e_flash_2_5_fl}")
-                raise  # Re-raise the exception to handle it in the outer scope
+                    logger.info(f"[{file_basename}] Gemini 2.5 Flash-Lite response received.")
+                    analysis_result = "_[2.5FL]_ " + response.text
+                    break
+                except Exception as e_flash_2_5_fl:
+                    logger.warning(f"[{file_basename}] Gemini 2.5 Flash-Lite also failed: {e_flash_2_5_fl}")
+                    if attempt < max_retries - 1:
+                        wait_time = 10 * (2 ** attempt)  # Exponential backoff: 10s, 20s, 40s
+                        logger.warning(f"[{file_basename}] Retrying in {wait_time}s...")
+                        time.sleep(wait_time)
+                    else:
+                        logger.error(f"[{file_basename}] Giving up after retries.")
+                        raise # Re-raise the exception to handle it in the outer scope
+            except Exception as e_flash:
+                logger.warning(f"[{file_basename}] Gemini 2.5 Flash failed. Falling back to Gemini 2.5 Flash-Lite. Message: {e_flash}")
+                try:
+                    with gemini_semaphore:
+                        response = client.models.generate_content(
+                                      model=model_fallback,
+                                      contents=types.Content(
+                                          parts=[
+                                              types.Part(
+                                                  inline_data=types.Blob(
+                                                      data=video_bytes,
+                                                      mime_type='video/mp4'),
+                                                  video_metadata=types.VideoMetadata(fps=sampling_rate)
+                                              ),
+                                              types.Part(text=prompt)
+                                          ]
+                                      ),
+                                      config=types.GenerateContentConfig(
+                                          automatic_function_calling=types.AutomaticFunctionCallingConfig(
+                                              disable=True
+                                          )
+                                      )
+                                  )
+                    logger.info(f"[{file_basename}] Gemini 2.5 Flash-Lite response received.")
+                    analysis_result = "_[2.5FL]_ " + response.text
+                    break
+                except Exception as e_flash_2_5_fl:
+                    logger.error(f"[{file_basename}] Gemini 2.5 Flash-Lite also failed: {e_flash_2_5_fl}")
+                    if attempt < max_retries - 1:
+                        wait_time = 10 * (2 ** attempt)  # Exponential backoff: 10s, 20s, 40s
+                        logger.warning(f"[{file_basename}] Retrying in {wait_time}s...")
+                        time.sleep(wait_time)
+                    else:
+                        logger.error(f"[{file_basename}] Giving up after retries.")
+                        raise # Re-raise the exception to handle it in the outer scope
 
         logger.info(f"[{file_basename}] {analysis_result}")
 
@@ -276,7 +303,7 @@ def analyze_video(video_path):
                                               inline_data=types.Blob(
                                                   data=video_bytes,
                                                   mime_type='video/mp4'),
-                                              video_metadata=types.VideoMetadata(fps=5)
+                                              video_metadata=types.VideoMetadata(fps=sampling_rate)
                                           ),
                                           types.Part(text=prompt)
                                       ]
