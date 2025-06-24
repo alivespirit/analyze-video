@@ -4,7 +4,6 @@ import datetime
 import asyncio
 import concurrent.futures
 import logging
-import cv2
 import re
 import sys
 
@@ -22,7 +21,7 @@ from watchdog.observers.polling import PollingObserver as Observer
 from logging.handlers import TimedRotatingFileHandler
 
 # Importing VideoFileClip from moviepy for MP4 extraction
-from moviepy import VideoFileClip
+from moviepy import VideoFileClip, concatenate_videoclips
 
 
 RESTART_REQUESTED = False
@@ -259,61 +258,36 @@ def analyze_video(video_path):
                 logger.warning(f"[{file_basename}] Failed to delete Gemini file {video_file.name}: {del_e}", exc_info=True)
                 pass
 
-def extract_frame(video_path, timestamp):
+def time_to_seconds(timestamp):
+    minutes, seconds = map(int, timestamp.split(':'))
+    return minutes * 60 + seconds
+
+def extract_video_clip(video_path, timeranges):
     """
-    Extracts a frame from the video at the specified timestamp.
-    :param video_path: Path to the video file.
-    :param timestamp: Timestamp in the format MM:SS.
-    :return: The extracted frame as an image file path in the local temp/ directory.
-    """
-    try:
-        minutes, seconds = map(int, timestamp.split(":"))
-        target_time = minutes * 60 + seconds
-
-        cap = cv2.VideoCapture(video_path)
-        if not cap.isOpened():
-            raise FileNotFoundError(f"Cannot open video file: {video_path}")
-
-        fps = cap.get(cv2.CAP_PROP_FPS)
-        if fps == 0:
-            raise ValueError("Cannot determine FPS of the video.")
-
-        frame_number = int(target_time * fps)
-        cap.set(cv2.CAP_PROP_POS_FRAMES, frame_number)
-
-        success, frame = cap.read()
-        if not success:
-            raise ValueError(f"Failed to read frame at timestamp {timestamp}.")
-
-        # Use the local TEMP_DIR instead of the system's temp directory
-        output_image_path = os.path.join(TEMP_DIR, f"{os.path.splitext(os.path.basename(video_path))[0]}_{timestamp.replace(':', '')}.jpg")
-
-        cv2.imwrite(output_image_path, frame)
-        cap.release()
-        return output_image_path
-    except Exception as e:
-        logger.error(f"Error extracting frame from video: {e}", exc_info=True)
-        return None
-
-def extract_video_clip(video_path, start_time_str, end_time_str):
-    """
-    Extracts a small, silent video clip (MP4) optimized for Telegram.
-    Saves the clip to the local temp/ directory to avoid re-triggering the watcher.
+    Extracts multiple subclips from a video and concatenates them into one video.
+    :param video_path: Path to the source video.
+    :param timeranges: List of strings in format ["MM:SS-MM:SS", ...].
+    :return: Path to the output video file in the local temp/ directory.
     """
     try:
-        def time_to_seconds(t_str):
-            minutes, seconds = map(int, t_str.split(':'))
-            return minutes * 60 + seconds
-
-        start_sec = time_to_seconds(start_time_str)
-        end_sec = time_to_seconds(end_time_str)
-
-        # Use the local TEMP_DIR instead of the system's temp directory
-        output_mp4_path = os.path.join(TEMP_DIR, f"{os.path.splitext(os.path.basename(video_path))[0]}_{start_time_str.replace(':', '')}-{end_time_str.replace(':', '')}.mp4")
-
-        with VideoFileClip(video_path) as video_clip:
-            subclip = video_clip.subclipped(start_sec, end_sec)
-            subclip.write_videofile(
+        with VideoFileClip(video_path) as video:
+            subclips = []
+            for tr in timeranges:
+                start_str, end_str = tr.split('-')
+                start_sec = time_to_seconds(start_str)
+                end_sec = time_to_seconds(end_str)
+                subclip = video.subclipped(start_sec, end_sec)
+                subclips.append(subclip)
+            if not subclips:
+                raise ValueError("No valid timeranges provided.")
+            final_clip = concatenate_videoclips(subclips)
+            # Use the local TEMP_DIR instead of the system's temp directory
+            timeranges_str = "_".join([tr.replace(":", "").replace("-", "to").replace("00", "") for tr in timeranges])
+            output_mp4_path = os.path.join(
+                TEMP_DIR,
+                f"{os.path.splitext(os.path.basename(video_path))[0]}_{timeranges_str}.mp4"
+            )
+            final_clip.write_videofile(
                 output_mp4_path,
                 codec='libx264',
                 audio=False,
@@ -324,7 +298,7 @@ def extract_video_clip(video_path, start_time_str, end_time_str):
             )
         return output_mp4_path
     except Exception as e:
-        logger.error(f"Error creating video clip from video: {e}", exc_info=True)
+        logger.error(f"Error extracting and concatenating video clips: {e}", exc_info=True)
         return None
 
 # --- FileHandler (uses executor) ---
@@ -382,86 +356,54 @@ class FileHandler(FileSystemEventHandler):
 
             def format_caption(text):
                 # Remove timestamps from response text
-                return re.sub(r"(\s+)(\d{2}:\d{2}(?:-\d{2}:\d{2})?),?(\s+)", " ", text)
+                return re.sub(r"(\s+)(\d{2}:\d{2}-\d{2}:\d{2}),?(\s+)", " ", text)
 
             send_plain_message = True
             if "Отакої!" in video_response:
-                # Regex to find MM:SS or MM:SS-MM:SS
-                time_marker_regex = r"\s+(\d{2}:\d{2}(?:-\d{2}:\d{2})?),?\s+"
+                # Regex to find MM:SS-MM:SS
+                time_marker_regex = r"\s+(\d{2}:\d{2}-\d{2}:\d{2}),?\s+"
                 matches = re.findall(time_marker_regex, video_response)
 
                 if matches:
-                    for index, time_marker in enumerate(matches, start=1):
-                        self.logger.info(f"[{file_basename}] Found time marker: {time_marker}")
-                        if len(matches) > 1:
-                            index_text = f"\n_({index}/{str(len(matches))})_ `{time_marker}`"
-                        else:
-                            index_text = f"\n`{time_marker}`"
-                        media_path = None
+                    index_text = f"\n`{matches}`"
+                    media_path = None
+                    try:
+                        self.logger.info(f"[{file_basename}] Extracting video clip for ranges {matches}...")
+                        media_path = extract_video_clip(file_path, matches) 
+                        if media_path:
+                            self.logger.info(f"[{file_basename}] Video clip extracted: {media_path}")
+                            self.logger.info(f"[{file_basename}] Sending animation (MP4) with button to Telegram...")
+                            with open(media_path, 'rb') as animation_file:
+                                await self.app.bot.send_animation(
+                                    chat_id=CHAT_ID,
+                                    animation=animation_file,
+                                    caption=format_caption(video_response) + index_text,
+                                    reply_markup=reply_markup,
+                                    parse_mode='Markdown'
+                                )
+                            self.logger.info(f"[{file_basename}] Animation sent successfully.")
+                            send_plain_message = False
+
+                    except telegram.error.BadRequest as bad_request_error:
+                        self.logger.warning(f"[{file_basename}] BadRequest error: {bad_request_error}. Retrying with escaped Markdown.")
                         try:
-                            # --- Check if it's a timerange or a single timestamp ---
-                            if '-' in time_marker:
-                                # It's a timerange, create a video clip
-                                start_str, end_str = time_marker.split('-')
-                                self.logger.info(f"[{file_basename}] Extracting video clip for range {time_marker}...")
-                                media_path = extract_video_clip(file_path, start_str, end_str) 
-                                if media_path:
-                                    self.logger.info(f"[{file_basename}] Video clip extracted: {media_path}")
-                                    self.logger.info(f"[{file_basename}] Sending animation (MP4) with button to Telegram...")
-                                    with open(media_path, 'rb') as animation_file:
-                                        await self.app.bot.send_animation(
-                                            chat_id=CHAT_ID,
-                                            animation=animation_file,
-                                            caption=format_caption(video_response) + index_text,
-                                            reply_markup=reply_markup,
-                                            parse_mode='Markdown'
-                                        )
-                                    self.logger.info(f"[{file_basename}] Animation sent successfully.")
-                                    send_plain_message = False
+                            with open(media_path, 'rb') as animation_file:
+                                await self.app.bot.send_animation(chat_id=CHAT_ID, animation=animation_file, caption=escape_markdown(video_response, version=1), reply_markup=reply_markup, parse_mode='Markdown')
+                            self.logger.info(f"[{file_basename}] Media sent successfully after escaping Markdown.")
+                            send_plain_message = False
+                        except Exception as retry_error:
+                            self.logger.error(f"[{file_basename}] Failed to send media after escaping Markdown: {retry_error}", exc_info=True)
+                    except Exception as e:
+                        self.logger.error(f"[{file_basename}] Error sending media: {e}", exc_info=True)
+                    finally:
+                        # Delete the generated clip after sending or if an error occurs
+                        if media_path and os.path.exists(media_path):
+                            await asyncio.sleep(30) # Give a moment before deleting
+                            os.remove(media_path)
+                            self.logger.info(f"[{file_basename}] Temporary media file deleted: {media_path}")
 
-                            else:
-                                # It's a single timestamp, extract a frame
-                                self.logger.info(f"[{file_basename}] Extracting frame at timestamp {time_marker}...")
-                                media_path = extract_frame(file_path, time_marker)
-                                if media_path:
-                                    self.logger.info(f"[{file_basename}] Frame extracted: {media_path}")
-                                    self.logger.info(f"[{file_basename}] Sending photo with button to Telegram...")
-                                    with open(media_path, 'rb') as frame_file:
-                                        await self.app.bot.send_photo(
-                                            chat_id=CHAT_ID,
-                                            photo=frame_file,
-                                            caption=format_caption(video_response) + index_text,
-                                            reply_markup=reply_markup,
-                                            parse_mode='Markdown'
-                                        )
-                                    self.logger.info(f"[{file_basename}] Photo sent successfully.")
-                                    send_plain_message = False
-
-                        except telegram.error.BadRequest as bad_request_error:
-                            self.logger.warning(f"[{file_basename}] BadRequest error: {bad_request_error}. Retrying with escaped Markdown.")
-                            try:
-                                # Universal retry logic for both photo and animation
-                                if media_path.endswith('.mp4'):
-                                    with open(media_path, 'rb') as animation_file:
-                                        await self.app.bot.send_animation(chat_id=CHAT_ID, animation=animation_file, caption=escape_markdown(video_response, version=1), reply_markup=reply_markup, parse_mode='Markdown')
-                                else:
-                                    with open(media_path, 'rb') as frame_file:
-                                        await self.app.bot.send_photo(chat_id=CHAT_ID, photo=frame_file, caption=escape_markdown(video_response, version=1), reply_markup=reply_markup, parse_mode='Markdown')
-                                self.logger.info(f"[{file_basename}] Media sent successfully after escaping Markdown.")
-                                send_plain_message = False
-                            except Exception as retry_error:
-                                self.logger.error(f"[{file_basename}] Failed to send media after escaping Markdown: {retry_error}", exc_info=True)
-                        except Exception as e:
-                            self.logger.error(f"[{file_basename}] Error sending media: {e}", exc_info=True)
-                        finally:
-                            # Delete the generated frame/gif after sending or if an error occurs
-                            if media_path and os.path.exists(media_path):
-                                await asyncio.sleep(30) # Give a moment before deleting
-                                os.remove(media_path)
-                                self.logger.info(f"[{file_basename}] Temporary media file deleted: {media_path}")
-
-                        if send_plain_message: # This will be true if media creation or sending failed
-                            self.logger.warning(f"[{file_basename}] Failed to create/send media for {time_marker}. Sending message instead.")
+                    if send_plain_message: # This will be true if media creation or sending failed
+                        self.logger.warning(f"[{file_basename}] Failed to create/send media for {matches}. Sending message instead.")
                 else:
                     self.logger.warning(f"[{file_basename}] No valid time marker found in response. Sending message instead.")
 

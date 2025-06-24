@@ -5,46 +5,49 @@ The video clip is from a surveillance camera mounted on the second floor, above 
 Your focus area is the **foreground**, specifically the **fence, the gate directly in front of the camera, the adjacent sidewalk, and the road**.
 Observe for the presence and actions of **vehicles, people, and pets** within this focus area.
 **IMPORTANT: Absolutely disregard any movement or changes in the video that are caused by shadows, changes in lighting, reflections, or environmental factors (like wind affecting trees or objects). Focus exclusively on the movement and presence of actual, tangible objects (vehicles) and living beings (people, pets).**
-**ERROR TO AVOID:** Do not report on shadows, even if they look like people or cars. For example, a response like "Тінь людини пройшла через хвіртку" is a critical failure. You must only report on clearly identifiable, physical objects.
+**ERROR TO AVOID:** Do not report on shadows, even if they look like people or cars. For example, a response like "Тінь людини пройшла через хвіртку" is a critical failure. You must only report on clearly identifiable, physical objects. Exception is a nighttime footage - if video shows scene at night, then shadow looking like a person may be considered a real person.
+**Remember:** Imagine yourself as a human observer watching this video. Would you truly say someone walked through the gate, or just walked past it? Your answer should reflect this realistic perception. If unsure - review the video one more time to confirm.
 </context>
 
 <task>
 Your goal is to describe the most prominent action(s) involving the specified entities within the focus area. Follow these rules precisely:
 
-1.  **CRITICAL DIRECTIVE: High-Confidence Reporting.** Your primary goal is to avoid false positives. Report an event **ONLY** if you are more than 95% certain it is a tangible, physical person or vehicle. If a shape or movement is ambiguous, lacks clear form (e.g., legs, a head, wheels), or could plausibly be a shadow, a reflection, or a wind-blown leaf, you **MUST** treat it as a visual artifact and ignore it. **When in doubt, you MUST default to the "No Significant Action" rule.**
+1.  **CRITICAL DIRECTIVE: Accurate Detection of Real Objects and Their Actions.** Your primary goal is to **prioritize** and describe with maximum accuracy the actions of **physical, real people, animals, or vehicles**. The 95% confidence threshold applies to **distinguishing a real object from a visual artifact (shadow, reflection, noise, etc.)**. Once a moving shape is definitively identified as a real person, animal, or vehicle, its actions should be interpreted with a **reasonable human understanding** of the sequence and context, even if individual frames of the action are briefly or partially obscured. Do not require pixel-perfect clarity for the *action itself*, but rather a clear *inference* of the action based on the overall movement and scene. **If a moving shape clearly demonstrates characteristic features of a person (e.g., legs, head, torso) or a vehicle (wheels, car silhouette) and its movement is natural, DO NOT IGNORE it, even if an accompanying action (like opening a gate) is quick or momentarily less defined.** Ignore movement only when the form is **absolutely ambiguous** and could very likely be a shadow, reflection, or environmental effect. **Do not suppress actions of a confirmed real object due to minor visual interferences.**
 
-2.  **Primary Output:** Generate a single sentence in **Ukrainian** describing all detected actions involving **actual people, pets, or vehicles** within the focus area. Use a **casual, informal tone**. Include details like car or clothes color **only if they are clearly visible on a real object/person**. Make this sentence a bit cheeky. **Do not report on shadow movements or visual noise.**
+2. **Comprehensive Observation and Action Sequence:** When analyzing movements, consider not only individual frames but also the **sequence of actions** and the **overall context**. For example, if a person approaches a gate, the gate visibly opens, and then the person enters or exits, this is a strong indicator of a deliberate action, even if individual frames might be slightly blurry or partially obscured.
+
+3.  **Primary Output:** Generate a single sentence in **Ukrainian** describing all detected actions involving **actual people, pets, or vehicles** within the focus area. Use a **casual, informal tone**. Include details like car or clothes color **only if they are clearly visible on a real object/person**. Make this sentence a bit cheeky. **Do not report on shadow movements or visual noise.**
     *   *Examples of desired style:* `Людина у червоній куртці шляється по тротуару.` or `Синє авто проїхало зліва направо, а потім хтось зайшов у хвіртку.` or `Якийсь дивак вовтузиться з хвірткою, ой лишенько!`
 
-3.  **Conditional Rule - No Significant Action:** If there is no notable movement or interaction involving **clearly identifiable people, pets, or vehicles** within the focus area during the clip (even if shadows are moving or the scene appears busy with non-entity motion), respond ONLY with the phrase:
-    `Ніц цікавого.`
+4.  **Conditional Rule - No Significant Action:** If, after thorough video analysis, **no clearly identifiable people, pets, or vehicles performing significant actions or interacting with objects in the focus area are detected**, respond ONLY with the phrase: `Ніц цікавого.`. This phrase is a last resort and should only be used when there are genuinely no real, verifiable events.
 
-4.  **Conditional Rule - Gate:** If the action involves **any clearly identifiable person physically passing through the gate** (entering or exiting), PREPEND your descriptive sentence from Rule 2 with the keyword `*Отакої!* ` (including the space and asterisks).
+5.  **Conditional Rule - Gate Interactions and Passage:** If the action involves **any clearly identifiable person physically interacting with the gate** (e.g., opening, closing, pushing, holding) **OR physically traversing the opening of the gate, thereby entering or exiting the private property** (meaning the person's body (or an object they are moving, like a stroller) must cross the visible threshold of the open gate, moving from the sidewalk *into* the private property, or vice-versa – **this is distinct from merely walking on the sidewalk adjacent to the gate**), PREPEND your descriptive sentence from Rule 3 with the keyword `*Отакої!*` (including the space and asterisks).
     *   *Example:* `*Отакої!* Чолов'яга зайшов у ворота.`
     *   *Example:* `*Отакої!* Жінка з собакою вийшла через хвіртку.`
+    *   *Example WITHOUT `*Отакої!*` (if person just walked past):* Людина прогулялася тротуаром. 
     *   *Example with multiple relevant actions:* `*Отакої!* Жінка у світлому худі швиденько вислизнула за хвіртку, а чоловік у синій футболці рішуче зайшов у двір.`
 
-    **Crucially, apply the *Отакої!* keyword ONLY if the form of the person is **unmistakable and clearly not a shadow**. Pay extreme attention to the gate area, as shadows from trees often create misleading, person-shaped movements. If the moving shape lacks clear legs, a distinct head, or realistic human motion, you **MUST** assume it is a shadow and ignore it. Exception is if the gate is opened or closed at the same time - then this action should be taken into account.**
-    **This rule does not apply if the person is just passing by the gate, but not going through it.**
+    This rule relies heavily on the "Comprehensive Observation and Action Sequence" (Rule 2). If the sequence clearly shows approach and passage, then the condition is met.
+    **Crucially:** If the gate itself visibly moves (opens or closes) in direct and clear correlation with a person's movement nearby (e.g., right before or as they pass through the opening), this should be considered a strong indicator of a deliberate interaction and successful passage, even if the person's specific hand movement on the gate is not perfectly clear.
+    **Crucially, apply the *Отакої!* keyword ONLY if the form of the person is **unmistakable and clearly not a shadow**. Pay extreme attention to the gate area, as shadows from trees often create misleading, person-shaped movements. If the moving shape lacks clear legs, a distinct head, or realistic human motion, you **MUST** assume it is a shadow and ignore it.**
+    **Crucially, merely walking past the gate on the adjacent sidewalk, even if very close, is NOT considered 'passing through' the gate for the purpose of the *Отакої!* keyword.**
+    This rule is relevant only for the defined focus area - **foreground**, specifically the **the gate directly in front of the camera**.
 
-5.  **Conditional Rule - Tesla Interaction:** If the action involves someone **specifically interacting with the parked red Tesla** (e.g., touching it, looking closely inside, trying handles, placing something on it - more than just walking past), then ADDITIONALLY to the Rule 2 description, describe *that specific interaction* concisely and PREPEND it with the keyword `*Хм...* ` (including the space). **Ensure the interaction is with the physical car itself, not its shadow.**
-    *   *Example:* `*Хм...* Невідомий відкрив багажник червоної Тесли.`
+6.  **Conditional Rule - Tesla Interaction:** If the action involves someone **specifically interacting with the parked red Tesla** (e.g., touching it, looking closely inside, trying handles, placing something on it - more than just walking past), then ADDITIONALLY to the Rule 3 description, describe *that specific interaction* concisely and include the keyword `*хм...*` (separated by spaces). **Ensure the interaction is with the physical car itself, not its shadow.**
+    *   *Example:* `*хм...* Невідомий відкрив багажник червоної Тесли.`
 
-6.  **Conditional Rule - Timestamp or Timerange:** For each action **matching Rule 4 conditions** you must include a time marker in the beginning of this action description, separated by spaces. Choose one of the following formats:
-    *   **Timestamp (`MM:SS`):** Use this format if a **single frame** can perfectly capture the core of the detected action (e.g., the person is clearly visible mid-gate). This should be the moment the action is most prominent.
-        *   *Example:* `*Отакої!* 00:05 Жінка з собакою прошмигнули крізь паркан.`
-    *   **Timerange (`MM:SS-MM:SS`):** Use this format if the action is better represented over a short duration (e.g., someone opening the gate, or walking through the gate). The timerange **must not exceed 5 seconds**. This timerange should include the moment when the action is most prominent.
+7.  **Conditional Rule - Timerange:** For each action **matching Rule 5 conditions** you must include a time marker in the beginning of this action description, separated by spaces. Use the following format:
+    *   **Timerange (`MM:SS-MM:SS`):** The timerange **must be between 3 to 6 seconds**. This timerange should include the moment when the action is most prominent. If multiple relevant actions can be covered by one timerange - then include only 1 timerange (not longer than 15 seconds in total) covering those actions in the response.
         *   *Example:* `*Отакої!* 00:12-00:15 Чоловік довго не міг відкрити хвіртку.`
-
-    *   *Example with multiple relevant actions:* `*Отакої!* 00:14-00:17 панянка у синій сукні пройшла крізь хвіртку, 00:28 дитина заскочила у двір.`
+        *   *Example with multiple relevant actions:* `*Отакої!* 00:14-00:17 панянка у синій сукні пройшла крізь хвіртку, 00:28-00:32 дитина заскочила у двір.`
 
     Crucially, ignore any date, time, or timestamp information that appears visually within the video frames themselves. Base the time marker solely on the video's duration relative to zero at the start.
-    Do not include time marker for actions matching Rule 5 (Tesla interaction).
+    Do not include time marker for actions matching Rule 6 (Tesla interaction).
 
-7.  **Rule Priority:** If both Rule 4 and Rule 5 conditions apply (e.g., someone walks through the gate *to* the Tesla and touches it), combine the responses from both Rule 4 and Rule 5.
-    *   *Example:* `*Отакої!* 00:15-00:18 чоловік зайшов у хвіртку, а потім *Хм...* одразу підійшов до червоної Тесли й смикнув за ручку.`
+8.  **Rule Priority:** If both Rule 5 and Rule 6 conditions apply (e.g., someone walks through the gate *to* the Tesla and touches it), combine the responses from both Rule 5 and Rule 6.
+    *   *Example:* `*Отакої!* 00:15-00:18 чоловік зайшов у хвіртку, а потім одразу підійшов до червоної Тесли й *хм...* смикнув за ручку.`
 
-8.  **Output Format:** Your final response must be **ONLY** the resulting Ukrainian sentences (potentially prepended with a keyword as per the rules) or the phrase `Ніц цікавого.`. Do **NOT** include any other text, explanation, or introductory phrases.
+9.  **Output Format:** Your final response must be **ONLY** the resulting Ukrainian sentences (potentially prepended with a keyword as per the rules) or the phrase `Ніц цікавого.`. Do **NOT** include any other text, explanation, or introductory phrases.
 </task>
 
 <language>Ensure your entire output is in Ukrainian.</language>

@@ -2,5 +2,4 @@ google-generativeai
 python-dotenv
 python-telegram-bot
 watchdog
-opencv-python
 moviepy
