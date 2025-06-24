@@ -1,5 +1,4 @@
 import os
-import time
 import datetime
 import asyncio
 import concurrent.futures
@@ -12,7 +11,8 @@ from telegram import Bot, InlineKeyboardMarkup, InlineKeyboardButton
 import telegram.error
 from telegram.ext import Application, CallbackQueryHandler
 from telegram.helpers import escape_markdown
-import google.generativeai as genai
+from google import genai
+from google.genai import types
 from google.api_core.exceptions import ResourceExhausted
 
 from watchdog.events import FileSystemEventHandler
@@ -120,7 +120,7 @@ if not os.path.isdir(VIDEO_FOLDER):
 # -----------------------------------
 
 try:
-    genai.configure(api_key=GEMINI_API_KEY)
+    client = genai.Client(api_key=GEMINI_API_KEY)
     logger.info("Gemini configured successfully.")
 except Exception as e:
     logger.critical(f"Failed to configure Gemini: {e}", exc_info=True) # Use exc_info for traceback
@@ -160,30 +160,14 @@ def analyze_video(video_path):
     """Extract insights from the video using Gemini. Runs in executor."""
     file_basename = os.path.basename(video_path)
     timestamp = f"_{file_basename[:6]}:_ "
-    video_file = None
-    try:
-        logger.info(f"[{file_basename}] Uploading video to Gemini...")
-        video_file = genai.upload_file(path=video_path)
-    except Exception as e:
-        logger.error(f"[{file_basename}] Video upload failed: {e}", exc_info=True) # Log traceback
-        return timestamp + "Video upload failed."
 
-    logger.info(f"[{file_basename}] Completed upload: {video_file.uri}")
+    video_bytes = open(video_path, 'rb').read()
+
+    model_main = 'models/gemini-2.5-flash'
+    model_fallback = 'models/gemini-2.5-flash-lite-preview-06-17'
+    model_pro = 'models/gemini-2.5-pro-exp-03-25'
 
     try:
-        start_time = time.time()
-        while video_file.state.name == "PROCESSING":
-            if time.time() - start_time > 600:  # 600 seconds = 10 minutes
-                logger.error(f"[{file_basename}] Timeout reached while waiting for Gemini processing.")
-                return timestamp + "Video processing timeout."
-            logger.info(f"[{file_basename}] Waiting for Gemini processing...")
-            time.sleep(10)
-            video_file = genai.get_file(video_file.name)  # Refresh state
-
-        if video_file.state.name == "FAILED":
-            logger.error(f"[{file_basename}] Video processing failed.")
-            return timestamp + "Video processing failed."
-
         prompt_file_path = os.path.join(os.path.dirname(__file__), "prompt.txt")
         try:
             with open(prompt_file_path, "r", encoding="utf-8") as prompt_file:
@@ -196,26 +180,85 @@ def analyze_video(video_path):
             logger.error(f"[{file_basename}] Error reading prompt file: {e}", exc_info=True)
             return timestamp + "Error reading prompt file."
 
-        model_flash = genai.GenerativeModel(model_name="models/gemini-2.5-flash")
         analysis_result = ""
         additional_text = ""
 
         logger.info(f"[{file_basename}] Generating content (2.5 Flash)...")
         try:
-            response = model_flash.generate_content([prompt, video_file],
-                      request_options={"timeout": 600})
+            response = client.models.generate_content(
+                          model=model_main,
+                          contents=types.Content(
+                              parts=[
+                                  types.Part(
+                                      inline_data=types.Blob(
+                                          data=video_bytes,
+                                          mime_type='video/mp4'),
+                                      video_metadata=types.VideoMetadata(fps=5)
+                                  ),
+                                  types.Part(text=prompt)
+                              ]
+                          ),
+                          config=types.GenerateContentConfig(
+                              automatic_function_calling=types.AutomaticFunctionCallingConfig(
+                                  disable=True
+                              )
+                          )
+                      )
             analysis_result = response.text
             logger.info(f"[{file_basename}] Gemini 2.5 Flash response received.")
-        except Exception as e_flash:
-            logger.warning(f"[{file_basename}] Gemini 2.5 Flash failed: {e_flash}. Falling back to Gemini 2.5 Flash-Lite.", exc_info=True)
+        except ResourceExhausted as e_quota_flash:
+            logger.warning(f"[{file_basename}] Gemini 2.5 Flash API quota exceeded. Message: {str(e_quota_flash).splitlines()[0]}")
             try:
-                model_2_5_flash_lite = genai.GenerativeModel(model_name="models/gemini-2.5-flash-lite-preview-06-17")
-                response = model_2_5_flash_lite.generate_content([prompt, video_file],
-                              request_options={"timeout": 600})
+                response = client.models.generate_content(
+                              model=model_fallback,
+                              contents=types.Content(
+                                  parts=[
+                                      types.Part(
+                                          inline_data=types.Blob(
+                                              data=video_bytes,
+                                              mime_type='video/mp4'),
+                                          video_metadata=types.VideoMetadata(fps=5)
+                                      ),
+                                      types.Part(text=prompt)
+                                  ]
+                              ),
+                              config=types.GenerateContentConfig(
+                                  automatic_function_calling=types.AutomaticFunctionCallingConfig(
+                                      disable=True
+                                  )
+                              )
+                          )
                 logger.info(f"[{file_basename}] Gemini 2.5 Flash-Lite response received.")
                 analysis_result = "_[2.5FL]_ " + response.text
             except Exception as e_flash_2_5_fl:
-                logger.error(f"[{file_basename}] Gemini 2.5 Flash-Lite also failed: {e_flash_2_5_fl}", exc_info=True)
+                logger.error(f"[{file_basename}] Gemini 2.5 Flash-Lite also failed: {e_flash_2_5_fl}")
+                raise  # Re-raise the exception to handle it in the outer scope
+        except Exception as e_flash:
+            logger.warning(f"[{file_basename}] Gemini 2.5 Flash failed: {e_flash}. Falling back to Gemini 2.5 Flash-Lite.")
+            try:
+                response = client.models.generate_content(
+                              model=model_fallback,
+                              contents=types.Content(
+                                  parts=[
+                                      types.Part(
+                                          inline_data=types.Blob(
+                                              data=video_bytes,
+                                              mime_type='video/mp4'),
+                                          video_metadata=types.VideoMetadata(fps=5)
+                                      ),
+                                      types.Part(text=prompt)
+                                  ]
+                              ),
+                              config=types.GenerateContentConfig(
+                                  automatic_function_calling=types.AutomaticFunctionCallingConfig(
+                                      disable=True
+                                  )
+                              )
+                          )
+                logger.info(f"[{file_basename}] Gemini 2.5 Flash-Lite response received.")
+                analysis_result = "_[2.5FL]_ " + response.text
+            except Exception as e_flash_2_5_fl:
+                logger.error(f"[{file_basename}] Gemini 2.5 Flash-Lite also failed: {e_flash_2_5_fl}")
                 raise  # Re-raise the exception to handle it in the outer scope
 
         logger.info(f"[{file_basename}] {analysis_result}")
@@ -223,11 +266,27 @@ def analyze_video(video_path):
         now = datetime.datetime.now()
         # Disabled 2.5 Pro for now, as it has no free tier quota
         if False: #("Отакої!" in analysis_result) and (9 <= now.hour <= 13):
-            model_pro = genai.GenerativeModel(model_name="models/gemini-2.5-pro-exp-03-25")
             logger.info(f"[{file_basename}] Trying Gemini 2.5 Pro...")
             try:
-                response_new = model_pro.generate_content([prompt, video_file],
-                                                          request_options={"timeout": 600})
+                response_new = client.models.generate_content(
+                                  model=model_pro,
+                                  contents=types.Content(
+                                      parts=[
+                                          types.Part(
+                                              inline_data=types.Blob(
+                                                  data=video_bytes,
+                                                  mime_type='video/mp4'),
+                                              video_metadata=types.VideoMetadata(fps=5)
+                                          ),
+                                          types.Part(text=prompt)
+                                      ]
+                                  ),
+                                  config=types.GenerateContentConfig(
+                                      automatic_function_calling=types.AutomaticFunctionCallingConfig(
+                                          disable=True
+                                      )
+                                  )
+                              )
                 logger.info(f"[{file_basename}] Gemini 2.5 Pro response received.")
                 logger.info(f"[{file_basename}] {response_new.text}")
                 additional_text = "\n_[2.5 Pro]_ " + response_new.text + "\n" + USERNAME
@@ -247,16 +306,6 @@ def analyze_video(video_path):
         logger.error(f"[{file_basename}] Video analysis failed: {e_analysis}", exc_info=True)
         return timestamp + "Video analysis failed."
 
-    finally:
-        if video_file and hasattr(video_file, 'name'):
-            try:
-                logger.info(f"[{file_basename}] Deleting Gemini file {video_file.name}...")
-                genai.delete_file(video_file.name)
-                logger.info(f"[{file_basename}] Gemini file {video_file.name} deleted.")
-            except Exception as del_e:
-                # Log as warning, failure to delete isn't critical for main flow
-                logger.warning(f"[{file_basename}] Failed to delete Gemini file {video_file.name}: {del_e}", exc_info=True)
-                pass
 
 def time_to_seconds(timestamp):
     minutes, seconds = map(int, timestamp.split(':'))
