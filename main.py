@@ -191,10 +191,10 @@ def analyze_video(video_path):
         analysis_result = ""
         additional_text = ""
 
-        logger.info(f"[{file_basename}] Generating content ({model_main})...")
         for attempt in range(max_retries):
             try:
                 with gemini_semaphore:
+                    logger.info(f"[{file_basename}] Generating content ({model_main}), attempt {attempt}...")
                     response = client.models.generate_content(
                                   model=model_main,
                                   contents=types.Content(
@@ -218,9 +218,9 @@ def analyze_video(video_path):
                 analysis_result = response.text
                 break
             except Exception as e_flash:
-                logger.warning(f"[{file_basename}] {model_main} failed. Falling back to {model_fallback}. Message: {e_flash}")
                 try:
                     with gemini_semaphore:
+                        logger.warning(f"[{file_basename}] {model_main} failed. Falling back to {model_fallback}. Message: {e_flash}")
                         response = client.models.generate_content(
                                       model=model_fallback,
                                       contents=types.Content(
@@ -250,8 +250,8 @@ def analyze_video(video_path):
                         logger.warning(f"[{file_basename}] Retrying in {wait_time}s...")
                         time.sleep(wait_time)
                     else:
-                        logger.info(f"[{file_basename}] Attempting {model_fallback_2_0} as final fallback...")
                         try:
+                            logger.info(f"[{file_basename}] Attempting {model_fallback_2_0} as final fallback...")
                             response = client.models.generate_content(
                                           model=model_fallback_2_0,
                                           contents=types.Content(
