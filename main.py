@@ -167,10 +167,10 @@ def analyze_video(video_path):
 
     video_bytes = open(video_path, 'rb').read()
 
-    model_main = 'models/gemini-2.5-flash'
-    model_fallback = 'models/gemini-2.5-flash-lite-preview-06-17'
-    model_fallback_2_0 = 'models/gemini-2.0-flash'
-    model_pro = 'models/gemini-2.5-pro-exp-03-25'
+    model_main = 'gemini-2.5-flash'
+    model_fallback = 'gemini-2.5-flash-lite-preview-06-17'
+    model_fallback_2_0 = 'gemini-2.0-flash'
+    model_pro = 'gemini-2.5-pro-exp-03-25'
 
     sampling_rate = 5  # sampling rate in FPS
     max_retries = 3
@@ -191,7 +191,7 @@ def analyze_video(video_path):
         analysis_result = ""
         additional_text = ""
 
-        logger.info(f"[{file_basename}] Generating content (2.5 Flash)...")
+        logger.info(f"[{file_basename}] Generating content ({model_main})...")
         for attempt in range(max_retries):
             try:
                 with gemini_semaphore:
@@ -214,11 +214,11 @@ def analyze_video(video_path):
                                       )
                                   )
                               )
-                logger.info(f"[{file_basename}] Gemini 2.5 Flash response received.")
+                logger.info(f"[{file_basename}] {model_main} response received.")
                 analysis_result = response.text
                 break
             except Exception as e_flash:
-                logger.warning(f"[{file_basename}] Gemini 2.5 Flash failed. Falling back to Gemini 2.5 Flash-Lite. Message: {e_flash}")
+                logger.warning(f"[{file_basename}] {model_main} failed. Falling back to {model_fallback}. Message: {e_flash}")
                 try:
                     with gemini_semaphore:
                         response = client.models.generate_content(
@@ -240,17 +240,17 @@ def analyze_video(video_path):
                                           )
                                       )
                                   )
-                    logger.info(f"[{file_basename}] Gemini 2.5 Flash-Lite response received.")
+                    logger.info(f"[{file_basename}] {model_fallback} response received.")
                     analysis_result = "_[2.5FL]_ " + response.text
                     break
                 except Exception as e_flash_2_5_fl:
-                    logger.warning(f"[{file_basename}] Gemini 2.5 Flash-Lite also failed: {e_flash_2_5_fl}")
+                    logger.warning(f"[{file_basename}] {model_fallback} also failed: {e_flash_2_5_fl}")
                     if attempt < max_retries - 1:
                         wait_time = 10 * (2 ** attempt)  # Exponential backoff: 10s, 20s, 40s
                         logger.warning(f"[{file_basename}] Retrying in {wait_time}s...")
                         time.sleep(wait_time)
                     else:
-                        logger.info(f"[{file_basename}] Attempting Gemini 2.0 Flash as final fallback...")
+                        logger.info(f"[{file_basename}] Attempting {model_fallback_2_0} as final fallback...")
                         try:
                             response = client.models.generate_content(
                                           model=model_fallback_2_0,
@@ -271,20 +271,20 @@ def analyze_video(video_path):
                                               )
                                           )
                                       )
-                            logger.info(f"[{file_basename}] Gemini 2.0 Flash response received.")
+                            logger.info(f"[{file_basename}] {model_fallback_2_0} response received.")
                             analysis_result = "_[2.0]_ " + response.text
                             break
                         except Exception as e_flash_2_0:
-                            logger.error(f"[{file_basename}] Gemini 2.0 Flash failed as well: {e_flash_2_0}")
+                            logger.error(f"[{file_basename}] {model_fallback_2_0} failed as well: {e_flash_2_0}")
                             logger.error(f"[{file_basename}] Giving up after retries.")
                             raise # Re-raise the exception to handle it in the outer scope
 
-        logger.info(f"[{file_basename}] {analysis_result}")
+        logger.info(f"[{file_basename}] Response: {analysis_result}")
 
         now = datetime.datetime.now()
         # Disabled 2.5 Pro for now, as it has no free tier quota
         if False: #("Отакої!" in analysis_result) and (9 <= now.hour <= 13):
-            logger.info(f"[{file_basename}] Trying Gemini 2.5 Pro...")
+            logger.info(f"[{file_basename}] Trying {model_pro}...")
             try:
                 response_new = client.models.generate_content(
                                   model=model_pro,
@@ -305,12 +305,12 @@ def analyze_video(video_path):
                                       )
                                   )
                               )
-                logger.info(f"[{file_basename}] Gemini 2.5 Pro response received.")
+                logger.info(f"[{file_basename}] {model_pro} response received.")
                 logger.info(f"[{file_basename}] {response_new.text}")
                 additional_text = "\n_[2.5 Pro]_ " + response_new.text + "\n" + USERNAME
             except Exception as e_pro:
                 # Log as warning since Flash result is still available
-                logger.warning(f"[{file_basename}] Error in Gemini 2.5 Pro: {e_pro}", exc_info=True)
+                logger.warning(f"[{file_basename}] Error in {model_pro}: {e_pro}", exc_info=True)
                 additional_text = "\n_[2.5 Pro]_ Failed.\n" + USERNAME
         if ("Отакої!" in analysis_result) and (9 <= now.hour <= 13):
             additional_text = "\n" + USERNAME

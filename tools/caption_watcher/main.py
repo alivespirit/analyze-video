@@ -11,7 +11,7 @@ import pygetwindow as gw # For finding, activating, maximizing, and closing the 
 MONITOR_FOLDER = r"\\UX305CA\nas\analyze-video\temp"
 FILE_EXTENSIONS = [".jpg", ".mp4"]
 VIEW_DURATION = 7  # seconds
-KNOWN_VIEWER_PROCESS_FALLBACK = ["Photos.exe", "Microsoft.Media.Player.exe", "PhotoViewer.dll", "ImageGlass.exe"]
+KNOWN_VIEWER_PROCESS_FALLBACK = ["Photos.exe", "Microsoft.Media.Player.exe"]
 # --- End Configuration ---
 
 file_queue = queue.Queue()
