@@ -25,7 +25,7 @@ from moviepy import VideoFileClip, concatenate_videoclips
 
 import threading
 
-GEMINI_CONCURRENCY_LIMIT = 2  # Only one Gemini call at a time (adjust if safe)
+GEMINI_CONCURRENCY_LIMIT = 1  # Only one Gemini call at a time (adjust if safe)
 gemini_semaphore = threading.Semaphore(GEMINI_CONCURRENCY_LIMIT)
 
 RESTART_REQUESTED = False
