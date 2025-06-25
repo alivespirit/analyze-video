@@ -194,7 +194,7 @@ def analyze_video(video_path):
         for attempt in range(max_retries):
             try:
                 with gemini_semaphore:
-                    logger.info(f"[{file_basename}] Generating content ({model_main}), attempt {attempt}...")
+                    logger.info(f"[{file_basename}] Generating content ({model_main}), attempt {attempt+1}...")
                     response = client.models.generate_content(
                                   model=model_main,
                                   contents=types.Content(
