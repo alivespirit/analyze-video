@@ -365,6 +365,26 @@ def extract_video_clip(video_path, timeranges):
         logger.error(f"Error extracting and concatenating video clips: {e}", exc_info=True)
         return None
 
+def create_srt_file(video_path, subtitle, timeranges):
+    # --- Create SRT file with video_response as subtitle ---
+    try:
+        timeranges_str = "_".join([tr.replace(":", "").replace("-", "to").replace("00", "") for tr in timeranges])
+        srt_path = os.path.join(
+            TEMP_DIR,
+            f"{os.path.splitext(os.path.basename(video_path))[0]}_{timeranges_str}.srt"
+        )
+        srt_content = (
+            "1\n"
+            "00:00:00,000 --> 00:01:00,000\n"
+            r"{\an8}"f"{subtitle}\n"
+        )
+        with open(srt_path, "w", encoding="utf-8") as srt_file:
+            srt_file.write(srt_content)
+        return srt_path
+    except Exception as srt_e:
+        logger.warning(f"Failed to create SRT file: {srt_e}", exc_info=True)
+        return None
+
 # --- FileHandler (uses executor) ---
 class FileHandler(FileSystemEventHandler):
     def __init__(self, loop, app):
@@ -432,6 +452,8 @@ class FileHandler(FileSystemEventHandler):
                     index_text = f"\n`{matches}`"
                     media_path = None
                     try:
+                        self.logger.info(f"[{file_basename}] Preparing SRT file with video_response...")
+                        srt_path = create_srt_file(file_path, video_response, matches)
                         self.logger.info(f"[{file_basename}] Extracting video clip for ranges {matches}...")
                         media_path = extract_video_clip(file_path, matches) 
                         if media_path:
@@ -462,8 +484,12 @@ class FileHandler(FileSystemEventHandler):
                     finally:
                         # Delete the generated clip after sending or if an error occurs
                         if media_path and os.path.exists(media_path):
-                            await asyncio.sleep(30) # Give a moment before deleting
+                            while os.path.exists(media_path + ".lock"):
+                                self.logger.info(f"[{file_basename}] Waiting for lock file to be released before deleting: {media_path}.lock")
+                                await asyncio.sleep(5)
                             os.remove(media_path)
+                            if srt_path and os.path.exists(srt_path):
+                                os.remove(srt_path)
                             self.logger.info(f"[{file_basename}] Temporary media file deleted: {media_path}")
 
                     if send_plain_message: # This will be true if media creation or sending failed

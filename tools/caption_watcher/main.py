@@ -58,11 +58,41 @@ def file_processor_worker():
                 break
             
             print(f"\nProcessing: {filepath}")
+            # Create an empty lock file to indicate processing
+            lock_path = f"{filepath}.lock"
             try:
-                print(f"Opening {filepath} with default application 2 times...")
-                for _ in range(2):
-                    os.startfile(filepath)
-                    find_window(filepath)
+              with open(lock_path, "w") as lock_file:
+                pass
+              print(f"Created lock file: {lock_path}")
+            except Exception as e:
+              print(f"Failed to create lock file {lock_path}: {e}")
+
+            print(f"Checking file stability for: {filepath}")
+            last_size = -1
+            stable_checks = 0
+            while stable_checks < 2:
+                try:
+                    current_size = os.path.getsize(filepath)
+                    if current_size == last_size and current_size > 0: # Ensure size is not zero
+                        stable_checks += 1
+                    else:
+                        stable_checks = 0 # Reset if size changes or is zero
+                    last_size = current_size
+                except Exception as e:
+                    print(f"[{filepath}] Error checking file size: {e}", exc_info=True)
+                    raise # Re-raise unexpected errors
+
+                if stable_checks < 2:
+                    time.sleep(2) # Wait before the next check
+
+            print(f"[{filepath}] File considered stable at {last_size} bytes.")
+
+            try:
+                print(f"Opening {filepath} with default application...")
+                os.startfile(filepath)
+                find_window(filepath)
+                os.remove(lock_path)  # Remove lock file after processing
+                print(f"Removed lock file: {lock_path}")
             except Exception as e:
                 print(f"Error processing file {filepath}: {e}")
             finally:
