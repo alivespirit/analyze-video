@@ -3,3 +3,5 @@ python-dotenv
 python-telegram-bot
 watchdog
 moviepy
+opencv-python
+numpy

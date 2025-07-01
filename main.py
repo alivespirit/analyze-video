@@ -6,6 +6,9 @@ import logging
 import re
 import sys
 import time
+import json
+import cv2
+import numpy as np
 
 from dotenv import load_dotenv
 from telegram import Bot, InlineKeyboardMarkup, InlineKeyboardButton
@@ -21,12 +24,18 @@ from watchdog.observers.polling import PollingObserver as Observer
 from logging.handlers import TimedRotatingFileHandler
 
 # Importing VideoFileClip from moviepy for MP4 extraction
-from moviepy import VideoFileClip, concatenate_videoclips
+from moviepy import ImageSequenceClip
 
 import threading
 
 GEMINI_CONCURRENCY_LIMIT = 1  # Only one Gemini call at a time (adjust if safe)
 gemini_semaphore = threading.Semaphore(GEMINI_CONCURRENCY_LIMIT)
+
+# --- State for Grouping "No Motion" Messages ---
+# These are safe to use as globals because the executor has max_workers=1,
+# ensuring sequential processing and preventing race conditions.
+no_motion_group_message_id = None
+no_motion_grouped_videos = []
 
 RESTART_REQUESTED = False
 MAIN_SCRIPT_PATH = os.path.abspath(__file__)
@@ -114,6 +123,28 @@ except OSError as e:
     exit(1) # Can't proceed without a temp dir, so exit.
 # ---------------------------------------------
 
+# --- Motion detection configuration ---
+MIN_CONTOUR_AREA = 1800         # Minimum area of a contour to be considered significant
+MIN_SOLIDITY = 0.8              # A person is a very solid shape. 1.0 is a perfect rectangle.
+ROI_CONFIG_FILE = os.path.join(SCRIPT_DIR, "roi.json")
+PADDING_SECONDS = 1.0
+# ### WARM-UP CONFIGURATION ###
+# Number of initial frames to ignore while the background model stabilizes.
+# A value of 25-50 is usually good for a 25fps video (1-2 seconds).
+WARMUP_FRAMES = 15
+# ### CONFIGURATION FOR EVENT GROUPING ###
+# If motion stops for more than this many seconds, start a new clip segment.
+MAX_EVENT_GAP_SECONDS = 3.0
+# ### DURATION FILTER CONFIGURATION ###
+# Discard any motion event that lasts for less than this many seconds.
+MIN_EVENT_DURATION_SECONDS = 2.0
+# ### PERFORMANCE CONFIGURATION ###
+CROP_PADDING = 30  # Pixels to add around the ROI bounding box for safety
+# ### SANITY CHECK CONFIGURATION ###
+# If a bounding box is larger than this percentage of the total analysis area,
+# discard it as it's likely a noise-polluted first frame.
+MAX_BOX_AREA_PERCENT = 0.80 
+
 # --- Check Environment Variables ---
 if not all([GEMINI_API_KEY, TELEGRAM_TOKEN, CHAT_ID, USERNAME, VIDEO_FOLDER]):
     logger.critical("ERROR: One or more essential environment variables are missing. Exiting.")
@@ -148,24 +179,304 @@ except Exception as e:
      exit(1)
 
 # Thread Pool Executor for Blocking Tasks
-# Use min(32, os.cpu_count() + 4) as suggested by ThreadPoolExecutor docs
-# or stick to a reasonable number if cpu_count is unreliable/very large
-max_workers = min(32, (os.cpu_count() or 1) + 4)
+# We limit the pool to 1 worker. This effectively creates a processing queue,
+# preventing multiple CPU-heavy 'detect_motion' tasks from running simultaneously
+# and overwhelming the system.
+max_workers = 1 
 try:
     executor = concurrent.futures.ThreadPoolExecutor(max_workers=max_workers)
-    logger.info(f"ThreadPoolExecutor initialized with max_workers={max_workers}.")
+    logger.info(f"ThreadPoolExecutor initialized with a single worker (max_workers=1) to ensure sequential video processing.")
 except Exception as e:
      logger.critical(f"Failed to initialize ThreadPoolExecutor: {e}", exc_info=True)
      exit(1)
 
+
+# --- ROI Loading Function ---
+def load_roi(file_path):
+    if os.path.exists(file_path):
+        with open(file_path, 'r') as f:
+            points = json.load(f)
+        return np.array(points, dtype=np.int32)
+    return None
+
+def is_likely_person_or_object(contour):
+    """
+    Checks if a contour has the shape properties of a person or solid object.
+    Returns True if it passes the checks, False otherwise.
+    """
+    # 1. Check Area (basic filter)
+    area = cv2.contourArea(contour)
+    if area < MIN_CONTOUR_AREA:
+        return False
+
+    # 2. Check Solidity
+    hull = cv2.convexHull(contour)
+    hull_area = cv2.contourArea(hull)
+    solidity = float(area) / hull_area if hull_area > 0 else 0
+    if solidity < MIN_SOLIDITY:
+        return False
+    
+    # If all checks pass, it's likely a person/solid object
+    return True
+
+def detect_motion(input_video_path, output_dir):
+    file_basename = os.path.basename(input_video_path)
+    roi_poly_points = load_roi(ROI_CONFIG_FILE)
+    if roi_poly_points is None:
+        logger.error(f"[{file_basename}] ROI config file not found.")
+        return None
+
+    cap = cv2.VideoCapture(input_video_path)
+    if not cap.isOpened():
+        logger.error(f"[{file_basename}] Could not open video file {input_video_path}")
+        return None
+    
+    start_time = time.time()
+
+    fps = cap.get(cv2.CAP_PROP_FPS) or 25.0
+    total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+    orig_w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+    orig_h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+    # ### DEFINE THE CROP BOX BASED ON THE ROI ###
+    # 2. Calculate the bounding box of the ROI polygon
+    x_coords = roi_poly_points[:, 0]
+    y_coords = roi_poly_points[:, 1]
+    # Add padding to ensure we don't cut off anything at the edges
+    crop_x1 = max(0, np.min(x_coords) - CROP_PADDING)
+    crop_y1 = max(0, np.min(y_coords) - CROP_PADDING)
+    crop_x2 = min(orig_w, np.max(x_coords) + CROP_PADDING)
+    crop_y2 = min(orig_h, np.max(y_coords) + CROP_PADDING)
+    crop_w = crop_x2 - crop_x1
+    crop_h = crop_y2 - crop_y1
+    
+    logger.info(f"[{file_basename}] Original frame: {orig_w}x{orig_h}. Analyzing cropped region: {crop_w}x{crop_h} at ({crop_x1},{crop_y1}).")
+
+    # ### MODIFIED: ALL SUBSEQUENT SETUP IS RELATIVE TO THE CROP ###
+    # 3. Translate the global ROI points to be local to the crop box
+    local_roi_points = roi_poly_points.copy()
+    local_roi_points[:, 0] -= crop_x1
+    local_roi_points[:, 1] -= crop_y1
+    
+    # The ROI points are now simply the local points, not scaled.
+    analysis_roi_points = local_roi_points.astype(np.int32)
+    
+    backSub = cv2.createBackgroundSubtractorKNN(history=500, dist2Threshold=800, detectShadows=True)
+    # The mask is now the size of the CROP, not a downscaled version.
+    roi_mask = np.zeros((crop_h, crop_w), dtype=np.uint8)
+    cv2.fillPoly(roi_mask, [analysis_roi_points], 255)
+    
+    motion_events = []
+    for frame_index in range(WARMUP_FRAMES, total_frames):
+        ret, frame = cap.read()
+        if not ret: break
+
+        # CROP THE FRAME FIRST!
+        cropped_frame = frame[crop_y1:crop_y2, crop_x1:crop_x2]
+        
+        # All subsequent analysis is now super fast
+        roi_frame = cv2.bitwise_and(cropped_frame, cropped_frame, mask=roi_mask)
+        # ... (the rest of the loop is the same: fg_mask, morphology, findContours) ...
+        fg_mask = backSub.apply(roi_frame)
+        _, fg_mask = cv2.threshold(fg_mask, 250, 255, cv2.THRESH_BINARY)
+        kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
+        fg_mask = cv2.morphologyEx(fg_mask, cv2.MORPH_OPEN, kernel, iterations=2)
+        fg_mask = cv2.dilate(fg_mask, kernel, iterations=3)
+        contours, _ = cv2.findContours(fg_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        person_like_contours = [cnt for cnt in contours if is_likely_person_or_object(cnt)]
+        if person_like_contours:
+            motion_events.append((frame_index, person_like_contours))
+
+    if not motion_events:
+        logger.info(f"[{file_basename}] No significant motion found.")
+        cap.release()
+        elapsed_time = time.time() - start_time
+        logger.info(f"[{file_basename}] Motion detection took {elapsed_time:.2f} seconds.")
+        return "No motion"
+
+    # ### Sanity check added to the creation of union_rects ###
+    union_rects = {}
+    motion_event_dict = dict(motion_events)
+    # The total area of our analysis region (the cropped image)
+    total_analysis_area = crop_w * crop_h
+    max_allowed_area = total_analysis_area * MAX_BOX_AREA_PERCENT
+
+    for frame_idx, contours in motion_event_dict.items():
+        min_x, min_y, max_x, max_y = float('inf'), float('inf'), float('-inf'), float('-inf')
+        for cnt in contours:
+            (x, y, w, h) = cv2.boundingRect(cnt)
+            min_x, min_y = min(min_x, x), min(min_y, y)
+            max_x, max_y = max(max_x, x + w), max(max_y, y + h)
+        
+        if min_x != float('inf'):
+            box_w = max_x - min_x
+            box_h = max_y - min_y
+            box_area = box_w * box_h
+            
+            # THE SANITY CHECK:
+            if box_area < max_allowed_area:
+                union_rects[frame_idx] = (min_x, min_y, box_w, box_h)
+            else:
+                logger.info(f"[{file_basename}] Frame {frame_idx}: Discarding giant bounding box (area {box_area} > max {max_allowed_area}).")
+
+    # If the sanity check removed all detections, it was just noise.
+    if not union_rects:
+        logger.info(f"[{file_basename}] All detected motion boxes were too large and discarded as noise.")
+        elapsed_time = time.time() - start_time
+        logger.info(f"[{file_basename}] Motion detection took {elapsed_time:.2f} seconds.")
+        cap.release()
+        return "No motion"
+
+    # Now, all subsequent logic operates on the CLEANED union_rects data
+    motion_frame_indices = sorted(union_rects.keys())
+    max_gap_in_frames = MAX_EVENT_GAP_SECONDS * fps
+    sub_clips = []
+    if motion_frame_indices:
+        clip_start = motion_frame_indices[0]
+        clip_end = motion_frame_indices[0]
+        for i in range(1, len(motion_frame_indices)):
+            if motion_frame_indices[i] - clip_end > max_gap_in_frames:
+                sub_clips.append((clip_start, clip_end))
+                clip_start = motion_frame_indices[i]
+            clip_end = motion_frame_indices[i]
+        sub_clips.append((clip_start, clip_end))
+
+    logger.info(f"[{file_basename}] Found {len(sub_clips)} raw motion event(s). Filtering by duration...")
+    significant_sub_clips = []
+    for start_frame, end_frame in sub_clips:
+        duration_frames = end_frame - start_frame
+        duration_seconds = duration_frames / fps
+        if duration_seconds >= MIN_EVENT_DURATION_SECONDS:
+            logger.info(f"[{file_basename}]   - Event lasting {duration_seconds:.2f}s is SIGNIFICANT. Keeping.")
+            significant_sub_clips.append((start_frame, end_frame))
+        else:
+            logger.info(f"[{file_basename}]   - Event lasting {duration_seconds:.2f}s is too short. Discarding as noise/shadow.")
+    
+    # If all events were filtered out, we're done.
+    if not significant_sub_clips:
+        logger.info(f"[{file_basename}] No significant long-duration motion found. Discarding video.")
+        cap.release()
+        elapsed_time = time.time() - start_time
+        logger.info(f"[{file_basename}] Motion detection took {elapsed_time:.2f} seconds.")
+        return "No significant motion"
+
+    # ##############################################################################
+    # ### INTERPOLATE RECTANGLES  ###
+    # ##############################################################################
+    logger.info(f"[{file_basename}] Interpolating bounding boxes for smooth tracking...")
+
+    # Create the final, complete dictionary of rectangles by filling gaps.
+    interpolated_rects = {}
+    for start_frame, end_frame in significant_sub_clips:
+        known_frames_in_clip = sorted([f for f in union_rects.keys() if start_frame <= f <= end_frame])
+        if not known_frames_in_clip: continue
+
+        for i in range(len(known_frames_in_clip) - 1):
+            start_anchor_frame, end_anchor_frame = known_frames_in_clip[i], known_frames_in_clip[i+1]
+            start_box, end_box = union_rects[start_anchor_frame], union_rects[end_anchor_frame]
+            total_gap_frames = float(end_anchor_frame - start_anchor_frame)
+            
+            interpolated_rects[start_anchor_frame] = start_box # Copy the known start box
+
+            if total_gap_frames > 0:
+                for j in range(1, int(total_gap_frames)):
+                    current_frame_in_gap = start_anchor_frame + j
+                    progress = j / total_gap_frames
+                    interp_x = int(start_box[0] + (end_box[0] - start_box[0]) * progress)
+                    interp_y = int(start_box[1] + (end_box[1] - start_box[1]) * progress)
+                    interp_w = int(start_box[2] + (end_box[2] - start_box[2]) * progress)
+                    interp_h = int(start_box[3] + (end_box[3] - start_box[3]) * progress)
+                    interpolated_rects[current_frame_in_gap] = (interp_x, interp_y, interp_w, interp_h)
+        
+        if known_frames_in_clip: # Ensure the very last known frame is included
+            interpolated_rects[known_frames_in_clip[-1]] = union_rects[known_frames_in_clip[-1]]
+
+
+    # Final frame assembly now uses the clean `interpolated_rects` data ###
+    logger.info(f"[{file_basename}] Assembling highlight reel with {len(interpolated_rects)} smooth boxes.")
+    all_clip_frames = []
+
+    for start_frame, end_frame in significant_sub_clips:
+        padded_start = max(0, start_frame - int(PADDING_SECONDS * fps))
+        padded_end = min(total_frames, end_frame + int(PADDING_SECONDS * fps))
+        cap.set(cv2.CAP_PROP_POS_FRAMES, padded_start)
+        
+        for i in range(padded_start, padded_end):
+            ret, frame = cap.read()
+            if not ret: break
+
+            if i in interpolated_rects:
+                # The drawing logic is now simpler and cleaner.
+                (x, y, w, h) = interpolated_rects[i]
+                
+                orig_x1 = int(x + crop_x1)
+                orig_y1 = int(y + crop_y1)
+                orig_x2 = int(x + w + crop_x1)
+                orig_y2 = int(y + h + crop_y1)
+                
+                cv2.rectangle(frame, (orig_x1, orig_y1), (orig_x2, orig_y2), (0, 255, 0), 2)
+            
+            rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+            all_clip_frames.append(rgb_frame)
+
+    cap.release()
+
+    if not all_clip_frames:
+        logger.error(f"[{file_basename}] No frames collected for the clip.")
+        return None
+        
+    final_clip = ImageSequenceClip(all_clip_frames, fps=fps)
+    output_filename = os.path.join(output_dir, file_basename)
+    logger.info(f"[{file_basename}] Writing final highlight clip to {output_filename}...")
+    final_clip.write_videofile(
+        output_filename, codec='libx264', audio=False, bitrate='2000k',
+        preset='medium', threads=4, logger=None
+    )
+    
+    file_size = os.path.getsize(output_filename) / (1024 * 1024)
+    logger.info(f"[{file_basename}] Successfully created clip: {output_filename}. Size: {file_size:.2f} MB")
+    elapsed_time = time.time() - start_time
+    logger.info(f"[{file_basename}] Motion detection took {elapsed_time:.2f} seconds.")
+    return output_filename
 
 # --- analyze_video function (remains synchronous, uses original models) ---
 def analyze_video(video_path):
     """Extract insights from the video using Gemini. Runs in executor."""
     file_basename = os.path.basename(video_path)
     timestamp = f"_{file_basename[:6]}:_ "
+    video_bytes = None
+    use_files_api = False
 
-    video_bytes = open(video_path, 'rb').read()
+    detected_motion = detect_motion(video_path, TEMP_DIR)
+    if detected_motion == "No motion":
+        logger.info(f"[{file_basename}] Skipping Gemini analysis.")
+        return timestamp + "Нема шо дивитись."
+    elif detected_motion == "No significant motion":
+        logger.info(f"[{file_basename}] Analyzing full video.")
+        video_bytes = open(video_path, 'rb').read()
+    elif detected_motion is None:
+        logger.warning(f"[{file_basename}] Error during motion detection. Analyzing full video.")
+        video_bytes = open(video_path, 'rb').read()
+    else:
+        logger.info(f"[{file_basename}] Running Gemini analysis for {detected_motion}")
+        timestamp = f"_{file_basename[:6]}:_ *Отакої!* "
+        use_files_api = True
+        video_bytes = client.files.upload(file=detected_motion)
+        # Wait up to 2 minutes (120 seconds) for video processing
+        max_wait_seconds = 120
+        wait_interval = 10
+        waited = 0
+        while video_bytes.state == "PROCESSING":
+            if waited >= max_wait_seconds:
+                logger.error(f"[{file_basename}] Video processing timed out after {max_wait_seconds} seconds.")
+                return timestamp + "Відео не вдалося обробити (timeout)."
+            logger.info(f"[{file_basename}] Waiting for video to be processed ({waited}/{max_wait_seconds}s).")
+            time.sleep(wait_interval)
+            waited += wait_interval
+            video_bytes = client.files.get(name=video_bytes.name)
+
+        if video_bytes.state == "FAILED":
+            logger.error(f"[{file_basename}] Video processing failed: {video_bytes.error_message}")
+            return timestamp + "Відео не вдалося обробити."
 
     model_main = 'gemini-2.5-flash'
     model_fallback = 'gemini-2.5-flash-lite-preview-06-17'
@@ -188,26 +499,33 @@ def analyze_video(video_path):
             logger.error(f"[{file_basename}] Error reading prompt file: {e}", exc_info=True)
             return timestamp + "Error reading prompt file."
 
+        if use_files_api:
+            contents = [video_bytes, prompt]
+        else:
+            contents = types.Content(
+                parts=[
+                    types.Part(
+                        inline_data=types.Blob(
+                            data=video_bytes,
+                            mime_type='video/mp4'
+                        ),
+                        video_metadata=types.VideoMetadata(fps=sampling_rate)
+                    ),
+                    types.Part(text=prompt)
+                ]
+            )
+
         analysis_result = ""
         additional_text = ""
 
+        # Removed video_metadata=types.VideoMetadata(fps=sampling_rate) until it's broken in 2.5
         for attempt in range(max_retries):
             try:
                 with gemini_semaphore:
                     logger.info(f"[{file_basename}] Generating content ({model_main}), attempt {attempt+1}...")
                     response = client.models.generate_content(
                                   model=model_main,
-                                  contents=types.Content(
-                                      parts=[
-                                          types.Part(
-                                              inline_data=types.Blob(
-                                                  data=video_bytes,
-                                                  mime_type='video/mp4'),
-                                              video_metadata=types.VideoMetadata(fps=sampling_rate)
-                                          ),
-                                          types.Part(text=prompt)
-                                      ]
-                                  ),
+                                  contents=contents,
                                   config=types.GenerateContentConfig(
                                       automatic_function_calling=types.AutomaticFunctionCallingConfig(
                                           disable=True
@@ -223,17 +541,7 @@ def analyze_video(video_path):
                         logger.warning(f"[{file_basename}] {model_main} failed. Falling back to {model_fallback}. Message: {e_flash}")
                         response = client.models.generate_content(
                                       model=model_fallback,
-                                      contents=types.Content(
-                                          parts=[
-                                              types.Part(
-                                                  inline_data=types.Blob(
-                                                      data=video_bytes,
-                                                      mime_type='video/mp4'),
-                                                  video_metadata=types.VideoMetadata(fps=sampling_rate)
-                                              ),
-                                              types.Part(text=prompt)
-                                          ]
-                                      ),
+                                      contents=contents,
                                       config=types.GenerateContentConfig(
                                           automatic_function_calling=types.AutomaticFunctionCallingConfig(
                                               disable=True
@@ -254,17 +562,7 @@ def analyze_video(video_path):
                             logger.info(f"[{file_basename}] Attempting {model_fallback_2_0} as final fallback...")
                             response = client.models.generate_content(
                                           model=model_fallback_2_0,
-                                          contents=types.Content(
-                                              parts=[
-                                                  types.Part(
-                                                      inline_data=types.Blob(
-                                                          data=video_bytes,
-                                                          mime_type='video/mp4'),
-                                                      video_metadata=types.VideoMetadata(fps=sampling_rate)
-                                                  ),
-                                                  types.Part(text=prompt)
-                                              ]
-                                          ),
+                                          contents=contents,
                                           config=types.GenerateContentConfig(
                                               automatic_function_calling=types.AutomaticFunctionCallingConfig(
                                                   disable=True
@@ -279,6 +577,12 @@ def analyze_video(video_path):
                             logger.error(f"[{file_basename}] Giving up after retries.")
                             raise # Re-raise the exception to handle it in the outer scope
 
+        if use_files_api:
+            try:
+                client.files.delete(name=video_bytes.name)  # Clean up uploaded file
+            except Exception as e_delete:
+                logger.warning(f"[{file_basename}] Failed to delete uploaded file: {e_delete}", exc_info=False)
+
         logger.info(f"[{file_basename}] Response: {analysis_result}")
 
         now = datetime.datetime.now()
@@ -288,17 +592,7 @@ def analyze_video(video_path):
             try:
                 response_new = client.models.generate_content(
                                   model=model_pro,
-                                  contents=types.Content(
-                                      parts=[
-                                          types.Part(
-                                              inline_data=types.Blob(
-                                                  data=video_bytes,
-                                                  mime_type='video/mp4'),
-                                              video_metadata=types.VideoMetadata(fps=sampling_rate)
-                                          ),
-                                          types.Part(text=prompt)
-                                      ]
-                                  ),
+                                  contents=contents,
                                   config=types.GenerateContentConfig(
                                       automatic_function_calling=types.AutomaticFunctionCallingConfig(
                                           disable=True
@@ -312,7 +606,12 @@ def analyze_video(video_path):
                 # Log as warning since Flash result is still available
                 logger.warning(f"[{file_basename}] Error in {model_pro}: {e_pro}", exc_info=True)
                 additional_text = "\n_[2.5 Pro]_ Failed.\n" + USERNAME
-        if ("Отакої!" in analysis_result) and (9 <= now.hour <= 13):
+        if analysis_result == None or analysis_result.strip() == "":
+            logger.error(f"[{file_basename}] Analysis result is empty or None.")
+            return timestamp + "Empty analysis response. Reason: " + response.candidates[0].finish_reason.name
+        else:
+            analysis_result = (analysis_result[:1020] + '...') if len(analysis_result) > 1023 else analysis_result
+        if ("Отакої!" in analysis_result or "Отакої!" in timestamp) and (9 <= now.hour <= 13):
             additional_text = "\n" + USERNAME
 
         return timestamp + analysis_result + additional_text
@@ -320,70 +619,6 @@ def analyze_video(video_path):
     except Exception as e_analysis:
         logger.error(f"[{file_basename}] Video analysis failed: {e_analysis}", exc_info=True)
         return timestamp + "Video analysis failed."
-
-
-def time_to_seconds(timestamp):
-    minutes, seconds = map(int, timestamp.split(':'))
-    return minutes * 60 + seconds
-
-def extract_video_clip(video_path, timeranges):
-    """
-    Extracts multiple subclips from a video and concatenates them into one video.
-    :param video_path: Path to the source video.
-    :param timeranges: List of strings in format ["MM:SS-MM:SS", ...].
-    :return: Path to the output video file in the local temp/ directory.
-    """
-    try:
-        with VideoFileClip(video_path) as video:
-            subclips = []
-            for tr in timeranges:
-                start_str, end_str = tr.split('-')
-                start_sec = time_to_seconds(start_str)
-                end_sec = time_to_seconds(end_str)
-                subclip = video.subclipped(start_sec, end_sec)
-                subclips.append(subclip)
-            if not subclips:
-                raise ValueError("No valid timeranges provided.")
-            final_clip = concatenate_videoclips(subclips)
-            # Use the local TEMP_DIR instead of the system's temp directory
-            timeranges_str = "_".join([tr.replace(":", "").replace("-", "to").replace("00", "") for tr in timeranges])
-            output_mp4_path = os.path.join(
-                TEMP_DIR,
-                f"{os.path.splitext(os.path.basename(video_path))[0]}_{timeranges_str}.mp4"
-            )
-            final_clip.write_videofile(
-                output_mp4_path,
-                codec='libx264',
-                audio=False,
-                bitrate='1500k',
-                preset='medium',
-                threads=4,
-                logger=None
-            )
-        return output_mp4_path
-    except Exception as e:
-        logger.error(f"Error extracting and concatenating video clips: {e}", exc_info=True)
-        return None
-
-def create_srt_file(video_path, subtitle, timeranges):
-    # --- Create SRT file with video_response as subtitle ---
-    try:
-        timeranges_str = "_".join([tr.replace(":", "").replace("-", "to").replace("00", "") for tr in timeranges])
-        srt_path = os.path.join(
-            TEMP_DIR,
-            f"{os.path.splitext(os.path.basename(video_path))[0]}_{timeranges_str}.srt"
-        )
-        srt_content = (
-            "1\n"
-            "00:00:00,000 --> 00:01:00,000\n"
-            r"{\an8}"f"{subtitle}\n"
-        )
-        with open(srt_path, "w", encoding="utf-8") as srt_file:
-            srt_file.write(srt_content)
-        return srt_path
-    except Exception as srt_e:
-        logger.warning(f"Failed to create SRT file: {srt_e}", exc_info=True)
-        return None
 
 # --- FileHandler (uses executor) ---
 class FileHandler(FileSystemEventHandler):
@@ -403,6 +638,7 @@ class FileHandler(FileSystemEventHandler):
             self.logger.warning(f"Event loop not running when trying to schedule handler for {event.src_path}")
 
     async def handle_event(self, event):
+        # This function is replaced with the new logic
         file_path = event.src_path
         file_basename = os.path.basename(file_path)
         self.logger.info(f"[{file_basename}] New file detected: {file_path}")
@@ -410,7 +646,7 @@ class FileHandler(FileSystemEventHandler):
         try:
             await self.wait_for_file_stable(file_path, file_basename)
         except FileNotFoundError:
-            self.logger.warning(f"[{file_basename}] File disappeared before analysis could start: {file_path}")
+            self.logger.warning(f"[{file_basename}] File disappeared before analysis could start.")
             return
         except Exception as e_wait:
             self.logger.error(f"[{file_basename}] Error waiting for file stability: {e_wait}", exc_info=True)
@@ -418,100 +654,61 @@ class FileHandler(FileSystemEventHandler):
 
         try:
             current_loop = asyncio.get_running_loop()
-            video_response = await current_loop.run_in_executor(
-                executor, analyze_video, file_path
-            )
+            video_response = await current_loop.run_in_executor(executor, analyze_video, file_path)
             self.logger.info(f"[{file_basename}] Analysis complete.")
         except Exception as e:
             self.logger.error(f"[{file_basename}] Error running analyze_video in executor: {e}", exc_info=True)
             video_response = f"_{file_basename[:6]}:_ Failed to analyze video."
 
-        # --- MODIFIED: Telegram Sending Logic ---
-        try:
-            safe_video_folder = os.path.join(VIDEO_FOLDER, '')
-            if file_path.startswith(safe_video_folder):
-                 callback_file = file_path[len(safe_video_folder):].replace(os.path.sep, '/')
-            else:
-                 self.logger.warning(f"[{file_basename}] File path '{file_path}' does not start with VIDEO_FOLDER '{safe_video_folder}'. Using basename for callback.")
-                 callback_file = file_basename
+        # Make the global state variables accessible
+        global no_motion_group_message_id, no_motion_grouped_videos
 
-            keyboard = [[InlineKeyboardButton("Глянути", callback_data=callback_file)]]
-            reply_markup = InlineKeyboardMarkup(keyboard)
+        # --- REFINED DECISION LOGIC ---
+        is_significant_motion = "Отакої!" in video_response
 
-            def format_caption(text):
-                # Remove timestamps from response text
-                return re.sub(r"(\s+)(\d{2}:\d{2}-\d{2}:\d{2}),?(\s+)", " ", text)
+        # Get relative path for callback data
+        safe_video_folder = os.path.join(VIDEO_FOLDER, '')
+        if file_path.startswith(safe_video_folder):
+            callback_file = file_path[len(safe_video_folder):].replace(os.path.sep, '/')
+        else:
+            callback_file = file_basename
+        
+        # Extract just the timestamp part for button text
+        timestamp_text = file_basename[:6]
 
-            send_plain_message = True
-            if "Отакої!" in video_response:
-                # Regex to find MM:SS-MM:SS
-                time_marker_regex = r"\s+(\d{2}:\d{2}-\d{2}:\d{2}),?\s+"
-                matches = re.findall(time_marker_regex, video_response)
 
-                if matches:
-                    index_text = f"\n`{matches}`"
-                    media_path = None
-                    try:
-                        self.logger.info(f"[{file_basename}] Preparing SRT file with video_response...")
-                        srt_path = create_srt_file(file_path, video_response, matches)
-                        self.logger.info(f"[{file_basename}] Extracting video clip for ranges {matches}...")
-                        media_path = extract_video_clip(file_path, matches) 
-                        if media_path:
-                            self.logger.info(f"[{file_basename}] Video clip extracted: {media_path}")
-                            self.logger.info(f"[{file_basename}] Sending animation (MP4) with button to Telegram...")
-                            with open(media_path, 'rb') as animation_file:
-                                await self.app.bot.send_animation(
-                                    chat_id=CHAT_ID,
-                                    animation=animation_file,
-                                    caption=format_caption(video_response) + index_text,
-                                    reply_markup=reply_markup,
-                                    parse_mode='Markdown'
-                                )
-                            self.logger.info(f"[{file_basename}] Animation sent successfully.")
-                            send_plain_message = False
+        if is_significant_motion:
+            # A significant motion video ALWAYS resets the group
+            self.logger.info(f"[{file_basename}] Significant motion detected. Resetting grouped message.")
+            no_motion_group_message_id = None
+            no_motion_grouped_videos.clear()
 
-                    except telegram.error.BadRequest as bad_request_error:
-                        self.logger.warning(f"[{file_basename}] BadRequest error: {bad_request_error}. Retrying with escaped Markdown.")
-                        try:
-                            with open(media_path, 'rb') as animation_file:
-                                await self.app.bot.send_animation(chat_id=CHAT_ID, animation=animation_file, caption=escape_markdown(video_response, version=1), reply_markup=reply_markup, parse_mode='Markdown')
-                            self.logger.info(f"[{file_basename}] Media sent successfully after escaping Markdown.")
-                            send_plain_message = False
-                        except Exception as retry_error:
-                            self.logger.error(f"[{file_basename}] Failed to send media after escaping Markdown: {retry_error}", exc_info=True)
-                    except Exception as e:
-                        self.logger.error(f"[{file_basename}] Error sending media: {e}", exc_info=True)
-                    finally:
-                        # Delete the generated clip after sending or if an error occurs
-                        if media_path and os.path.exists(media_path):
-                            max_wait = 120
-                            waited = 0
-                            while os.path.exists(media_path + ".lock") and waited < max_wait:
-                                self.logger.info(f"[{file_basename}] Waiting for lock file to be released before deleting: {media_path}.lock (waited {waited}s)")
-                                await asyncio.sleep(10)
-                                waited += 10
-                            if os.path.exists(media_path + ".lock"):
-                                self.logger.warning(f"[{file_basename}] Lock file still exists after {max_wait} seconds. Proceeding to delete media file anyway.")
-                            os.remove(media_path)
-                            if srt_path and os.path.exists(srt_path):
-                                os.remove(srt_path)
-                            self.logger.info(f"[{file_basename}] Temporary media file deleted: {media_path}")
-
-                    if send_plain_message: # This will be true if media creation or sending failed
-                        self.logger.warning(f"[{file_basename}] Failed to create/send media for {matches}. Sending message instead.")
-                else:
-                    self.logger.warning(f"[{file_basename}] No valid time marker found in response. Sending message instead.")
-
-            if send_plain_message:
-                self.logger.info(f"[{file_basename}] Sending message with button to Telegram...")
+            # --- This is your existing, unchanged logic for sending animations ---
+            media_path = os.path.join(TEMP_DIR, file_basename)
+            if not os.path.exists(media_path):
+                self.logger.warning(f"[{file_basename}] Highlight clip not found, using original video.")
+                media_path = file_path
+            try:
+                # Button for significant motion video is still singular
+                keyboard = [[InlineKeyboardButton("Глянути", callback_data=callback_file)]]
+                reply_markup = InlineKeyboardMarkup(keyboard)
+                with open(media_path, 'rb') as animation_file:
+                    await self.app.bot.send_animation(
+                        chat_id=CHAT_ID, animation=animation_file, caption=video_response,
+                        reply_markup=reply_markup, parse_mode='Markdown'
+                    )
+                self.logger.info(f"[{file_basename}] Animation sent successfully.")
+            except Exception as e:
+                self.logger.error(f"[{file_basename}] Error sending animation: {e}", exc_info=True)
+                self.logger.info(f"[{file_basename}] Sending plain message with button to Telegram...")
                 try:
                     await self.app.bot.send_message(
                         chat_id=CHAT_ID,
-                        text=format_caption(video_response),
+                        text=video_response,
                         reply_markup=reply_markup,
                         parse_mode='Markdown'
                     )
-                    self.logger.info(f"[{file_basename}] Message with button sent successfully.")
+                    self.logger.info(f"[{file_basename}] Plain message with button sent successfully.")
                 except telegram.error.BadRequest as bad_request_error:
                     self.logger.warning(f"[{file_basename}] BadRequest error: {bad_request_error}. Retrying with escaped Markdown.")
                     try:
@@ -526,11 +723,72 @@ class FileHandler(FileSystemEventHandler):
                         self.logger.error(f"[{file_basename}] Failed to send message after escaping Markdown: {retry_error}", exc_info=True)
                 except Exception as e:
                     self.logger.error(f"[{file_basename}] Error sending message: {e}", exc_info=True)
+            finally:
+                # Delete the generated clip after sending or if an error occurs
+                if media_path != file_path and os.path.exists(media_path):
+                    max_wait = 120
+                    waited = 0
+                    while os.path.exists(media_path + ".lock") and waited < max_wait:
+                        self.logger.info(f"[{file_basename}] Waiting for lock file to be released before deleting: {media_path}.lock (waited {waited}s)")
+                        await asyncio.sleep(10)
+                        waited += 10
+                    if os.path.exists(media_path + ".lock"):
+                        self.logger.warning(f"[{file_basename}] Lock file still exists after {max_wait} seconds. Proceeding to delete media file anyway.")
+                    os.remove(media_path)
+                    self.logger.info(f"[{file_basename}] Temporary media file deleted: {media_path}")
 
-        except Exception as e:
-            self.logger.error(f"[{file_basename}] Failed to send message with button to Telegram: {e}", exc_info=True)
-        finally:
-             self.logger.info(f"[{file_basename}] Telegram interaction finished.")
+        else: # --- This block now handles ALL non-significant videos ---
+            video_info = {'text': video_response, 'callback': callback_file, 'timestamp': timestamp_text}
+
+            # Condition to add to an existing group
+            if no_motion_group_message_id and len(no_motion_grouped_videos) < 4:
+                self.logger.info(f"[{file_basename}] Adding to existing insignificant message group.")
+                no_motion_grouped_videos.append(video_info)
+                
+                # Build the updated message
+                full_text = "\n".join([v['text'] for v in no_motion_grouped_videos])
+                
+                # --- Create a single row of buttons ---
+                button_row = [InlineKeyboardButton(v['timestamp'], callback_data=v['callback']) for v in no_motion_grouped_videos]
+                reply_markup = InlineKeyboardMarkup([button_row]) # Note the double brackets [[...]]
+                
+                try:
+                    await self.app.bot.edit_message_text(
+                        chat_id=CHAT_ID,
+                        message_id=no_motion_group_message_id,
+                        text=full_text,
+                        reply_markup=reply_markup,
+                        parse_mode='Markdown'
+                    )
+                    self.logger.info(f"[{file_basename}] Successfully edited message to extend group.")
+                except telegram.error.BadRequest as e:
+                    self.logger.warning(f"[{file_basename}] Could not edit message (may be unchanged or deleted): {e}. Starting a new group.")
+                    no_motion_group_message_id = None # Force a new message
+                    no_motion_grouped_videos.clear()
+                    
+            elif no_motion_group_message_id is None or len(no_motion_grouped_videos) >= 4:
+                self.logger.info(f"[{file_basename}] Starting a new insignificant message group.")
+                no_motion_grouped_videos = [video_info]
+                
+                # Create the first button for the new message
+                button_row = [InlineKeyboardButton("Глянути", callback_data=v['callback']) for v in no_motion_grouped_videos]
+                reply_markup = InlineKeyboardMarkup([button_row])
+                
+                try:
+                    sent_message = await self.app.bot.send_message(
+                        chat_id=CHAT_ID,
+                        text=video_info['text'],
+                        reply_markup=reply_markup,
+                        parse_mode='Markdown'
+                    )
+                    no_motion_group_message_id = sent_message.message_id
+                    self.logger.info(f"[{file_basename}] New group message sent. Message ID: {no_motion_group_message_id}")
+                except Exception as e:
+                    self.logger.error(f"[{file_basename}] Failed to send new group message: {e}", exc_info=True)
+                    no_motion_group_message_id = None
+                    no_motion_grouped_videos.clear()
+        
+        self.logger.info(f"[{file_basename}] Telegram interaction finished.")
 
 
     async def wait_for_file_stable(self, file_path, file_basename, wait_seconds=2, checks=2):
@@ -808,11 +1066,12 @@ async def main():
 
         logger.info("All application tasks have finished.")
 
-        logger.info("Shutting down thread pool executor (allowing current analysis to finish)...")
-        executor.shutdown(wait=True, cancel_futures=False) # wait=True ensures running tasks finish
-        logger.info("Executor shut down.")
-
         if RESTART_REQUESTED:
+            logger.info("Fast shutdown for restart: Not waiting for current analysis to finish.")
+            # Shutdown immediately without waiting for the worker.
+            executor.shutdown(wait=False, cancel_futures=True)
+            logger.info("Executor issued fast shutdown command.")
+
             logger.info("RESTART_REQUESTED is True. Executing self-restart...")
             # Flush standard streams before exec, as they might be inherited
             sys.stdout.flush()
@@ -827,6 +1086,9 @@ async def main():
                 logger.critical(f"FATAL: os.execv failed during restart attempt: {e_exec}", exc_info=True)
                 # At this point, the script cannot restart itself and will exit.
         else:
+            logger.info("Graceful shutdown: Allowing current analysis to finish...")
+            # For a normal shutdown (e.g., Ctrl+C), we wait for the current task to complete.
+            executor.shutdown(wait=True, cancel_futures=False)
             logger.info("Main application finished cleanly (no restart requested).")
 
 
