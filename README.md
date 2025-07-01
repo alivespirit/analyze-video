@@ -1,6 +1,6 @@
 # Analyze Video Bot
 
-This project is a Python-based application that monitors a folder for new video files, analyzes them using the Gemini AI platform, and sends the results to a Telegram chat. It is designed for surveillance camera footage and provides insights about detected motion, including highlight clips and interactive Telegram features.
+This project is a Python-based application that monitors a folder for new video files, analyzes them with OpenCV to detect motion in the specified area, then generates description with Gemini AI platform, and sends the results to a Telegram chat. It is designed for surveillance camera footage and provides insights about detected motion, including highlight clips and interactive Telegram features.
 
 ---
 
