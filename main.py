@@ -450,6 +450,7 @@ def analyze_video(video_path):
     timestamp = f"_{file_basename[:6]}:_ "
     video_bytes = None
     use_files_api = False
+    now = datetime.datetime.now()
 
     detected_motion = detect_motion(video_path, TEMP_DIR)
     if detected_motion == "No motion":
@@ -483,12 +484,21 @@ def analyze_video(video_path):
             logger.error(f"[{file_basename}] Video processing failed: {video_bytes.error_message}")
             return timestamp + "Відео не вдалося обробити."
 
-    model_main = 'gemini-2.5-flash'
-    model_fallback = 'gemini-2.5-flash-lite-preview-06-17'
-    model_fallback_2_0 = 'gemini-2.0-flash'
-    model_pro = 'gemini-2.5-pro'
+    if 9 <= now.hour <= 13:
+        # If it's between 9:00 and 13:59, use the Pro model
+        model_main = 'gemini-2.5-pro'
+        model_fallback = 'gemini-2.5-flash'
+        model_fallback_text = '_[2.5F]_ '
+    else:
+        # Outside of that time, use the Flash models
+        model_main = 'gemini-2.5-flash'
+        model_fallback = 'gemini-2.5-flash-lite-preview-06-17'
+        model_fallback_text = '_[2.5FL]_ '
 
-    sampling_rate = 5  # sampling rate in FPS
+    model_fallback_2_0 = 'gemini-2.0-flash'
+    model_fallback_2_0_text = '_[2.0]_ '
+
+    sampling_rate = 5  # sampling rate in FPS, valid only for inline_data
     max_retries = 3
 
     try:
@@ -523,7 +533,6 @@ def analyze_video(video_path):
         analysis_result = ""
         additional_text = ""
 
-        # Removed video_metadata=types.VideoMetadata(fps=sampling_rate) until it's broken in 2.5
         for attempt in range(max_retries):
             try:
                 with gemini_semaphore:
@@ -540,10 +549,10 @@ def analyze_video(video_path):
                 logger.info(f"[{file_basename}] {model_main} response received.")
                 analysis_result = response.text
                 break
-            except Exception as e_flash:
+            except Exception as e_main:
                 try:
                     with gemini_semaphore:
-                        logger.warning(f"[{file_basename}] {model_main} failed. Falling back to {model_fallback}. Message: {e_flash}")
+                        logger.warning(f"[{file_basename}] {model_main} failed. Falling back to {model_fallback}. Message: {e_main}")
                         response = client.models.generate_content(
                                       model=model_fallback,
                                       contents=contents,
@@ -554,10 +563,10 @@ def analyze_video(video_path):
                                       )
                                   )
                     logger.info(f"[{file_basename}] {model_fallback} response received.")
-                    analysis_result = "_[2.5FL]_ " + response.text
+                    analysis_result = model_fallback_text + response.text
                     break
-                except Exception as e_flash_2_5_fl:
-                    logger.warning(f"[{file_basename}] {model_fallback} also failed: {e_flash_2_5_fl}")
+                except Exception as e_fallback:
+                    logger.warning(f"[{file_basename}] {model_fallback} also failed: {e_fallback}")
                     if attempt < max_retries - 1:
                         wait_time = 10 * (2 ** attempt)  # Exponential backoff: 10s, 20s, 40s
                         logger.warning(f"[{file_basename}] Retrying in {wait_time}s...")
@@ -575,10 +584,10 @@ def analyze_video(video_path):
                                           )
                                       )
                             logger.info(f"[{file_basename}] {model_fallback_2_0} response received.")
-                            analysis_result = "_[2.0]_ " + response.text
+                            analysis_result = model_fallback_2_0_text + response.text
                             break
-                        except Exception as e_flash_2_0:
-                            logger.error(f"[{file_basename}] {model_fallback_2_0} failed as well: {e_flash_2_0}")
+                        except Exception as e_fallback_2_0:
+                            logger.error(f"[{file_basename}] {model_fallback_2_0} failed as well: {e_fallback_2_0}")
                             logger.error(f"[{file_basename}] Giving up after retries.")
                             raise # Re-raise the exception to handle it in the outer scope
 
@@ -589,28 +598,6 @@ def analyze_video(video_path):
             analysis_result = "Empty analysis response. Reason: " + response.candidates[0].finish_reason.name
         else:
             analysis_result = (analysis_result[:512] + '...') if len(analysis_result) > 1023 else analysis_result
-
-        now = datetime.datetime.now()
-        # Enabled 2.5 Pro since it now has free tier quota
-        if ("Отакої!" in analysis_result or "Отакої!" in timestamp) and (9 <= now.hour <= 13):
-            logger.info(f"[{file_basename}] Trying {model_pro}...")
-            try:
-                response_new = client.models.generate_content(
-                                  model=model_pro,
-                                  contents=contents,
-                                  config=types.GenerateContentConfig(
-                                      automatic_function_calling=types.AutomaticFunctionCallingConfig(
-                                          disable=True
-                                      )
-                                  )
-                              )
-                logger.info(f"[{file_basename}] {model_pro} response received.")
-                logger.info(f"[{file_basename}] {response_new.text}")
-                additional_text = "\n_[2.5 Pro]_ " + response_new.text
-            except Exception as e_pro:
-                # Log as warning since Flash result is still available
-                logger.warning(f"[{file_basename}] Error in {model_pro}: {e_pro}")
-                additional_text = "\n_[2.5 Pro]_ Failed."
 
         # Notify username if needed
         if ("Отакої!" in analysis_result or "Отакої!" in timestamp) and (9 <= now.hour <= 13):
