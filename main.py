@@ -486,7 +486,7 @@ def analyze_video(video_path):
     model_main = 'gemini-2.5-flash'
     model_fallback = 'gemini-2.5-flash-lite-preview-06-17'
     model_fallback_2_0 = 'gemini-2.0-flash'
-    model_pro = 'gemini-2.5-pro-exp-03-25'
+    model_pro = 'gemini-2.5-pro'
 
     sampling_rate = 5  # sampling rate in FPS
     max_retries = 3
