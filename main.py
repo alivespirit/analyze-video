@@ -484,7 +484,7 @@ def analyze_video(video_path):
             logger.error(f"[{file_basename}] Video processing failed: {video_bytes.error_message}")
             return timestamp + "Відео не вдалося обробити."
 
-    if 9 <= now.hour <= 13:
+    if os.path.exists(os.path.join(SCRIPT_DIR, "enable_pro")) and (9 <= now.hour <= 13):
         # If it's between 9:00 and 13:59, use the Pro model
         model_main = 'gemini-2.5-pro'
         model_fallback = 'gemini-2.5-flash'
