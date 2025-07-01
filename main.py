@@ -295,6 +295,7 @@ def detect_motion(input_video_path, output_dir):
 
     # ### Sanity check added to the creation of union_rects ###
     union_rects = {}
+    discarded_boxes = []
     motion_event_dict = dict(motion_events)
     # The total area of our analysis region (the cropped image)
     total_analysis_area = crop_w * crop_h
@@ -316,7 +317,11 @@ def detect_motion(input_video_path, output_dir):
             if box_area < max_allowed_area:
                 union_rects[frame_idx] = (min_x, min_y, box_w, box_h)
             else:
-                logger.info(f"[{file_basename}] Frame {frame_idx}: Discarding giant bounding box (area {box_area} > max {max_allowed_area}).")
+                discarded_boxes.append(frame_idx)
+                logger.debug(f"[{file_basename}] Frame {frame_idx}: Discarding giant bounding box (area {box_area} > max {max_allowed_area}).")
+
+    if discarded_boxes:
+        logger.info(f"[{file_basename}] Discarded {len(discarded_boxes)} bounding boxes as noise due to excessive size. Discarded frames: {discarded_boxes}")
 
     # If the sanity check removed all detections, it was just noise.
     if not union_rects:
