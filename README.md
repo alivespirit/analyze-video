@@ -68,7 +68,7 @@ pip install -r requirements.txt
    LOG_PATH=logs/
    ```
 
-5. **Generate `roi.json` for your specific ROI and place it in the project directory.**
+5. **Generate `roi.json` for your specific ROI and place it in the project directory.**  
    You can ask Gemini for a sample script to select ROI based on your video, or use script in `tools/gate_motion_detector.py`.
 
 6. **(Optional) Place your custom prompt in `prompt.txt` in the project directory.**
@@ -92,7 +92,7 @@ pip install -r requirements.txt
 ## How It Works
 
 1. **File Monitoring:**  
-   Uses `watchdog` to monitor the `VIDEO_FOLDER` for new `.mp4` files. When a new file is detected, it waits for the file to become stable before processing.
+   - Uses `watchdog` to monitor the `VIDEO_FOLDER` for new `.mp4` files. When a new file is detected, it waits for the file to become stable before processing.
 
 2. **Motion Detection & Highlight Generation:**  
    - Detects significant motion events using OpenCV.
