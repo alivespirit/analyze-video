@@ -612,6 +612,7 @@ def analyze_video(video_path):
                 logger.warning(f"[{file_basename}] Error in {model_pro}: {e_pro}")
                 additional_text = "\n_[2.5 Pro]_ Failed."
 
+        # Notify username if needed
         if ("Отакої!" in analysis_result or "Отакої!" in timestamp) and (9 <= now.hour <= 13):
             additional_text += "\n" + USERNAME
 
