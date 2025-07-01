@@ -582,17 +582,17 @@ def analyze_video(video_path):
                             logger.error(f"[{file_basename}] Giving up after retries.")
                             raise # Re-raise the exception to handle it in the outer scope
 
-        if use_files_api:
-            try:
-                client.files.delete(name=video_bytes.name)  # Clean up uploaded file
-            except Exception as e_delete:
-                logger.warning(f"[{file_basename}] Failed to delete uploaded file: {e_delete}", exc_info=False)
-
         logger.info(f"[{file_basename}] Response: {analysis_result}")
 
+        if analysis_result == None or analysis_result.strip() == "":
+            logger.error(f"[{file_basename}] Analysis result is empty or None.")
+            analysis_result = "Empty analysis response. Reason: " + response.candidates[0].finish_reason.name
+        else:
+            analysis_result = (analysis_result[:512] + '...') if len(analysis_result) > 1023 else analysis_result
+
         now = datetime.datetime.now()
-        # Disabled 2.5 Pro for now, as it has no free tier quota
-        if False: #("Отакої!" in analysis_result) and (9 <= now.hour <= 13):
+        # Enabled 2.5 Pro since it now has free tier quota
+        if ("Отакої!" in analysis_result or "Отакої!" in timestamp) and (9 <= now.hour <= 13):
             logger.info(f"[{file_basename}] Trying {model_pro}...")
             try:
                 response_new = client.models.generate_content(
@@ -606,18 +606,20 @@ def analyze_video(video_path):
                               )
                 logger.info(f"[{file_basename}] {model_pro} response received.")
                 logger.info(f"[{file_basename}] {response_new.text}")
-                additional_text = "\n_[2.5 Pro]_ " + response_new.text + "\n" + USERNAME
+                additional_text = "\n_[2.5 Pro]_ " + response_new.text
             except Exception as e_pro:
                 # Log as warning since Flash result is still available
-                logger.warning(f"[{file_basename}] Error in {model_pro}: {e_pro}", exc_info=True)
-                additional_text = "\n_[2.5 Pro]_ Failed.\n" + USERNAME
-        if analysis_result == None or analysis_result.strip() == "":
-            logger.error(f"[{file_basename}] Analysis result is empty or None.")
-            return timestamp + "Empty analysis response. Reason: " + response.candidates[0].finish_reason.name
-        else:
-            analysis_result = (analysis_result[:1020] + '...') if len(analysis_result) > 1023 else analysis_result
+                logger.warning(f"[{file_basename}] Error in {model_pro}: {e_pro}")
+                additional_text = "\n_[2.5 Pro]_ Failed."
+
         if ("Отакої!" in analysis_result or "Отакої!" in timestamp) and (9 <= now.hour <= 13):
-            additional_text = "\n" + USERNAME
+            additional_text += "\n" + USERNAME
+
+        if use_files_api:
+            try:
+                client.files.delete(name=video_bytes.name)  # Clean up uploaded file
+            except Exception as e_delete:
+                logger.warning(f"[{file_basename}] Failed to delete uploaded file: {e_delete}", exc_info=False)
 
         return timestamp + analysis_result + additional_text
 
