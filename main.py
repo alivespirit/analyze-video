@@ -829,7 +829,7 @@ async def button_callback(update, context):
     if not os.path.exists(file_path):
         logger.error(f"[{file_basename}] Video file not found for callback: {file_path}")
         try:
-            await query.edit_message_text(text=f"{query.message.text}\n\n_Відео файл не знайдено._", parse_mode='Markdown')
+            await query.edit_message_text(text=f"{query.message.text}\n\n_{file_basename[:6]}: Відео файл не знайдено._", parse_mode='Markdown')
         except Exception as edit_e:
             logger.error(f"[{file_basename}] Error editing message for not found file: {edit_e}", exc_info=True)
         return
@@ -839,12 +839,12 @@ async def button_callback(update, context):
         with open(file_path, 'rb') as video_file:
             await context.bot.send_video(
                 chat_id=query.message.chat_id, video=video_file, parse_mode='Markdown',
-                caption="Осьо відео", reply_to_message_id=query.message.message_id
+                caption=f"Осьо відео _{file_basename[:6]}_", reply_to_message_id=query.message.message_id
             )
         logger.info(f"[{file_basename}] Video sent successfully from callback.")
     except FileNotFoundError:
          logger.error(f"[{file_basename}] Video file disappeared before sending from callback: {file_path}")
-         try: await query.edit_message_text(text=f"{query.message.text}\n\n_Помилка: Відео файл зник._", parse_mode='Markdown')
+         try: await query.edit_message_text(text=f"{query.message.text}\n\n_{file_basename[:6]} Помилка: Відео файл зник._", parse_mode='Markdown')
          except Exception as edit_e:
              logger.warning(f"[{file_basename}] Failed to edit message after video disappeared: {edit_e}", exc_info=True)
     except Exception as e:
