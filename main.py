@@ -465,24 +465,31 @@ def analyze_video(video_path):
     else:
         logger.info(f"[{file_basename}] Running Gemini analysis for {detected_motion}")
         timestamp = f"_{file_basename[:6]}:_ *Отакої!* "
-        use_files_api = True
-        video_bytes = client.files.upload(file=detected_motion)
-        # Wait up to 2 minutes (120 seconds) for video processing
-        max_wait_seconds = 120
-        wait_interval = 10
-        waited = 0
-        while video_bytes.state == "PROCESSING":
-            if waited >= max_wait_seconds:
-                logger.error(f"[{file_basename}] Video processing timed out after {max_wait_seconds} seconds.")
-                return timestamp + "Відео не вдалося обробити (timeout)."
-            logger.info(f"[{file_basename}] Waiting for video to be processed ({waited}/{max_wait_seconds}s).")
-            time.sleep(wait_interval)
-            waited += wait_interval
-            video_bytes = client.files.get(name=video_bytes.name)
+        use_files_api = False # Switched to inline_data mode for better performance
+        if use_files_api:
+            video_bytes = client.files.upload(file=detected_motion)
+            # Wait up to 2 minutes (120 seconds) for video processing
+            max_wait_seconds = 120
+            wait_interval = 10
+            waited = 0
+            while video_bytes.state == "PROCESSING":
+                if waited >= max_wait_seconds:
+                    logger.error(f"[{file_basename}] Video processing timed out after {max_wait_seconds} seconds.")
+                    return timestamp + "Відео не вдалося обробити (timeout)."
+                logger.info(f"[{file_basename}] Waiting for video to be processed ({waited}/{max_wait_seconds}s).")
+                time.sleep(wait_interval)
+                waited += wait_interval
+                video_bytes = client.files.get(name=video_bytes.name)
 
-        if video_bytes.state == "FAILED":
-            logger.error(f"[{file_basename}] Video processing failed: {video_bytes.error_message}")
-            return timestamp + "Відео не вдалося обробити."
+            if video_bytes.state == "FAILED":
+                logger.error(f"[{file_basename}] Video processing failed: {video_bytes.error_message}")
+                return timestamp + "Відео не вдалося обробити."
+        else:
+            try:
+                video_bytes = open(detected_motion, 'rb').read()
+            except Exception as e:
+                logger.error(f"[{file_basename}] Error reading video file: {e}")
+                return timestamp + "Відео не вдалося прочитати."
 
     if os.path.exists(os.path.join(SCRIPT_DIR, "enable_pro")) and (9 <= now.hour <= 13):
         # If it's between 9:00 and 13:59, use the Pro model
