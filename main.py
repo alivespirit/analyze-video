@@ -764,9 +764,20 @@ class FileHandler(FileSystemEventHandler):
                     )
                     self.logger.info(f"[{file_basename}] Successfully edited message to extend group.")
                 except telegram.error.BadRequest as e:
-                    self.logger.warning(f"[{file_basename}] Could not edit message (may be unchanged or deleted): {e}. Starting a new group.")
-                    no_motion_group_message_id = None # Force a new message
-                    no_motion_grouped_videos.clear()
+                    self.logger.warning(f"[{file_basename}] Could not edit message: {e}. Retrying with escaped Markdown.")
+                    try:
+                        await self.app.bot.edit_message_text(
+                            chat_id=CHAT_ID,
+                            message_id=no_motion_group_message_id,
+                            text=escape_markdown(full_text, version=1),
+                            reply_markup=reply_markup,
+                            parse_mode='Markdown'
+                        )
+                        self.logger.info(f"[{file_basename}] Message edited successfully after escaping Markdown.")
+                    except Exception as retry_error:
+                        self.logger.error(f"[{file_basename}] Failed to edit message after escaping Markdown: {retry_error}", exc_info=True)
+                        no_motion_group_message_id = None # Force a new message
+                        no_motion_grouped_videos.clear()
                     
             elif no_motion_group_message_id is None or len(no_motion_grouped_videos) >= 4:
                 self.logger.info(f"[{file_basename}] Starting a new insignificant message group.")
@@ -785,6 +796,21 @@ class FileHandler(FileSystemEventHandler):
                     )
                     no_motion_group_message_id = sent_message.message_id
                     self.logger.info(f"[{file_basename}] New group message sent. Message ID: {no_motion_group_message_id}")
+                except telegram.error.BadRequest as e:
+                    self.logger.warning(f"[{file_basename}] Could not send new group message: {e}. Retrying with escaped Markdown.")
+                    try:
+                        sent_message = await self.app.bot.send_message(
+                            chat_id=CHAT_ID,
+                            text=escape_markdown(video_info['text'], version=1),
+                            reply_markup=reply_markup,
+                            parse_mode='Markdown'
+                        )
+                        no_motion_group_message_id = sent_message.message_id
+                        self.logger.info(f"[{file_basename}] New group message sent successfully after escaping Markdown. Message ID: {no_motion_group_message_id}")
+                    except Exception as retry_error:
+                        self.logger.error(f"[{file_basename}] Failed to send new group message after escaping Markdown: {retry_error}", exc_info=True)
+                        no_motion_group_message_id = None
+                        no_motion_grouped_videos.clear()
                 except Exception as e:
                     self.logger.error(f"[{file_basename}] Failed to send new group message: {e}", exc_info=True)
                     no_motion_group_message_id = None
