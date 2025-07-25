@@ -700,6 +700,44 @@ class FileHandler(FileSystemEventHandler):
                         reply_markup=reply_markup, parse_mode='Markdown'
                     )
                 self.logger.info(f"[{file_basename}] Animation sent successfully.")
+            except telegram.error.BadRequest as bad_request_error:
+                self.logger.warning(f"[{file_basename}] BadRequest error: {bad_request_error}. Retrying with escaped Markdown.")
+                try:
+                    with open(media_path, 'rb') as animation_file:
+                        await self.app.bot.send_animation(
+                            chat_id=CHAT_ID,
+                            animation=animation_file,
+                            caption=escape_markdown(video_response, version=1),
+                            reply_markup=reply_markup,
+                            parse_mode='Markdown'
+                        )
+                    self.logger.info(f"[{file_basename}] Animation sent successfully after escaping Markdown.")
+                except Exception as retry_error:
+                    self.logger.error(f"[{file_basename}] Failed to send animation after escaping Markdown: {retry_error}", exc_info=True)
+                    # Fallback to sending a plain message with a button
+                    self.logger.info(f"[{file_basename}] Sending plain message with button to Telegram...")
+                    try:
+                        await self.app.bot.send_message(
+                            chat_id=CHAT_ID,
+                            text=video_response,
+                            reply_markup=reply_markup,
+                            parse_mode='Markdown'
+                        )
+                        self.logger.info(f"[{file_basename}] Plain message with button sent successfully.")
+                    except telegram.error.BadRequest as bad_request_error:
+                        self.logger.warning(f"[{file_basename}] BadRequest error: {bad_request_error}. Retrying with escaped Markdown.")
+                        try:
+                            await self.app.bot.send_message(
+                                chat_id=CHAT_ID,
+                                text=escape_markdown(video_response, version=1),
+                                reply_markup=reply_markup,
+                                parse_mode='Markdown'
+                            )
+                            self.logger.info(f"[{file_basename}] Message sent successfully after escaping Markdown.")
+                        except Exception as e:
+                            self.logger.error(f"[{file_basename}] Failed to send message after escaping Markdown: {e}", exc_info=True)
+                    except Exception as e:
+                        self.logger.error(f"[{file_basename}] Error sending message: {e}", exc_info=True)
             except Exception as e:
                 self.logger.error(f"[{file_basename}] Error sending animation: {e}", exc_info=True)
                 self.logger.info(f"[{file_basename}] Sending plain message with button to Telegram...")
