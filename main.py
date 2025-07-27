@@ -3,7 +3,7 @@ import datetime
 import asyncio
 import concurrent.futures
 import logging
-import re
+import random
 import sys
 import time
 import json
@@ -143,7 +143,16 @@ CROP_PADDING = 30  # Pixels to add around the ROI bounding box for safety
 # ### SANITY CHECK CONFIGURATION ###
 # If a bounding box is larger than this percentage of the total analysis area,
 # discard it as it's likely a noise-polluted first frame.
-MAX_BOX_AREA_PERCENT = 0.80 
+MAX_BOX_AREA_PERCENT = 0.80
+
+NO_ACTION_RESPONSES = [
+    "Нема шо дивитись.",
+    "Ніц цікавого.",
+    "Та йойки, взагалі нічо корисного.",
+    "Все спокійно, ніяких рухів.",
+    "Німа нічо.",
+    "Журбинка якась, та й по всьому."
+]
 
 # --- Check Environment Variables ---
 if not all([GEMINI_API_KEY, TELEGRAM_TOKEN, CHAT_ID, USERNAME, VIDEO_FOLDER]):
@@ -455,7 +464,7 @@ def analyze_video(video_path):
     detected_motion = detect_motion(video_path, TEMP_DIR)
     if detected_motion == "No motion":
         logger.info(f"[{file_basename}] Skipping Gemini analysis.")
-        return timestamp + "Нема шо дивитись."
+        return timestamp + random.choice(NO_ACTION_RESPONSES)
     elif detected_motion == "No significant motion":
         logger.info(f"[{file_basename}] Analyzing full video.")
         video_bytes = open(video_path, 'rb').read()
