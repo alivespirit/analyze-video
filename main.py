@@ -602,7 +602,7 @@ def analyze_video(video_path):
 
         if analysis_result == None or analysis_result.strip() == "":
             logger.error(f"[{file_basename}] Analysis result is empty or None.")
-            analysis_result = "Empty analysis response. Reason: " + response.candidates[0].finish_reason.name
+            analysis_result = f"Empty analysis response. Reason: `{response.candidates[0].finish_reason.name}`"
         else:
             analysis_result = (analysis_result[:512] + '...') if len(analysis_result) > 1023 else analysis_result
 
