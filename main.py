@@ -598,13 +598,13 @@ def analyze_video(video_path):
                             logger.error(f"[{file_basename}] Giving up after retries.")
                             raise # Re-raise the exception to handle it in the outer scope
 
-        logger.info(f"[{file_basename}] Response: {analysis_result}")
-
         if analysis_result == None or analysis_result.strip() == "":
             logger.error(f"[{file_basename}] Analysis result is empty or None.")
-            analysis_result = f"Empty analysis response. Reason: `{response.candidates[0].finish_reason.name}`"
+            analysis_result = f"Шось пішло не так: `{escape_markdown(response.candidates[0].finish_reason.name)}`."
         else:
             analysis_result = (analysis_result[:512] + '...') if len(analysis_result) > 1023 else analysis_result
+
+        logger.info(f"[{file_basename}] Response: {analysis_result}")
 
         # Notify username if needed
         if ("Отакої!" in analysis_result or "Отакої!" in timestamp) and (9 <= now.hour <= 13):
