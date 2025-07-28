@@ -613,7 +613,7 @@ def analyze_video(video_path):
 
         if analysis_result == None or analysis_result.strip() == "":
             logger.error(f"[{file_basename}] Analysis result is empty or None.")
-            analysis_result = f"Шось пішло не так: `{escape_markdown(response.candidates[0].finish_reason.name)}`."
+            analysis_result = f"Шось пішло не так: `{response.candidates[0].finish_reason.name.replace('_', ' ')}`."
         else:
             analysis_result = (analysis_result[:512] + '...') if len(analysis_result) > 1023 else analysis_result
 
