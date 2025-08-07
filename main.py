@@ -633,7 +633,7 @@ def analyze_video(video_path):
 
     except Exception as e_analysis:
         logger.error(f"[{file_basename}] Video analysis failed: {e_analysis}", exc_info=True)
-        return timestamp + "Video analysis failed."
+        return timestamp + "Відео не вдалося проаналізувати: " + str(e_analysis)
 
 # --- FileHandler (uses executor) ---
 class FileHandler(FileSystemEventHandler):
