@@ -568,8 +568,7 @@ def analyze_video(video_path):
                               )
                 logger.info(f"[{file_basename}] {model_main} response received.")
                 if response.text is None or response.text.strip() == "":
-                    logger.warning(f"[{file_basename}] {model_main} response is empty.")
-                    raise ValueError(f"{model_main} returned an empty response.")
+                    raise ValueError(f"{model_main} returned an empty response with reason {response.candidates[0].finish_reason}.")
                 analysis_result = response.text
                 break
             except Exception as e_main:
@@ -587,8 +586,7 @@ def analyze_video(video_path):
                                   )
                     logger.info(f"[{file_basename}] {model_fallback} response received.")
                     if response.text is None or response.text.strip() == "":
-                        logger.warning(f"[{file_basename}] {model_fallback} response is empty.")
-                        raise ValueError(f"{model_fallback} returned an empty response.")
+                        raise ValueError(f"{model_fallback} returned an empty response with reason {response.candidates[0].finish_reason}.")
                     analysis_result = model_fallback_text + response.text
                     break
                 except Exception as e_fallback:
@@ -617,11 +615,7 @@ def analyze_video(video_path):
                             logger.error(f"[{file_basename}] Giving up after retries.")
                             raise # Re-raise the exception to handle it in the outer scope
 
-        if analysis_result == None or analysis_result.strip() == "":
-            logger.error(f"[{file_basename}] Analysis result is empty or None.")
-            analysis_result = f"Шось пішло не так: `{response.candidates[0].finish_reason.name.replace('_', ' ')}`."
-        else:
-            analysis_result = (analysis_result[:512] + '...') if len(analysis_result) > 1023 else analysis_result
+        analysis_result = (analysis_result[:512] + '...') if len(analysis_result) > 1023 else analysis_result
 
         logger.info(f"[{file_basename}] Response: {analysis_result}")
 
