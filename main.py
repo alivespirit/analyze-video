@@ -568,7 +568,7 @@ def analyze_video(video_path):
                               )
                 logger.info(f"[{file_basename}] {model_main} response received.")
                 if response.text is None or response.text.strip() == "":
-                    raise ValueError(f"{model_main} returned an empty response with reason {response.candidates[0].finish_reason}.")
+                    raise ValueError(f"{model_main} returned an empty response with reason {response.candidates[0].finish_reason.name}.")
                 analysis_result = response.text
                 break
             except Exception as e_main:
@@ -586,7 +586,7 @@ def analyze_video(video_path):
                                   )
                     logger.info(f"[{file_basename}] {model_fallback} response received.")
                     if response.text is None or response.text.strip() == "":
-                        raise ValueError(f"{model_fallback} returned an empty response with reason {response.candidates[0].finish_reason}.")
+                        raise ValueError(f"{model_fallback} returned an empty response with reason {response.candidates[0].finish_reason.name}.")
                     analysis_result = model_fallback_text + response.text
                     break
                 except Exception as e_fallback:
