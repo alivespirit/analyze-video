@@ -371,7 +371,7 @@ def detect_motion(input_video_path, output_dir):
     
     # If all events were filtered out, we're done.
     if not significant_sub_clips:
-        logger.info(f"[{file_basename}] No significant long-duration motion found. Discarding video.")
+        logger.info(f"[{file_basename}] No significant long-duration motion found.")
         cap.release()
         elapsed_time = time.time() - start_time
         logger.info(f"[{file_basename}] Motion detection took {elapsed_time:.2f} seconds.")
@@ -461,6 +461,7 @@ def analyze_video(video_path):
     """Extract insights from the video using Gemini. Runs in executor."""
     file_basename = os.path.basename(video_path)
     timestamp = f"_{file_basename[:6]}:_ "
+    video_to_process = None
     video_bytes = None
     use_files_api = False
     now = datetime.datetime.now()
@@ -471,38 +472,40 @@ def analyze_video(video_path):
         return timestamp + random.choice(NO_ACTION_RESPONSES)
     elif detected_motion == "No significant motion":
         logger.info(f"[{file_basename}] Analyzing full video.")
-        video_bytes = open(video_path, 'rb').read()
+        video_to_process = video_path
     elif detected_motion is None:
         logger.warning(f"[{file_basename}] Error during motion detection. Analyzing full video.")
-        video_bytes = open(video_path, 'rb').read()
+        video_to_process = video_path
     else:
         logger.info(f"[{file_basename}] Running Gemini analysis for {detected_motion}")
-        timestamp = f"_{file_basename[:6]}:_ *Отакої!* "
-        use_files_api = False # Switched to inline_data mode for better performance
-        if use_files_api:
-            video_bytes = client.files.upload(file=detected_motion)
-            # Wait up to 2 minutes (120 seconds) for video processing
-            max_wait_seconds = 120
-            wait_interval = 10
-            waited = 0
-            while video_bytes.state == "PROCESSING":
-                if waited >= max_wait_seconds:
-                    logger.error(f"[{file_basename}] Video processing timed out after {max_wait_seconds} seconds.")
-                    return timestamp + "Відео не вдалося обробити (timeout)."
-                logger.info(f"[{file_basename}] Waiting for video to be processed ({waited}/{max_wait_seconds}s).")
-                time.sleep(wait_interval)
-                waited += wait_interval
-                video_bytes = client.files.get(name=video_bytes.name)
+        timestamp += "*Отакої!* "
+        video_to_process = detected_motion
+        use_files_api = True # Enabled due to Gemini issues
 
-            if video_bytes.state == "FAILED":
-                logger.error(f"[{file_basename}] Video processing failed: {video_bytes.error_message}")
-                return timestamp + "Відео не вдалося обробити."
-        else:
-            try:
-                video_bytes = open(detected_motion, 'rb').read()
-            except Exception as e:
-                logger.error(f"[{file_basename}] Error reading video file: {e}")
-                return timestamp + "Відео не вдалося прочитати."
+    if use_files_api:
+        video_bytes = client.files.upload(file=video_to_process)
+        # Wait up to 2 minutes (120 seconds) for video processing
+        max_wait_seconds = 120
+        wait_interval = 10
+        waited = 0
+        while video_bytes.state == "PROCESSING":
+            if waited >= max_wait_seconds:
+                logger.error(f"[{file_basename}] Video processing timed out after {max_wait_seconds} seconds.")
+                return timestamp + "Відео не вдалося обробити (timeout)."
+            logger.info(f"[{file_basename}] Waiting for video to be processed ({waited}/{max_wait_seconds}s).")
+            time.sleep(wait_interval)
+            waited += wait_interval
+            video_bytes = client.files.get(name=video_bytes.name)
+
+        if video_bytes.state == "FAILED":
+            logger.error(f"[{file_basename}] Video processing failed: {video_bytes.error_message}")
+            return timestamp + "Відео не вдалося обробити."
+    else:
+        try:
+            video_bytes = open(video_to_process, 'rb').read()
+        except Exception as e:
+            logger.error(f"[{file_basename}] Error reading video file: {e}")
+            return timestamp + "Відео не вдалося прочитати."
 
     if os.path.exists(os.path.join(SCRIPT_DIR, "enable_pro")) and (9 <= now.hour <= 13):
         # If it's between 9:00 and 13:59, use the Pro model
