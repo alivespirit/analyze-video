@@ -515,7 +515,7 @@ def analyze_video(video_path):
     else:
         # Outside of that time, use the Flash models
         model_main = 'gemini-2.5-flash'
-        model_fallback = 'gemini-2.5-flash-lite-preview-06-17'
+        model_fallback = 'gemini-2.5-flash-lite'
         model_fallback_text = '_[2.5FL]_ '
 
     model_fallback_2_0 = 'gemini-2.0-flash'
