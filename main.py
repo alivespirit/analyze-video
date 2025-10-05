@@ -274,9 +274,9 @@ def detect_motion(input_video_path, output_dir):
     roi_mask = np.zeros((crop_h, crop_w), dtype=np.uint8)
     cv2.fillPoly(roi_mask, [analysis_roi_points], 255)
 
-    # --- NEW: Background Model Pre-training from 10s mark ---
-    logger.info(f"[{file_basename}] Pre-training background model from the 10s mark...")
-    model_building_start_frame = int(10 * fps)
+    # --- NEW: Background Model Pre-training from 20s mark ---
+    logger.info(f"[{file_basename}] Pre-training background model from the 20s mark...")
+    model_building_start_frame = int(20 * fps)
     model_building_frames = 150 # Train on ~6 seconds of video
     pre_trained = False
 
@@ -294,7 +294,7 @@ def detect_motion(input_video_path, output_dir):
         cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
         pre_trained = True
     else:
-        logger.warning(f"[{file_basename}] Video is too short to pre-train background model from 10s mark. Using standard warm-up.")
+        logger.warning(f"[{file_basename}] Video is too short to pre-train background model from 20s mark. Using standard warm-up.")
     
     # If we pre-trained, we only need a few frames for camera stabilization. Otherwise, use original WARMUP.
     EFFECTIVE_WARMUP = 5 if pre_trained else WARMUP_FRAMES
@@ -472,8 +472,9 @@ def detect_motion(input_video_path, output_dir):
         preset='medium', threads=4, logger=None
     )
     
+    file_duration = final_clip.duration
     file_size = os.path.getsize(output_filename) / (1024 * 1024)
-    logger.info(f"[{file_basename}] Successfully created clip: {output_filename}. Size: {file_size:.2f} MB")
+    logger.info(f"[{file_basename}] Successfully created clip: {output_filename}. Duration: {file_duration:.2f}s, Size: {file_size:.2f} MB")
     elapsed_time = time.time() - start_time
     logger.info(f"[{file_basename}] Motion detection took {elapsed_time:.2f} seconds.")
     
