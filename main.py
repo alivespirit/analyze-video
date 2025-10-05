@@ -23,7 +23,7 @@ from watchdog.observers.polling import PollingObserver as Observer
 
 from logging.handlers import TimedRotatingFileHandler
 
-# Importing VideoFileClip from moviepy for MP4 extraction
+# Importing ImageSequenceClip from moviepy for MP4 extraction
 from moviepy import ImageSequenceClip
 
 import threading
@@ -250,11 +250,10 @@ def detect_motion(input_video_path, output_dir):
     total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
     orig_w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
     orig_h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+    
     # ### DEFINE THE CROP BOX BASED ON THE ROI ###
-    # 2. Calculate the bounding box of the ROI polygon
     x_coords = roi_poly_points[:, 0]
     y_coords = roi_poly_points[:, 1]
-    # Add padding to ensure we don't cut off anything at the edges
     crop_x1 = max(0, np.min(x_coords) - CROP_PADDING)
     crop_y1 = max(0, np.min(y_coords) - CROP_PADDING)
     crop_x2 = min(orig_w, np.max(x_coords) + CROP_PADDING)
@@ -265,30 +264,48 @@ def detect_motion(input_video_path, output_dir):
     logger.info(f"[{file_basename}] Original frame: {orig_w}x{orig_h}. Analyzing cropped region: {crop_w}x{crop_h} at ({crop_x1},{crop_y1}).")
 
     # ### MODIFIED: ALL SUBSEQUENT SETUP IS RELATIVE TO THE CROP ###
-    # 3. Translate the global ROI points to be local to the crop box
     local_roi_points = roi_poly_points.copy()
     local_roi_points[:, 0] -= crop_x1
     local_roi_points[:, 1] -= crop_y1
     
-    # The ROI points are now simply the local points, not scaled.
     analysis_roi_points = local_roi_points.astype(np.int32)
     
     backSub = cv2.createBackgroundSubtractorKNN(history=500, dist2Threshold=800, detectShadows=True)
-    # The mask is now the size of the CROP, not a downscaled version.
     roi_mask = np.zeros((crop_h, crop_w), dtype=np.uint8)
     cv2.fillPoly(roi_mask, [analysis_roi_points], 255)
+
+    # --- NEW: Background Model Pre-training from 10s mark ---
+    logger.info(f"[{file_basename}] Pre-training background model from the 10s mark...")
+    model_building_start_frame = int(10 * fps)
+    model_building_frames = 150 # Train on ~6 seconds of video
+    pre_trained = False
+
+    if total_frames > model_building_start_frame + model_building_frames:
+        cap.set(cv2.CAP_PROP_POS_FRAMES, model_building_start_frame)
+        for _ in range(model_building_frames):
+            ret, frame = cap.read()
+            if not ret: break
+            
+            cropped_frame = frame[crop_y1:crop_y2, crop_x1:crop_x2]
+            roi_frame = cv2.bitwise_and(cropped_frame, cropped_frame, mask=roi_mask)
+            backSub.apply(roi_frame)
+        
+        logger.info(f"[{file_basename}] Background model pre-trained. Resetting to start for analysis.")
+        cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
+        pre_trained = True
+    else:
+        logger.warning(f"[{file_basename}] Video is too short to pre-train background model from 10s mark. Using standard warm-up.")
+    
+    # If we pre-trained, we only need a few frames for camera stabilization. Otherwise, use original WARMUP.
+    EFFECTIVE_WARMUP = 5 if pre_trained else WARMUP_FRAMES
     
     motion_events = []
-    for frame_index in range(WARMUP_FRAMES, total_frames):
+    for frame_index in range(EFFECTIVE_WARMUP, total_frames):
         ret, frame = cap.read()
         if not ret: break
 
-        # CROP THE FRAME FIRST!
         cropped_frame = frame[crop_y1:crop_y2, crop_x1:crop_x2]
-        
-        # All subsequent analysis is now super fast
         roi_frame = cv2.bitwise_and(cropped_frame, cropped_frame, mask=roi_mask)
-        # ... (the rest of the loop is the same: fg_mask, morphology, findContours) ...
         fg_mask = backSub.apply(roi_frame)
         _, fg_mask = cv2.threshold(fg_mask, 250, 255, cv2.THRESH_BINARY)
         kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
@@ -306,11 +323,9 @@ def detect_motion(input_video_path, output_dir):
         logger.info(f"[{file_basename}] Motion detection took {elapsed_time:.2f} seconds.")
         return "No motion"
 
-    # ### Sanity check added to the creation of union_rects ###
     union_rects = {}
     discarded_boxes = []
     motion_event_dict = dict(motion_events)
-    # The total area of our analysis region (the cropped image)
     total_analysis_area = crop_w * crop_h
     max_allowed_area = total_analysis_area * MAX_BOX_AREA_PERCENT
 
@@ -326,7 +341,6 @@ def detect_motion(input_video_path, output_dir):
             box_h = max_y - min_y
             box_area = box_w * box_h
             
-            # THE SANITY CHECK:
             if box_area < max_allowed_area:
                 union_rects[frame_idx] = (min_x, min_y, box_w, box_h)
             else:
@@ -336,7 +350,6 @@ def detect_motion(input_video_path, output_dir):
     if discarded_boxes:
         logger.info(f"[{file_basename}] Discarded {len(discarded_boxes)} bounding boxes as noise due to excessive size. Discarded frames: {discarded_boxes}")
 
-    # If the sanity check removed all detections, it was just noise.
     if not union_rects:
         logger.info(f"[{file_basename}] All detected motion boxes were too large and discarded as noise.")
         elapsed_time = time.time() - start_time
@@ -344,7 +357,6 @@ def detect_motion(input_video_path, output_dir):
         cap.release()
         return "No motion"
 
-    # Now, all subsequent logic operates on the CLEANED union_rects data
     motion_frame_indices = sorted(union_rects.keys())
     max_gap_in_frames = MAX_EVENT_GAP_SECONDS * fps
     sub_clips = []
@@ -360,6 +372,7 @@ def detect_motion(input_video_path, output_dir):
 
     logger.info(f"[{file_basename}] Found {len(sub_clips)} raw motion event(s). Filtering by duration...")
     significant_sub_clips = []
+    found_insignificant_motion = False # NEW: Flag for mixed motion types
     for start_frame, end_frame in sub_clips:
         duration_frames = end_frame - start_frame
         duration_seconds = duration_frames / fps
@@ -368,8 +381,8 @@ def detect_motion(input_video_path, output_dir):
             significant_sub_clips.append((start_frame, end_frame))
         else:
             logger.info(f"[{file_basename}]   - Event lasting {duration_seconds:.2f}s is too short. Discarding as noise/shadow.")
+            found_insignificant_motion = True # NEW: Mark that we found a short event
     
-    # If all events were filtered out, we're done.
     if not significant_sub_clips:
         logger.info(f"[{file_basename}] No significant long-duration motion found.")
         cap.release()
@@ -377,12 +390,8 @@ def detect_motion(input_video_path, output_dir):
         logger.info(f"[{file_basename}] Motion detection took {elapsed_time:.2f} seconds.")
         return "No significant motion"
 
-    # ##############################################################################
-    # ### INTERPOLATE RECTANGLES  ###
-    # ##############################################################################
     logger.info(f"[{file_basename}] Interpolating bounding boxes for smooth tracking...")
 
-    # Create the final, complete dictionary of rectangles by filling gaps.
     interpolated_rects = {}
     for start_frame, end_frame in significant_sub_clips:
         known_frames_in_clip = sorted([f for f in union_rects.keys() if start_frame <= f <= end_frame])
@@ -393,7 +402,7 @@ def detect_motion(input_video_path, output_dir):
             start_box, end_box = union_rects[start_anchor_frame], union_rects[end_anchor_frame]
             total_gap_frames = float(end_anchor_frame - start_anchor_frame)
             
-            interpolated_rects[start_anchor_frame] = start_box # Copy the known start box
+            interpolated_rects[start_anchor_frame] = start_box
 
             if total_gap_frames > 0:
                 for j in range(1, int(total_gap_frames)):
@@ -405,25 +414,38 @@ def detect_motion(input_video_path, output_dir):
                     interp_h = int(start_box[3] + (end_box[3] - start_box[3]) * progress)
                     interpolated_rects[current_frame_in_gap] = (interp_x, interp_y, interp_w, interp_h)
         
-        if known_frames_in_clip: # Ensure the very last known frame is included
+        if known_frames_in_clip:
             interpolated_rects[known_frames_in_clip[-1]] = union_rects[known_frames_in_clip[-1]]
 
-
-    # Final frame assembly now uses the clean `interpolated_rects` data ###
     logger.info(f"[{file_basename}] Assembling highlight reel with {len(interpolated_rects)} smooth boxes.")
     all_clip_frames = []
 
-    for start_frame, end_frame in significant_sub_clips:
+    for clip_index, (start_frame, end_frame) in enumerate(significant_sub_clips):
         padded_start = max(0, start_frame - int(PADDING_SECONDS * fps))
         padded_end = min(total_frames, end_frame + int(PADDING_SECONDS * fps))
+
+        # NEW: If first motion is at the very start, include from frame 0
+        if clip_index == 0 and start_frame <= (EFFECTIVE_WARMUP + fps * 1.0):
+            logger.info(f"[{file_basename}] Motion starts at the beginning. Including video from frame 0.")
+            padded_start = 0
+
         cap.set(cv2.CAP_PROP_POS_FRAMES, padded_start)
         
+        # NEW: Check if this clip should be sped up
+        duration_seconds = (end_frame - start_frame) / fps
+        is_long_motion = duration_seconds > 5.0
+        if is_long_motion:
+            logger.info(f"[{file_basename}] Long motion event ({duration_seconds:.2f}s) detected. Speeding up clip segment.")
+
         for i in range(padded_start, padded_end):
             ret, frame = cap.read()
             if not ret: break
 
+            # NEW: If long motion, skip every other frame
+            if is_long_motion and (i - padded_start) % 2 != 0:
+                continue
+
             if i in interpolated_rects:
-                # The drawing logic is now simpler and cleaner.
                 (x, y, w, h) = interpolated_rects[i]
                 
                 orig_x1 = int(x + crop_x1)
@@ -454,7 +476,14 @@ def detect_motion(input_video_path, output_dir):
     logger.info(f"[{file_basename}] Successfully created clip: {output_filename}. Size: {file_size:.2f} MB")
     elapsed_time = time.time() - start_time
     logger.info(f"[{file_basename}] Motion detection took {elapsed_time:.2f} seconds.")
+    
+    # NEW: Return special value if we should analyze the full video
+    if found_insignificant_motion:
+        logger.info(f"[{file_basename}] Both significant and insignificant motion was found. Flagging for full video analysis.")
+        return "analyze_full_video"
+
     return output_filename
+
 
 # --- analyze_video function (remains synchronous, uses original models) ---
 def analyze_video(video_path):
@@ -473,6 +502,10 @@ def analyze_video(video_path):
     elif detected_motion == "No significant motion":
         logger.info(f"[{file_basename}] Analyzing full video.")
         video_to_process = video_path
+    elif detected_motion == "analyze_full_video":
+        logger.info(f"[{file_basename}] Analyzing full video due to mix of significant and insignificant motion.")
+        timestamp += "*Отакої!* "
+        video_to_process = video_path
     elif detected_motion is None:
         logger.warning(f"[{file_basename}] Error during motion detection. Analyzing full video.")
         video_to_process = video_path
@@ -480,7 +513,7 @@ def analyze_video(video_path):
         logger.info(f"[{file_basename}] Running Gemini analysis for {detected_motion}")
         timestamp += "*Отакої!* "
         video_to_process = detected_motion
-        use_files_api = True # Enabled due to Gemini issues
+        use_files_api = True # Enabled due to Gemini issues with generated video without audio
 
     if use_files_api:
         video_bytes = client.files.upload(file=video_to_process)
