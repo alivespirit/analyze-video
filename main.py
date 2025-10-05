@@ -514,7 +514,7 @@ def analyze_video(video_path):
         logger.info(f"[{file_basename}] Running Gemini analysis for {detected_motion}")
         timestamp += "*Отакої!* "
         video_to_process = detected_motion
-        use_files_api = True # Enabled due to Gemini issues with generated video without audio
+        use_files_api = False # Set to true if Gemini fails to process generated video without audio
 
     if use_files_api:
         video_bytes = client.files.upload(file=video_to_process)
