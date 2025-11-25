@@ -274,9 +274,9 @@ def detect_motion(input_video_path, output_dir):
     roi_mask = np.zeros((crop_h, crop_w), dtype=np.uint8)
     cv2.fillPoly(roi_mask, [analysis_roi_points], 255)
 
-    # --- NEW: Background Model Pre-training from 20s mark ---
-    logger.info(f"[{file_basename}] Pre-training background model from the 20s mark...")
-    model_building_start_frame = int(20 * fps)
+    # --- NEW: Background Model Pre-training from 30s mark ---
+    logger.info(f"[{file_basename}] Pre-training background model from the 30s mark...")
+    model_building_start_frame = int(30 * fps)
     model_building_frames = 150 # Train on ~6 seconds of video
     pre_trained = False
 

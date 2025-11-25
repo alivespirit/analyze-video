@@ -112,6 +112,7 @@ def main():
 
         # Naming convention ensures chronological sorting later
         output_frame_path = args.tmp_dir / f"frame_{timestamp}{DEFAULT_FRAME_FORMAT}"
+        print(f" Processing video: {video_file.name} -> {output_frame_path.name}")
 
         cap = cv2.VideoCapture(str(video_file))
         if not cap.isOpened():

@@ -5,9 +5,9 @@ import time  # ### NEW ### For timing the recording
 import os    # ### NEW ### For creating an output directory
 
 # --- Configuration ---
-VIDEO_SOURCE = r"C:\NAS\opencv\25M38S_1751336738.mp4"
+VIDEO_SOURCE = r"C:\NAS\opencv\44M16S_1763901856.mp4"
 MIN_CONTOUR_AREA = 2000
-ROI_CONFIG_FILE = "roi.json"
+ROI_CONFIG_FILE = r"C:\NAS\roi.json"
 OUTPUT_DIR = "motion_clips" # ### NEW ### Directory to save clips
 POST_MOTION_RECORD_SECONDS = 2 # ### NEW ### How many seconds to record after motion stops
 
