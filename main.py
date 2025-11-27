@@ -78,6 +78,24 @@ class CustomTimedRotatingFileHandler(TimedRotatingFileHandler):
                 if not os.path.exists(new_path):
                     os.rename(old_path, new_path)
 
+# Custom filter to suppress stacktraces for network errors while keeping the error messages
+class NetworkErrorFilter(logging.Filter):
+    def filter(self, record):
+        # Only suppress stacktraces (exc_info) for network-related errors, keep the message
+        if record.levelname == 'ERROR' and record.exc_info:
+            message = record.getMessage()
+            if any(phrase in message for phrase in [
+                'Exception happened while polling for updates',
+                'getaddrinfo failed',
+                'ConnectError',
+                'NetworkError'
+            ]):
+                # Keep the error message but remove the stacktrace
+                record.exc_info = None
+                record.exc_text = None
+                record.stack_info = None
+        return True
+
 # --- Logging Setup ---
 log_formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s', datefmt='%Y-%m-%d %H:%M:%S')
 log_file = os.path.join(LOG_PATH, "video_processor.log")  # No date in filename; handler adds it
@@ -101,6 +119,9 @@ logger.addHandler(console_handler)
 
 logging.getLogger("httpx").setLevel(logging.WARNING)
 logging.getLogger("telegram.ext").setLevel(logging.WARNING)
+logging.getLogger("telegram.ext._utils.networkloop").addFilter(NetworkErrorFilter())
+logging.getLogger("telegram.ext._updater").addFilter(NetworkErrorFilter())
+logging.getLogger("telegram.request").addFilter(NetworkErrorFilter())
 logging.getLogger("moviepy").setLevel(logging.WARNING) # Keep moviepy logs quiet
 
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
