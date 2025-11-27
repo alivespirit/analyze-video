@@ -110,6 +110,11 @@ console_handler = logging.StreamHandler()
 console_handler.setFormatter(log_formatter)
 console_handler.setLevel(logging.INFO)
 
+# --- FIX: Apply the filter directly to the handlers ---
+network_filter = NetworkErrorFilter()
+file_handler.addFilter(network_filter)
+console_handler.addFilter(network_filter)
+
 # Get the root logger and add handlers
 logger = logging.getLogger()
 logger.setLevel(logging.INFO) # Set root logger level
@@ -119,9 +124,6 @@ logger.addHandler(console_handler)
 
 logging.getLogger("httpx").setLevel(logging.WARNING)
 logging.getLogger("telegram.ext").setLevel(logging.WARNING)
-logging.getLogger("telegram.ext._utils.networkloop").addFilter(NetworkErrorFilter())
-logging.getLogger("telegram.ext._updater").addFilter(NetworkErrorFilter())
-logging.getLogger("telegram.request").addFilter(NetworkErrorFilter())
 logging.getLogger("moviepy").setLevel(logging.WARNING) # Keep moviepy logs quiet
 
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
