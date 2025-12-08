@@ -520,6 +520,11 @@ def analyze_video(video_path):
     use_files_api = False
     now = datetime.datetime.now()
 
+    if now.hour < 6:
+      # Between 00:00 and 05:59, add hour to timestamp since grouped messages could include videos from different hours
+      hour_timestamp = video_path.split(os.path.sep)[-2][-2:]
+      timestamp = f"_{hour_timestamp}H{file_basename[:6]}:_ "
+
     detected_motion = detect_motion(video_path, TEMP_DIR)
     if detected_motion == "No motion":
         logger.info(f"[{file_basename}] Skipping Gemini analysis.")
@@ -695,9 +700,9 @@ def analyze_video(video_path):
     except Exception as e_analysis:
         logger.error(f"[{file_basename}] Video analysis failed: {e_analysis}", exc_info=False)
         if '429' in str(e_analysis):
-            return timestamp + "\uE252 Відео не вдалося проаналізувати: перевищено ліміт запитів до Gemini."
+            return timestamp + "\u26A0\uFE0F Відео не вдалося проаналізувати: перевищено ліміт запитів до Gemini."
         else:
-            return timestamp + "\uE333 Відео не вдалося проаналізувати: " + str(e_analysis)[:512]
+            return timestamp + "\u274C Відео не вдалося проаналізувати: " + str(e_analysis)[:512]
 
 # --- FileHandler (uses executor) ---
 class FileHandler(FileSystemEventHandler):
@@ -742,7 +747,7 @@ class FileHandler(FileSystemEventHandler):
         battery = psutil.sensors_battery()
         if not battery.power_plugged and battery.percent <= 50:
             battery_time_left = time.strftime("%H:%M", time.gmtime(battery.secsleft))
-            video_response += f"\n\U0001FAAB *{battery.percent}% - {battery_time_left}*"
+            video_response += f"\n\U0001FAAB *{battery.percent}% ~{battery_time_left}*"
 
         # Make the global state variables accessible
         global no_motion_group_message_id, no_motion_grouped_videos
