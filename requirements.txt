@@ -5,3 +5,4 @@ watchdog
 moviepy
 opencv-python
 numpy
+psutil

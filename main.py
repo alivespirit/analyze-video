@@ -9,6 +9,7 @@ import time
 import json
 import cv2
 import numpy as np
+import psutil
 
 from dotenv import load_dotenv
 from telegram import Bot, InlineKeyboardMarkup, InlineKeyboardButton
@@ -692,8 +693,11 @@ def analyze_video(video_path):
         return timestamp + analysis_result + additional_text
 
     except Exception as e_analysis:
-        logger.error(f"[{file_basename}] Video analysis failed: {e_analysis}", exc_info=True)
-        return timestamp + "Відео не вдалося проаналізувати: " + str(e_analysis)
+        logger.error(f"[{file_basename}] Video analysis failed: {e_analysis}", exc_info=False)
+        if '429' in str(e_analysis):
+            return timestamp + "\uE252 Відео не вдалося проаналізувати: перевищено ліміт запитів до Gemini."
+        else:
+            return timestamp + "\uE333 Відео не вдалося проаналізувати: " + str(e_analysis)[:512]
 
 # --- FileHandler (uses executor) ---
 class FileHandler(FileSystemEventHandler):
@@ -735,6 +739,11 @@ class FileHandler(FileSystemEventHandler):
             self.logger.error(f"[{file_basename}] Error running analyze_video in executor: {e}", exc_info=True)
             video_response = f"_{file_basename[:6]}:_ Failed to analyze video."
 
+        battery = psutil.sensors_battery()
+        if not battery.power_plugged and battery.percent <= 50:
+            battery_time_left = time.strftime("%H:%M", time.gmtime(battery.secsleft))
+            video_response += f"\n\U0001FAAB *{battery.percent}% - {battery_time_left}*"
+
         # Make the global state variables accessible
         global no_motion_group_message_id, no_motion_grouped_videos
 
@@ -750,7 +759,6 @@ class FileHandler(FileSystemEventHandler):
         
         # Extract just the timestamp part for button text
         timestamp_text = file_basename[:6]
-
 
         if is_significant_motion:
             # A significant motion video ALWAYS resets the group
