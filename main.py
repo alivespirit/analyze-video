@@ -700,7 +700,7 @@ def analyze_video(video_path):
     except Exception as e_analysis:
         logger.error(f"[{file_basename}] Video analysis failed: {e_analysis}", exc_info=False)
         if '429' in str(e_analysis):
-            return timestamp + "\u26A0\uFE0F Відео не вдалося проаналізувати: перевищено ліміт запитів до Gemini."
+            return timestamp + "\u26A0\uFE0F Ти ставив забагато питань..."
         else:
             return timestamp + "\u274C Відео не вдалося проаналізувати: " + str(e_analysis)[:512]
 
