@@ -33,6 +33,9 @@ from moviepy import ImageSequenceClip
 no_motion_group_message_id = None
 no_motion_grouped_videos = []
 
+# --- NEW: Add a lock for Telegram message grouping ---
+telegram_lock = asyncio.Lock()
+
 RESTART_REQUESTED = False
 MAIN_SCRIPT_PATH = os.path.abspath(__file__)
 
@@ -758,6 +761,7 @@ class FileHandler(FileSystemEventHandler):
         self.loop = loop
         self.app = app
         self.logger = logging.getLogger(__name__)
+        self.telegram_lock = telegram_lock
 
     def on_created(self, event):
         if event.is_directory: return
@@ -819,57 +823,84 @@ class FileHandler(FileSystemEventHandler):
             battery_time_left = time.strftime("%H:%M", time.gmtime(battery.secsleft))
             video_response += f"\n\U0001FAAB *{battery.percent}% ~{battery_time_left}*"
 
-        # Make the global state variables accessible
-        global no_motion_group_message_id, no_motion_grouped_videos
+        # --- NEW: Acquire lock before interacting with shared state and Telegram API ---
+        async with self.telegram_lock:
+            # Make the global state variables accessible
+            global no_motion_group_message_id, no_motion_grouped_videos
 
-        # --- REFINED DECISION LOGIC ---
-        is_significant_motion = clip_path is not None
+            # --- REFINED DECISION LOGIC ---
+            is_significant_motion = clip_path is not None
 
-        # Get relative path for callback data
-        safe_video_folder = os.path.join(VIDEO_FOLDER, '')
-        if file_path.startswith(safe_video_folder):
-            callback_file = file_path[len(safe_video_folder):].replace(os.path.sep, '/')
-        else:
-            callback_file = file_basename
-        
-        # Extract just the timestamp part for button text
-        timestamp_text = file_basename[:6]
+            # Get relative path for callback data
+            safe_video_folder = os.path.join(VIDEO_FOLDER, '')
+            if file_path.startswith(safe_video_folder):
+                callback_file = file_path[len(safe_video_folder):].replace(os.path.sep, '/')
+            else:
+                callback_file = file_basename
+            
+            # Extract just the timestamp part for button text
+            timestamp_text = file_basename[:6]
 
-        if is_significant_motion:
-            # A significant motion video ALWAYS resets the group
-            self.logger.info(f"[{file_basename}] Significant motion detected. Resetting grouped message.")
-            no_motion_group_message_id = None
-            no_motion_grouped_videos.clear()
+            if is_significant_motion:
+                # A significant motion video ALWAYS resets the group
+                self.logger.info(f"[{file_basename}] Significant motion detected. Resetting grouped message.")
+                no_motion_group_message_id = None
+                no_motion_grouped_videos.clear()
 
-            media_path = clip_path
-            if not os.path.exists(media_path):
-                self.logger.warning(f"[{file_basename}] Highlight clip not found, using original video.")
-                media_path = file_path
-            try:
-                # Button for significant motion video is still singular
-                keyboard = [[InlineKeyboardButton("Глянути", callback_data=callback_file)]]
-                reply_markup = InlineKeyboardMarkup(keyboard)
-                with open(media_path, 'rb') as animation_file:
-                    sent_message = await self.app.bot.send_animation(
-                        chat_id=CHAT_ID, animation=animation_file, caption=video_response,
-                        reply_markup=reply_markup, parse_mode='Markdown'
-                    )
-                self.logger.info(f"[{file_basename}] Animation sent successfully.")
-            except telegram.error.BadRequest as bad_request_error:
-                self.logger.warning(f"[{file_basename}] BadRequest error: {bad_request_error}. Retrying with escaped Markdown.")
+                media_path = clip_path
+                if not os.path.exists(media_path):
+                    self.logger.warning(f"[{file_basename}] Highlight clip not found, using original video.")
+                    media_path = file_path
                 try:
+                    # Button for significant motion video is still singular
+                    keyboard = [[InlineKeyboardButton("Глянути", callback_data=callback_file)]]
+                    reply_markup = InlineKeyboardMarkup(keyboard)
                     with open(media_path, 'rb') as animation_file:
                         sent_message = await self.app.bot.send_animation(
-                            chat_id=CHAT_ID,
-                            animation=animation_file,
-                            caption=escape_markdown(video_response, version=1),
-                            reply_markup=reply_markup,
-                            parse_mode='Markdown'
+                            chat_id=CHAT_ID, animation=animation_file, caption=video_response,
+                            reply_markup=reply_markup, parse_mode='Markdown'
                         )
-                    self.logger.info(f"[{file_basename}] Animation sent successfully after escaping Markdown.")
-                except Exception as retry_error:
-                    self.logger.error(f"[{file_basename}] Failed to send animation after escaping Markdown: {retry_error}", exc_info=True)
-                    # Fallback to sending a plain message with a button
+                    self.logger.info(f"[{file_basename}] Animation sent successfully.")
+                except telegram.error.BadRequest as bad_request_error:
+                    self.logger.warning(f"[{file_basename}] BadRequest error: {bad_request_error}. Retrying with escaped Markdown.")
+                    try:
+                        with open(media_path, 'rb') as animation_file:
+                            sent_message = await self.app.bot.send_animation(
+                                chat_id=CHAT_ID,
+                                animation=animation_file,
+                                caption=escape_markdown(video_response, version=1),
+                                reply_markup=reply_markup,
+                                parse_mode='Markdown'
+                            )
+                        self.logger.info(f"[{file_basename}] Animation sent successfully after escaping Markdown.")
+                    except Exception as retry_error:
+                        self.logger.error(f"[{file_basename}] Failed to send animation after escaping Markdown: {retry_error}", exc_info=True)
+                        # Fallback to sending a plain message with a button
+                        self.logger.info(f"[{file_basename}] Sending plain message with button to Telegram...")
+                        try:
+                            sent_message = await self.app.bot.send_message(
+                                chat_id=CHAT_ID,
+                                text=video_response,
+                                reply_markup=reply_markup,
+                                parse_mode='Markdown'
+                            )
+                            self.logger.info(f"[{file_basename}] Plain message with button sent successfully.")
+                        except telegram.error.BadRequest as bad_request_error_fallback:
+                            self.logger.warning(f"[{file_basename}] BadRequest error on fallback: {bad_request_error_fallback}. Retrying with escaped Markdown.")
+                            try:
+                                sent_message = await self.app.bot.send_message(
+                                    chat_id=CHAT_ID,
+                                    text=escape_markdown(video_response, version=1),
+                                    reply_markup=reply_markup,
+                                    parse_mode='Markdown'
+                                )
+                                self.logger.info(f"[{file_basename}] Message sent successfully after escaping Markdown.")
+                            except Exception as e_final_fallback:
+                                self.logger.error(f"[{file_basename}] Failed to send message after escaping Markdown: {e_final_fallback}", exc_info=True)
+                        except Exception as e:
+                            self.logger.error(f"[{file_basename}] Error sending message: {e}", exc_info=True)
+                except Exception as e:
+                    self.logger.error(f"[{file_basename}] Error sending animation: {e}", exc_info=True)
                     self.logger.info(f"[{file_basename}] Sending plain message with button to Telegram...")
                     try:
                         sent_message = await self.app.bot.send_message(
@@ -879,8 +910,8 @@ class FileHandler(FileSystemEventHandler):
                             parse_mode='Markdown'
                         )
                         self.logger.info(f"[{file_basename}] Plain message with button sent successfully.")
-                    except telegram.error.BadRequest as bad_request_error_fallback:
-                        self.logger.warning(f"[{file_basename}] BadRequest error on fallback: {bad_request_error_fallback}. Retrying with escaped Markdown.")
+                    except telegram.error.BadRequest as bad_request_error:
+                        self.logger.warning(f"[{file_basename}] BadRequest error: {bad_request_error}. Retrying with escaped Markdown.")
                         try:
                             sent_message = await self.app.bot.send_message(
                                 chat_id=CHAT_ID,
@@ -889,188 +920,163 @@ class FileHandler(FileSystemEventHandler):
                                 parse_mode='Markdown'
                             )
                             self.logger.info(f"[{file_basename}] Message sent successfully after escaping Markdown.")
-                        except Exception as e_final_fallback:
-                            self.logger.error(f"[{file_basename}] Failed to send message after escaping Markdown: {e_final_fallback}", exc_info=True)
+                        except Exception as retry_error:
+                            self.logger.error(f"[{file_basename}] Failed to send message after escaping Markdown: {retry_error}", exc_info=True)
                     except Exception as e:
                         self.logger.error(f"[{file_basename}] Error sending message: {e}", exc_info=True)
-            except Exception as e:
-                self.logger.error(f"[{file_basename}] Error sending animation: {e}", exc_info=True)
-                self.logger.info(f"[{file_basename}] Sending plain message with button to Telegram...")
-                try:
-                    sent_message = await self.app.bot.send_message(
-                        chat_id=CHAT_ID,
-                        text=video_response,
-                        reply_markup=reply_markup,
-                        parse_mode='Markdown'
-                    )
-                    self.logger.info(f"[{file_basename}] Plain message with button sent successfully.")
-                except telegram.error.BadRequest as bad_request_error:
-                    self.logger.warning(f"[{file_basename}] BadRequest error: {bad_request_error}. Retrying with escaped Markdown.")
+                finally:
+                    # Delete the generated clip after sending or if an error occurs
+                    if media_path != file_path and os.path.exists(media_path):
+                        await asyncio.sleep(5)  # Small delay to ensure file is not in use
+                        max_wait = 120
+                        waited = 0
+                        was_locked = False
+                        # Wait for the lock file to be released
+                        while os.path.exists(media_path + ".lock") and waited < max_wait:
+                            self.logger.info(f"[{file_basename}] Waiting for lock file on {media_path} to be released...")
+                            was_locked = True
+                            await asyncio.sleep(10)
+                            waited += 10
+                        if os.path.exists(media_path + ".lock"):
+                            self.logger.warning(f"[{file_basename}] Lock file still exists after {max_wait} seconds. Proceeding to delete media file anyway.")
+                        elif was_locked:
+                            await asyncio.sleep(10)  # Small delay to ensure file is not in use
+                        try:
+                            os.remove(media_path)
+                            self.logger.info(f"[{file_basename}] Temporary media file deleted: {media_path}")
+                        except Exception as e_del:
+                            self.logger.error(f"[{file_basename}] Failed to delete temporary media file {media_path}: {e_del}")
+
+
+            else: # --- This block now handles ALL non-significant videos ---
+                video_info = {'text': video_response, 'callback': callback_file, 'timestamp': timestamp_text}
+
+                # Condition to add to an existing group
+                if no_motion_group_message_id and len(no_motion_grouped_videos) < 4:
+                    self.logger.info(f"[{file_basename}] Adding to existing insignificant message group.")
+                    no_motion_grouped_videos.append(video_info)
+                    
+                    # Build the updated message
+                    full_text = "\n".join([v['text'] for v in no_motion_grouped_videos])
+                    
+                    # --- Create a single row of buttons ---
+                    button_row = [InlineKeyboardButton(v['timestamp'], callback_data=v['callback']) for v in no_motion_grouped_videos]
+                    reply_markup = InlineKeyboardMarkup([button_row]) # Note the double brackets [[...]]
+                    
                     try:
-                        sent_message = await self.app.bot.send_message(
+                        await self.app.bot.edit_message_text(
                             chat_id=CHAT_ID,
-                            text=escape_markdown(video_response, version=1),
+                            message_id=no_motion_group_message_id,
+                            text=full_text,
                             reply_markup=reply_markup,
                             parse_mode='Markdown'
                         )
-                        self.logger.info(f"[{file_basename}] Message sent successfully after escaping Markdown.")
-                    except Exception as retry_error:
-                        self.logger.error(f"[{file_basename}] Failed to send message after escaping Markdown: {retry_error}", exc_info=True)
-                except Exception as e:
-                    self.logger.error(f"[{file_basename}] Error sending message: {e}", exc_info=True)
-            finally:
-                # Delete the generated clip after sending or if an error occurs
-                if media_path != file_path and os.path.exists(media_path):
-                    await asyncio.sleep(5)  # Small delay to ensure file is not in use
-                    max_wait = 120
-                    waited = 0
-                    was_locked = False
-                    # Wait for the lock file to be released
-                    while os.path.exists(media_path + ".lock") and waited < max_wait:
-                        self.logger.info(f"[{file_basename}] Waiting for lock file on {media_path} to be released...")
-                        was_locked = True
-                        await asyncio.sleep(10)
-                        waited += 10
-                    if os.path.exists(media_path + ".lock"):
-                        self.logger.warning(f"[{file_basename}] Lock file still exists after {max_wait} seconds. Proceeding to delete media file anyway.")
-                    elif was_locked:
-                        await asyncio.sleep(10)  # Small delay to ensure file is not in use
-                    try:
-                        os.remove(media_path)
-                        self.logger.info(f"[{file_basename}] Temporary media file deleted: {media_path}")
-                    except Exception as e_del:
-                        self.logger.error(f"[{file_basename}] Failed to delete temporary media file {media_path}: {e_del}")
-
-
-        else: # --- This block now handles ALL non-significant videos ---
-            video_info = {'text': video_response, 'callback': callback_file, 'timestamp': timestamp_text}
-
-            # Condition to add to an existing group
-            if no_motion_group_message_id and len(no_motion_grouped_videos) < 4:
-                self.logger.info(f"[{file_basename}] Adding to existing insignificant message group.")
-                no_motion_grouped_videos.append(video_info)
-                
-                # Build the updated message
-                full_text = "\n".join([v['text'] for v in no_motion_grouped_videos])
-                
-                # --- Create a single row of buttons ---
-                button_row = [InlineKeyboardButton(v['timestamp'], callback_data=v['callback']) for v in no_motion_grouped_videos]
-                reply_markup = InlineKeyboardMarkup([button_row]) # Note the double brackets [[...]]
-                
-                try:
-                    await self.app.bot.edit_message_text(
-                        chat_id=CHAT_ID,
-                        message_id=no_motion_group_message_id,
-                        text=full_text,
-                        reply_markup=reply_markup,
-                        parse_mode='Markdown'
-                    )
-                    self.logger.info(f"[{file_basename}] Successfully edited message to extend group.")
-                except telegram.error.BadRequest as e:
-                    if "message is not modified" in str(e).lower():
-                        self.logger.info(f"[{file_basename}] Message was not modified, skipping edit.")
-                    else:
-                        self.logger.warning(f"[{file_basename}] Could not edit message: {e}. Retrying with escaped Markdown.")
-                        try:
-                            await self.app.bot.edit_message_text(
-                                chat_id=CHAT_ID,
-                                message_id=no_motion_group_message_id,
-                                text=escape_markdown(full_text, version=1),
-                                reply_markup=reply_markup,
-                                parse_mode='Markdown'
-                            )
-                            self.logger.info(f"[{file_basename}] Message edited successfully after escaping Markdown.")
-                        except Exception as retry_error:
-                            self.logger.error(f"[{file_basename}] Failed to edit message after escaping Markdown: {retry_error}", exc_info=True)
-                            no_motion_group_message_id = None # Force a new message
-                            no_motion_grouped_videos.clear()
+                        self.logger.info(f"[{file_basename}] Successfully edited message to extend group.")
+                    except telegram.error.BadRequest as e:
+                        if "message is not modified" in str(e).lower():
+                            self.logger.info(f"[{file_basename}] Message was not modified, skipping edit.")
+                        else:
+                            self.logger.warning(f"[{file_basename}] Could not edit message: {e}. Retrying with escaped Markdown.")
+                            try:
+                                await self.app.bot.edit_message_text(
+                                    chat_id=CHAT_ID,
+                                    message_id=no_motion_group_message_id,
+                                    text=escape_markdown(full_text, version=1),
+                                    reply_markup=reply_markup,
+                                    parse_mode='Markdown'
+                                )
+                                self.logger.info(f"[{file_basename}] Message edited successfully after escaping Markdown.")
+                            except Exception as retry_error:
+                                self.logger.error(f"[{file_basename}] Failed to edit message after escaping Markdown: {retry_error}", exc_info=True)
+                                no_motion_group_message_id = None # Force a new message
+                                no_motion_grouped_videos.clear()
+                        
+                elif no_motion_group_message_id is None or len(no_motion_grouped_videos) >= 4:
+                    self.logger.info(f"[{file_basename}] Starting a new insignificant message group.")
+                    no_motion_grouped_videos = [video_info]
                     
-            elif no_motion_group_message_id is None or len(no_motion_grouped_videos) >= 4:
-                self.logger.info(f"[{file_basename}] Starting a new insignificant message group.")
-                no_motion_grouped_videos = [video_info]
-                
-                # Create the first button for the new message
-                button_row = [InlineKeyboardButton("Глянути", callback_data=v['callback']) for v in no_motion_grouped_videos]
-                reply_markup = InlineKeyboardMarkup([button_row])
-                
-                try:
-                    sent_message = await self.app.bot.send_message(
-                        chat_id=CHAT_ID,
-                        text=video_info['text'],
-                        reply_markup=reply_markup,
-                        parse_mode='Markdown'
-                    )
-                    no_motion_group_message_id = sent_message.message_id
-                    self.logger.info(f"[{file_basename}] New group message sent. Message ID: {no_motion_group_message_id}")
-                except telegram.error.BadRequest as e:
-                    self.logger.warning(f"[{file_basename}] Could not send new group message: {e}. Retrying with escaped Markdown.")
+                    # Create the first button for the new message
+                    button_row = [InlineKeyboardButton("Глянути", callback_data=v['callback']) for v in no_motion_grouped_videos]
+                    reply_markup = InlineKeyboardMarkup([button_row])
+                    
                     try:
                         sent_message = await self.app.bot.send_message(
                             chat_id=CHAT_ID,
-                            text=escape_markdown(video_info['text'], version=1),
+                            text=video_info['text'],
                             reply_markup=reply_markup,
                             parse_mode='Markdown'
                         )
                         no_motion_group_message_id = sent_message.message_id
-                        self.logger.info(f"[{file_basename}] New group message sent successfully after escaping Markdown. Message ID: {no_motion_group_message_id}")
-                    except Exception as retry_error:
-                        self.logger.error(f"[{file_basename}] Failed to send new group message after escaping Markdown: {retry_error}", exc_info=True)
+                        self.logger.info(f"[{file_basename}] New group message sent. Message ID: {no_motion_group_message_id}")
+                    except telegram.error.BadRequest as e:
+                        self.logger.warning(f"[{file_basename}] Could not send new group message: {e}. Retrying with escaped Markdown.")
+                        try:
+                            sent_message = await self.app.bot.send_message(
+                                chat_id=CHAT_ID,
+                                text=escape_markdown(video_info['text'], version=1),
+                                reply_markup=reply_markup,
+                                parse_mode='Markdown'
+                            )
+                            no_motion_group_message_id = sent_message.message_id
+                            self.logger.info(f"[{file_basename}] New group message sent successfully after escaping Markdown. Message ID: {no_motion_group_message_id}")
+                        except Exception as retry_error:
+                            self.logger.error(f"[{file_basename}] Failed to send new group message after escaping Markdown: {retry_error}", exc_info=True)
+                            no_motion_group_message_id = None
+                            no_motion_grouped_videos.clear()
+                    except Exception as e_send:
+                        self.logger.error(f"[{file_basename}] Failed to send new group message: {e_send}", exc_info=True)
                         no_motion_group_message_id = None
                         no_motion_grouped_videos.clear()
-                except Exception as e_send:
-                    self.logger.error(f"[{file_basename}] Failed to send new group message: {e_send}", exc_info=True)
-                    no_motion_group_message_id = None
-                    no_motion_grouped_videos.clear()
-        
-        if insignificant_frames:
-            self.logger.info(f"[{file_basename}] Found {len(insignificant_frames)} insignificant motion frames to send.")
-            media_group = []
-            # Read all files into memory first to avoid issues with file handles
-            frame_data = []
-            for frame_path in insignificant_frames:
-                try:
-                    with open(frame_path, 'rb') as photo_file:
-                        frame_data.append(photo_file.read())
-                except Exception as e:
-                    self.logger.error(f"[{file_basename}] Failed to read frame file {frame_path}: {e}")
-
-            for data in frame_data:
-                media_group.append(InputMediaPhoto(media=data))
-
-            if media_group:
-                try:
-                    reply_to_id = None
-                    if sent_message:
-                        reply_to_id = sent_message.message_id
-                    elif no_motion_group_message_id:
-                        reply_to_id = no_motion_group_message_id
-
-                    if reply_to_id:
-                        await self.app.bot.send_media_group(
-                            chat_id=CHAT_ID,
-                            media=media_group,
-                            reply_to_message_id=reply_to_id,
-                            caption=f"_{timestamp_text}_ \U0001F4F8",
-                            parse_mode='Markdown'
-                        )
-                        self.logger.info(f"[{file_basename}] Sent media group of {len(media_group)} insignificant frames as a reply.")
-                    else:
-                        self.logger.warning(f"[{file_basename}] No message ID to reply to. Sending media group without reply.")
-                        await self.app.bot.send_media_group(chat_id=CHAT_ID, media=media_group, caption=f"_{timestamp_text}_ \U0001F4F8", parse_mode='Markdown')
-
-                except Exception as e:
-                    self.logger.error(f"[{file_basename}] Failed to send media group: {e}", exc_info=True)
             
-            # Clean up the temporary frame files
-            for frame_path in insignificant_frames:
-                if os.path.exists(frame_path):
+            if insignificant_frames:
+                self.logger.info(f"[{file_basename}] Found {len(insignificant_frames)} insignificant motion frames to send.")
+                media_group = []
+                # Read all files into memory first to avoid issues with file handles
+                frame_data = []
+                for frame_path in insignificant_frames:
                     try:
-                        os.remove(frame_path)
-                        self.logger.info(f"[{file_basename}] Deleted temporary frame: {frame_path}")
+                        with open(frame_path, 'rb') as photo_file:
+                            frame_data.append(photo_file.read())
                     except Exception as e:
-                        self.logger.error(f"[{file_basename}] Failed to delete temporary frame {frame_path}: {e}")
+                        self.logger.error(f"[{file_basename}] Failed to read frame file {frame_path}: {e}")
 
-        self.logger.info(f"[{file_basename}] Telegram interaction finished.")
+                for data in frame_data:
+                    media_group.append(InputMediaPhoto(media=data))
+
+                if media_group:
+                    try:
+                        reply_to_id = None
+                        if sent_message:
+                            reply_to_id = sent_message.message_id
+                        elif no_motion_group_message_id:
+                            reply_to_id = no_motion_group_message_id
+
+                        if reply_to_id:
+                            await self.app.bot.send_media_group(
+                                chat_id=CHAT_ID,
+                                media=media_group,
+                                reply_to_message_id=reply_to_id,
+                                caption=f"_{timestamp_text}_ \U0001F4F8",
+                                parse_mode='Markdown'
+                            )
+                            self.logger.info(f"[{file_basename}] Sent media group of {len(media_group)} insignificant frames as a reply.")
+                        else:
+                            self.logger.warning(f"[{file_basename}] No message ID to reply to. Sending media group without reply.")
+                            await self.app.bot.send_media_group(chat_id=CHAT_ID, media=media_group, caption=f"_{timestamp_text}_ \U0001F4F8", parse_mode='Markdown')
+
+                    except Exception as e:
+                        self.logger.error(f"[{file_basename}] Failed to send media group: {e}", exc_info=True)
+                
+                # Clean up the temporary frame files
+                for frame_path in insignificant_frames:
+                    if os.path.exists(frame_path):
+                        try:
+                            os.remove(frame_path)
+                            self.logger.info(f"[{file_basename}] Deleted temporary frame: {frame_path}")
+                        except Exception as e:
+                            self.logger.error(f"[{file_basename}] Failed to delete temporary frame {frame_path}: {e}")
+
+            self.logger.info(f"[{file_basename}] Telegram interaction finished.")
 
 
     async def wait_for_file_stable(self, file_path, file_basename, wait_seconds=2, checks=2):
