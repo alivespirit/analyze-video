@@ -12,7 +12,7 @@ import numpy as np
 import psutil
 
 from dotenv import load_dotenv
-from telegram import Bot, InlineKeyboardMarkup, InlineKeyboardButton
+from telegram import Bot, InlineKeyboardMarkup, InlineKeyboardButton, InputMediaPhoto
 import telegram.error
 from telegram.ext import Application, CallbackQueryHandler
 from telegram.helpers import escape_markdown
@@ -26,11 +26,6 @@ from logging.handlers import TimedRotatingFileHandler
 
 # Importing ImageSequenceClip from moviepy for MP4 extraction
 from moviepy import ImageSequenceClip
-
-import threading
-
-GEMINI_CONCURRENCY_LIMIT = 1  # Only one Gemini call at a time (adjust if safe)
-gemini_semaphore = threading.Semaphore(GEMINI_CONCURRENCY_LIMIT)
 
 # --- State for Grouping "No Motion" Messages ---
 # These are safe to use as globals because the executor has max_workers=1,
@@ -162,6 +157,8 @@ MAX_EVENT_GAP_SECONDS = 3.0
 # ### DURATION FILTER CONFIGURATION ###
 # Discard any motion event that lasts for less than this many seconds.
 MIN_EVENT_DURATION_SECONDS = 2.0
+# From insignificant motions that last longer than this, a frame will be extracted
+MIN_INSIGNIFICANT_EVENT_DURATION_SECONDS = 0.2
 # ### PERFORMANCE CONFIGURATION ###
 CROP_PADDING = 30  # Pixels to add around the ROI bounding box for safety
 # ### SANITY CHECK CONFIGURATION ###
@@ -221,10 +218,15 @@ except Exception as e:
 # and overwhelming the system.
 max_workers = 1 
 try:
-    executor = concurrent.futures.ThreadPoolExecutor(max_workers=max_workers)
-    logger.info(f"ThreadPoolExecutor initialized with a single worker (max_workers=1) to ensure sequential video processing.")
+    # A dedicated executor for CPU-bound motion detection to ensure it runs one at a time.
+    motion_executor = concurrent.futures.ThreadPoolExecutor(max_workers=max_workers)
+    logger.info(f"ThreadPoolExecutor for motion detection initialized with a single worker.")
+    
+    # A general-purpose executor for I/O-bound tasks like Gemini calls.
+    io_executor = concurrent.futures.ThreadPoolExecutor(max_workers=max_workers)
+    logger.info(f"ThreadPoolExecutor for I/O tasks initialized with a single worker.")
 except Exception as e:
-     logger.critical(f"Failed to initialize ThreadPoolExecutor: {e}", exc_info=True)
+     logger.critical(f"Failed to initialize ThreadPoolExecutors: {e}", exc_info=True)
      exit(1)
 
 
@@ -261,12 +263,12 @@ def detect_motion(input_video_path, output_dir):
     roi_poly_points = load_roi(ROI_CONFIG_FILE)
     if roi_poly_points is None:
         logger.error(f"[{file_basename}] ROI config file not found.")
-        return None
+        return {'status': 'error', 'clip_path': None, 'insignificant_frames': []}
 
     cap = cv2.VideoCapture(input_video_path)
     if not cap.isOpened():
         logger.error(f"[{file_basename}] Could not open video file {input_video_path}")
-        return None
+        return {'status': 'error', 'clip_path': None, 'insignificant_frames': []}
     
     start_time = time.time()
 
@@ -345,7 +347,7 @@ def detect_motion(input_video_path, output_dir):
         cap.release()
         elapsed_time = time.time() - start_time
         logger.info(f"[{file_basename}] Motion detection took {elapsed_time:.2f} seconds.")
-        return "No motion"
+        return {'status': 'no_motion', 'clip_path': None, 'insignificant_frames': []}
 
     union_rects = {}
     discarded_boxes = []
@@ -379,7 +381,7 @@ def detect_motion(input_video_path, output_dir):
         elapsed_time = time.time() - start_time
         logger.info(f"[{file_basename}] Motion detection took {elapsed_time:.2f} seconds.")
         cap.release()
-        return "No motion"
+        return {'status': 'no_motion', 'clip_path': None, 'insignificant_frames': []}
 
     motion_frame_indices = sorted(union_rects.keys())
     max_gap_in_frames = MAX_EVENT_GAP_SECONDS * fps
@@ -396,23 +398,50 @@ def detect_motion(input_video_path, output_dir):
 
     logger.info(f"[{file_basename}] Found {len(sub_clips)} raw motion event(s). Filtering by duration...")
     significant_sub_clips = []
-    found_insignificant_motion = False # NEW: Flag for mixed motion types
+    insignificant_motion_frames = []
     for start_frame, end_frame in sub_clips:
         duration_frames = end_frame - start_frame
         duration_seconds = duration_frames / fps
         if duration_seconds >= MIN_EVENT_DURATION_SECONDS:
             logger.info(f"[{file_basename}]   - Event lasting {duration_seconds:.2f}s is SIGNIFICANT. Keeping.")
             significant_sub_clips.append((start_frame, end_frame))
+        elif duration_seconds >= MIN_INSIGNIFICANT_EVENT_DURATION_SECONDS:
+            logger.info(f"[{file_basename}]   - Event lasting {duration_seconds:.2f}s is insignificant. Extracting frame.")
+            mid_frame_index = start_frame + (end_frame - start_frame) // 2
+            
+            # Find the bounding box from the known motion frame closest to the middle frame
+            known_frames_in_event = [f for f in union_rects.keys() if start_frame <= f <= end_frame]
+            if not known_frames_in_event:
+                continue
+            
+            closest_known_frame = min(known_frames_in_event, key=lambda x: abs(x - mid_frame_index))
+            (x, y, w, h) = union_rects[closest_known_frame]
+
+            cap.set(cv2.CAP_PROP_POS_FRAMES, mid_frame_index)
+            ret, frame = cap.read()
+            if ret:
+                # Draw the bounding box on the full frame
+                orig_x1 = int(x + crop_x1)
+                orig_y1 = int(y + crop_y1)
+                orig_x2 = int(x + w + crop_x1)
+                orig_y2 = int(y + h + crop_y1)
+                cv2.rectangle(frame, (orig_x1, orig_y1), (orig_x2, orig_y2), (0, 255, 255), 2) # Cyan for insignificant
+
+                frame_filename = f"{os.path.splitext(file_basename)[0]}_insignificant_{mid_frame_index}.jpg"
+                frame_path = os.path.join(output_dir, frame_filename)
+                # Save with compression
+                cv2.imwrite(frame_path, frame, [cv2.IMWRITE_JPEG_QUALITY, 85])
+                insignificant_motion_frames.append(frame_path)
+                logger.info(f"[{file_basename}] Saved insignificant motion frame to {frame_path}")
         else:
             logger.info(f"[{file_basename}]   - Event lasting {duration_seconds:.2f}s is too short. Discarding as noise/shadow.")
-            found_insignificant_motion = True # NEW: Mark that we found a short event
     
     if not significant_sub_clips:
         logger.info(f"[{file_basename}] No significant long-duration motion found.")
         cap.release()
         elapsed_time = time.time() - start_time
         logger.info(f"[{file_basename}] Motion detection took {elapsed_time:.2f} seconds.")
-        return "No significant motion"
+        return {'status': 'no_significant_motion', 'clip_path': None, 'insignificant_frames': insignificant_motion_frames}
 
     logger.info(f"[{file_basename}] Interpolating bounding boxes for smooth tracking...")
 
@@ -486,7 +515,7 @@ def detect_motion(input_video_path, output_dir):
 
     if not all_clip_frames:
         logger.error(f"[{file_basename}] No frames collected for the clip.")
-        return None
+        return {'status': 'error', 'clip_path': None, 'insignificant_frames': insignificant_motion_frames}
         
     final_clip = ImageSequenceClip(all_clip_frames, fps=fps)
     output_filename = os.path.join(output_dir, file_basename)
@@ -502,21 +531,16 @@ def detect_motion(input_video_path, output_dir):
     elapsed_time = time.time() - start_time
     logger.info(f"[{file_basename}] Motion detection took {elapsed_time:.2f} seconds.")
     
-    # NEW: Return special value if we should analyze the full video
-    if found_insignificant_motion:
-        logger.info(f"[{file_basename}] Both significant and insignificant motion was found. Flagging for full video analysis.")
-        return "analyze_full_video"
-
-    return output_filename
+    return {'status': 'significant_motion', 'clip_path': output_filename, 'insignificant_frames': insignificant_motion_frames}
 
 
-# --- analyze_video function (remains synchronous, uses original models) ---
-def analyze_video(video_path):
-    """Extract insights from the video using Gemini. Runs in executor."""
+# --- NEW: Gemini analysis function, split from the old analyze_video ---
+def run_gemini_analysis(motion_result, video_path):
+    """Extract insights from the video using Gemini. Runs in the I/O executor."""
     file_basename = os.path.basename(video_path)
     timestamp = f"_{file_basename[:6]}:_ "
     video_to_process = None
-    video_bytes = None
+    video_bytes_obj = None # Renamed to avoid confusion with the data itself
     use_files_api = False
     now = datetime.datetime.now()
 
@@ -525,69 +549,88 @@ def analyze_video(video_path):
       hour_timestamp = video_path.split(os.path.sep)[-2][-2:]
       timestamp = f"_{hour_timestamp}H{file_basename[:6]}:_ "
 
-    detected_motion = detect_motion(video_path, TEMP_DIR)
-    if detected_motion == "No motion":
+    # Handle case where motion detection fails
+    if motion_result is None or not isinstance(motion_result, dict):
+        logger.warning(f"[{file_basename}] Motion detection returned an unexpected value: {motion_result}. Analyzing full video.")
+        motion_result = {'status': 'error', 'clip_path': None, 'insignificant_frames': []}
+
+    detected_motion_status = motion_result['status']
+    
+    if detected_motion_status == "no_motion":
         logger.info(f"[{file_basename}] Skipping Gemini analysis.")
-        return timestamp + random.choice(NO_ACTION_RESPONSES)
-    elif detected_motion == "No significant motion":
-        logger.info(f"[{file_basename}] Analyzing full video.")
-        video_to_process = video_path
-    elif detected_motion == "analyze_full_video":
-        logger.info(f"[{file_basename}] Analyzing full video due to mix of significant and insignificant motion.")
-        timestamp += "*Отакої!* "
-        video_to_process = video_path
-    elif detected_motion is None:
+        return {'response': timestamp + "\u2714\uFE0F " + random.choice(NO_ACTION_RESPONSES), 'insignificant_frames': [], 'clip_path': None}
+
+    # Skip Gemini analysis during off-peak hours to keep under rate limits
+    if now.hour < 9 or now.hour > 18:
+        logger.info(f"[{file_basename}] Skipping Gemini analysis due to off-peak hours.")
+        if detected_motion_status == "error":
+            return {'response': timestamp + "\U0001F4A2 Шось неясно.", 'insignificant_frames': motion_result['insignificant_frames'], 'clip_path': None}
+        elif detected_motion_status == "no_significant_motion":
+            return {'response': timestamp + "\U0001F518 Шось там тойво...", 'insignificant_frames': motion_result['insignificant_frames'], 'clip_path': None}
+        elif detected_motion_status == "significant_motion":
+            return {'response': timestamp + "\u2611\uFE0F Шось там точно цейво.", 'insignificant_frames': motion_result['insignificant_frames'], 'clip_path': motion_result['clip_path']}
+
+    video_to_process = None
+    if detected_motion_status == "error":
         logger.warning(f"[{file_basename}] Error during motion detection. Analyzing full video.")
         video_to_process = video_path
-    else:
-        logger.info(f"[{file_basename}] Running Gemini analysis for {detected_motion}")
+    elif detected_motion_status == "no_significant_motion":
+        logger.info(f"[{file_basename}] Analyzing full video as there was no significant motion.")
+        video_to_process = video_path
+    elif detected_motion_status == "significant_motion":
+        logger.info(f"[{file_basename}] Running Gemini analysis for {motion_result['clip_path']}")
         timestamp += "*Отакої!* "
-        video_to_process = detected_motion
-        use_files_api = False # Set to true if Gemini fails to process generated video without audio
-
-    if use_files_api:
-        video_bytes = client.files.upload(file=video_to_process)
-        # Wait up to 2 minutes (120 seconds) for video processing
-        max_wait_seconds = 120
-        wait_interval = 10
-        waited = 0
-        while video_bytes.state == "PROCESSING":
-            if waited >= max_wait_seconds:
-                logger.error(f"[{file_basename}] Video processing timed out after {max_wait_seconds} seconds.")
-                return timestamp + "Відео не вдалося обробити (timeout)."
-            logger.info(f"[{file_basename}] Waiting for video to be processed ({waited}/{max_wait_seconds}s).")
-            time.sleep(wait_interval)
-            waited += wait_interval
-            video_bytes = client.files.get(name=video_bytes.name)
-
-        if video_bytes.state == "FAILED":
-            logger.error(f"[{file_basename}] Video processing failed: {video_bytes.error_message}")
-            return timestamp + "Відео не вдалося обробити."
-    else:
-        try:
-            video_bytes = open(video_to_process, 'rb').read()
-        except Exception as e:
-            logger.error(f"[{file_basename}] Error reading video file: {e}")
-            return timestamp + "Відео не вдалося прочитати."
-
-    if os.path.exists(os.path.join(SCRIPT_DIR, "enable_pro")) and (9 <= now.hour <= 13):
-        # If it's between 9:00 and 13:59, use the Pro model
-        model_main = 'gemini-2.5-pro'
-        model_fallback = 'gemini-2.5-flash'
-        model_fallback_text = '_[2.5F]_ '
-    else:
-        # Outside of that time, use the Flash models
-        model_main = 'gemini-2.5-flash'
-        model_fallback = 'gemini-2.5-flash-lite'
-        model_fallback_text = '_[2.5FL]_ '
-
-    model_fallback_2_0 = 'gemini-2.0-flash'
-    model_fallback_2_0_text = '_[2.0]_ '
-
-    sampling_rate = 5  # sampling rate in FPS, valid only for inline_data
-    max_retries = 3
+        video_to_process = motion_result['clip_path']
+    
+    # If there's nothing to process (e.g., no_significant_motion but we decide not to analyze full video)
+    if not video_to_process:
+         logger.info(f"[{file_basename}] No video to analyze, but insignificant frames may exist.")
+         return {'response': timestamp + "\U0001F4A2 Нема значного руху.", 'insignificant_frames': motion_result['insignificant_frames'], 'clip_path': None}
 
     try:
+        if use_files_api:
+            video_bytes_obj = client.files.upload(file=video_to_process)
+            # Wait up to 2 minutes (120 seconds) for video processing
+            max_wait_seconds = 120
+            wait_interval = 10
+            waited = 0
+            while video_bytes_obj.state == "PROCESSING":
+                if waited >= max_wait_seconds:
+                    logger.error(f"[{file_basename}] Video processing timed out after {max_wait_seconds} seconds.")
+                    return {'response': timestamp + "Відео не вдалося обробити (timeout).", 'insignificant_frames': motion_result['insignificant_frames'], 'clip_path': motion_result.get('clip_path')}
+                logger.info(f"[{file_basename}] Waiting for video to be processed ({waited}/{max_wait_seconds}s).")
+                time.sleep(wait_interval)
+                waited += wait_interval
+                video_bytes_obj = client.files.get(name=video_bytes_obj.name)
+
+            if video_bytes_obj.state == "FAILED":
+                logger.error(f"[{file_basename}] Video processing failed: {video_bytes_obj.error_message}")
+                return {'response': timestamp + "Відео не вдалося обробити.", 'insignificant_frames': motion_result['insignificant_frames'], 'clip_path': motion_result.get('clip_path')}
+        else:
+            try:
+                with open(video_to_process, 'rb') as f:
+                    video_data = f.read()
+            except Exception as e:
+                logger.error(f"[{file_basename}] Error reading video file: {e}")
+                return {'response': timestamp + "Відео не вдалося прочитати.", 'insignificant_frames': motion_result['insignificant_frames'], 'clip_path': motion_result.get('clip_path')}
+
+        if os.path.exists(os.path.join(SCRIPT_DIR, "enable_pro")) and (9 <= now.hour <= 13):
+            # If it's between 9:00 and 13:59, use the Pro model
+            model_main = 'gemini-2.5-pro'
+            model_fallback = 'gemini-2.5-flash'
+            model_fallback_text = '_[2.5F]_ '
+        else:
+            # Outside of that time, use the Flash models
+            model_main = 'gemini-2.5-flash'
+            model_fallback = 'gemini-2.5-flash-lite'
+            model_fallback_text = '_[2.5FL]_ '
+
+        model_fallback_2_0 = 'gemini-2.0-flash'
+        model_fallback_2_0_text = '_[2.0]_ '
+
+        sampling_rate = 5  # sampling rate in FPS, valid only for inline_data
+        max_retries = 3
+
         prompt_file_path = os.path.join(os.path.dirname(__file__), "prompt.txt")
         try:
             with open(prompt_file_path, "r", encoding="utf-8") as prompt_file:
@@ -595,19 +638,19 @@ def analyze_video(video_path):
             logger.debug(f"[{file_basename}] Prompt loaded successfully from {prompt_file_path}.")
         except FileNotFoundError:
             logger.error(f"[{file_basename}] Prompt file not found: {prompt_file_path}")
-            return timestamp + "Prompt file not found."
+            return {'response': timestamp + "Prompt file not found.", 'insignificant_frames': motion_result['insignificant_frames'], 'clip_path': motion_result.get('clip_path')}
         except Exception as e:
             logger.error(f"[{file_basename}] Error reading prompt file: {e}", exc_info=True)
-            return timestamp + "Error reading prompt file."
+            return {'response': timestamp + "Error reading prompt file.", 'insignificant_frames': motion_result['insignificant_frames'], 'clip_path': motion_result.get('clip_path')}
 
         if use_files_api:
-            contents = [video_bytes, prompt]
+            contents = [video_bytes_obj, prompt]
         else:
             contents = types.Content(
                 parts=[
                     types.Part(
                         inline_data=types.Blob(
-                            data=video_bytes,
+                            data=video_data,
                             mime_type='video/mp4'
                         ),
                         video_metadata=types.VideoMetadata(fps=sampling_rate)
@@ -621,17 +664,16 @@ def analyze_video(video_path):
 
         for attempt in range(max_retries):
             try:
-                with gemini_semaphore:
-                    logger.info(f"[{file_basename}] Generating content ({model_main}), attempt {attempt+1}...")
-                    response = client.models.generate_content(
-                                  model=model_main,
-                                  contents=contents,
-                                  config=types.GenerateContentConfig(
-                                      automatic_function_calling=types.AutomaticFunctionCallingConfig(
-                                          disable=True
-                                      )
+                logger.info(f"[{file_basename}] Generating content ({model_main}), attempt {attempt+1}...")
+                response = client.models.generate_content(
+                              model=model_main,
+                              contents=contents,
+                              config=types.GenerateContentConfig(
+                                  automatic_function_calling=types.AutomaticFunctionCallingConfig(
+                                      disable=True
                                   )
                               )
+                          )
                 logger.info(f"[{file_basename}] {model_main} response received.")
                 if response.text is None or response.text.strip() == "":
                     raise ValueError(f"{model_main} returned an empty response with reason {response.candidates[0].finish_reason.name}.")
@@ -639,17 +681,16 @@ def analyze_video(video_path):
                 break
             except Exception as e_main:
                 try:
-                    with gemini_semaphore:
-                        logger.warning(f"[{file_basename}] {model_main} failed. Falling back to {model_fallback}. Message: {e_main}")
-                        response = client.models.generate_content(
-                                      model=model_fallback,
-                                      contents=contents,
-                                      config=types.GenerateContentConfig(
-                                          automatic_function_calling=types.AutomaticFunctionCallingConfig(
-                                              disable=True
-                                          )
+                    logger.warning(f"[{file_basename}] {model_main} failed. Falling back to {model_fallback}. Message: {e_main}")
+                    response = client.models.generate_content(
+                                  model=model_fallback,
+                                  contents=contents,
+                                  config=types.GenerateContentConfig(
+                                      automatic_function_calling=types.AutomaticFunctionCallingConfig(
+                                          disable=True
                                       )
                                   )
+                              )
                     logger.info(f"[{file_basename}] {model_fallback} response received.")
                     if response.text is None or response.text.strip() == "":
                         raise ValueError(f"{model_fallback} returned an empty response with reason {response.candidates[0].finish_reason.name}.")
@@ -686,23 +727,26 @@ def analyze_video(video_path):
         logger.info(f"[{file_basename}] Response: {analysis_result}")
 
         # Notify username if needed
-        if ("Отакої!" in analysis_result or "Отакої!" in timestamp) and (9 <= now.hour <= 13):
+        if detected_motion_status == "significant_motion" and (9 <= now.hour <= 13):
             additional_text += "\n" + USERNAME
 
-        if use_files_api:
-            try:
-                client.files.delete(name=video_bytes.name)  # Clean up uploaded file
-            except Exception as e_delete:
-                logger.warning(f"[{file_basename}] Failed to delete uploaded file: {e_delete}", exc_info=False)
-
-        return timestamp + analysis_result + additional_text
+        return {'response': timestamp + "\u2705 " + analysis_result + additional_text, 'insignificant_frames': motion_result['insignificant_frames'], 'clip_path': motion_result.get('clip_path')}
 
     except Exception as e_analysis:
         logger.error(f"[{file_basename}] Video analysis failed: {e_analysis}", exc_info=False)
         if '429' in str(e_analysis):
-            return timestamp + "\u26A0\uFE0F Ти ставив забагато питань..."
+            return {'response': timestamp + "\u26A0\uFE0F Ти ставив забагато питань...", 'insignificant_frames': motion_result['insignificant_frames'], 'clip_path': motion_result.get('clip_path')}
         else:
-            return timestamp + "\u274C Відео не вдалося проаналізувати: " + str(e_analysis)[:512]
+            return {'response': timestamp + "\u274C Відео не вдалося проаналізувати: " + str(e_analysis)[:512] + '...', 'insignificant_frames': motion_result['insignificant_frames'], 'clip_path': motion_result.get('clip_path')}
+    finally:
+        # This block executes after the try/except block, ensuring cleanup happens.
+        if use_files_api and 'video_bytes_obj' in locals() and hasattr(video_bytes_obj, 'name'):
+            try:
+                client.files.delete(name=video_bytes_obj.name)
+                logger.info(f"[{file_basename}] Successfully deleted uploaded file from Gemini API.")
+            except Exception as e_delete:
+                logger.warning(f"[{file_basename}] Failed to delete uploaded file from Gemini API: {e_delete}", exc_info=False)
+
 
 # --- FileHandler (uses executor) ---
 class FileHandler(FileSystemEventHandler):
@@ -736,13 +780,35 @@ class FileHandler(FileSystemEventHandler):
             self.logger.error(f"[{file_basename}] Error waiting for file stability: {e_wait}", exc_info=True)
             return
 
+        sent_message = None # Will store the message object to reply to
+
         try:
             current_loop = asyncio.get_running_loop()
-            video_response = await current_loop.run_in_executor(executor, analyze_video, file_path)
+            
+            # --- REFACTORED: Run motion detection and Gemini analysis in separate executors ---
+            # 1. Run CPU-bound motion detection in the single-worker executor.
+            self.logger.info(f"[{file_basename}] Queuing motion detection...")
+            motion_result = await current_loop.run_in_executor(
+                motion_executor, detect_motion, file_path, TEMP_DIR
+            )
+            self.logger.info(f"[{file_basename}] Motion detection complete. Status: {motion_result.get('status')}")
+
+            # 2. Run I/O-bound Gemini analysis in the multi-worker executor.
+            # This can run in parallel with the next video's motion detection.
+            self.logger.info(f"[{file_basename}] Queuing Gemini analysis...")
+            analysis_result = await current_loop.run_in_executor(
+                io_executor, run_gemini_analysis, motion_result, file_path
+            )
+            
+            video_response = analysis_result['response']
+            insignificant_frames = analysis_result['insignificant_frames']
+            clip_path = analysis_result.get('clip_path')
             self.logger.info(f"[{file_basename}] Analysis complete.")
         except Exception as e:
-            self.logger.error(f"[{file_basename}] Error running analyze_video in executor: {e}", exc_info=True)
+            self.logger.error(f"[{file_basename}] Error during video processing pipeline: {e}", exc_info=True)
             video_response = f"_{file_basename[:6]}:_ Failed to analyze video."
+            insignificant_frames = []
+            clip_path = None
 
         battery = psutil.sensors_battery()
         if not battery.power_plugged and battery.percent <= 50:
@@ -753,7 +819,7 @@ class FileHandler(FileSystemEventHandler):
         global no_motion_group_message_id, no_motion_grouped_videos
 
         # --- REFINED DECISION LOGIC ---
-        is_significant_motion = "Отакої!" in video_response
+        is_significant_motion = clip_path is not None
 
         # Get relative path for callback data
         safe_video_folder = os.path.join(VIDEO_FOLDER, '')
@@ -771,8 +837,7 @@ class FileHandler(FileSystemEventHandler):
             no_motion_group_message_id = None
             no_motion_grouped_videos.clear()
 
-            # --- This is your existing, unchanged logic for sending animations ---
-            media_path = os.path.join(TEMP_DIR, file_basename)
+            media_path = clip_path
             if not os.path.exists(media_path):
                 self.logger.warning(f"[{file_basename}] Highlight clip not found, using original video.")
                 media_path = file_path
@@ -781,7 +846,7 @@ class FileHandler(FileSystemEventHandler):
                 keyboard = [[InlineKeyboardButton("Глянути", callback_data=callback_file)]]
                 reply_markup = InlineKeyboardMarkup(keyboard)
                 with open(media_path, 'rb') as animation_file:
-                    await self.app.bot.send_animation(
+                    sent_message = await self.app.bot.send_animation(
                         chat_id=CHAT_ID, animation=animation_file, caption=video_response,
                         reply_markup=reply_markup, parse_mode='Markdown'
                     )
@@ -790,7 +855,7 @@ class FileHandler(FileSystemEventHandler):
                 self.logger.warning(f"[{file_basename}] BadRequest error: {bad_request_error}. Retrying with escaped Markdown.")
                 try:
                     with open(media_path, 'rb') as animation_file:
-                        await self.app.bot.send_animation(
+                        sent_message = await self.app.bot.send_animation(
                             chat_id=CHAT_ID,
                             animation=animation_file,
                             caption=escape_markdown(video_response, version=1),
@@ -803,32 +868,32 @@ class FileHandler(FileSystemEventHandler):
                     # Fallback to sending a plain message with a button
                     self.logger.info(f"[{file_basename}] Sending plain message with button to Telegram...")
                     try:
-                        await self.app.bot.send_message(
+                        sent_message = await self.app.bot.send_message(
                             chat_id=CHAT_ID,
                             text=video_response,
                             reply_markup=reply_markup,
                             parse_mode='Markdown'
                         )
                         self.logger.info(f"[{file_basename}] Plain message with button sent successfully.")
-                    except telegram.error.BadRequest as bad_request_error:
-                        self.logger.warning(f"[{file_basename}] BadRequest error: {bad_request_error}. Retrying with escaped Markdown.")
+                    except telegram.error.BadRequest as bad_request_error_fallback:
+                        self.logger.warning(f"[{file_basename}] BadRequest error on fallback: {bad_request_error_fallback}. Retrying with escaped Markdown.")
                         try:
-                            await self.app.bot.send_message(
+                            sent_message = await self.app.bot.send_message(
                                 chat_id=CHAT_ID,
                                 text=escape_markdown(video_response, version=1),
                                 reply_markup=reply_markup,
                                 parse_mode='Markdown'
                             )
                             self.logger.info(f"[{file_basename}] Message sent successfully after escaping Markdown.")
-                        except Exception as e:
-                            self.logger.error(f"[{file_basename}] Failed to send message after escaping Markdown: {e}", exc_info=True)
+                        except Exception as e_final_fallback:
+                            self.logger.error(f"[{file_basename}] Failed to send message after escaping Markdown: {e_final_fallback}", exc_info=True)
                     except Exception as e:
                         self.logger.error(f"[{file_basename}] Error sending message: {e}", exc_info=True)
             except Exception as e:
                 self.logger.error(f"[{file_basename}] Error sending animation: {e}", exc_info=True)
                 self.logger.info(f"[{file_basename}] Sending plain message with button to Telegram...")
                 try:
-                    await self.app.bot.send_message(
+                    sent_message = await self.app.bot.send_message(
                         chat_id=CHAT_ID,
                         text=video_response,
                         reply_markup=reply_markup,
@@ -838,7 +903,7 @@ class FileHandler(FileSystemEventHandler):
                 except telegram.error.BadRequest as bad_request_error:
                     self.logger.warning(f"[{file_basename}] BadRequest error: {bad_request_error}. Retrying with escaped Markdown.")
                     try:
-                        await self.app.bot.send_message(
+                        sent_message = await self.app.bot.send_message(
                             chat_id=CHAT_ID,
                             text=escape_markdown(video_response, version=1),
                             reply_markup=reply_markup,
@@ -854,14 +919,20 @@ class FileHandler(FileSystemEventHandler):
                 if media_path != file_path and os.path.exists(media_path):
                     max_wait = 120
                     waited = 0
+                    # Wait for the lock file to be released
                     while os.path.exists(media_path + ".lock") and waited < max_wait:
-                        self.logger.info(f"[{file_basename}] Waiting for lock file to be released before deleting: {media_path}.lock (waited {waited}s)")
+                        self.logger.info(f"[{file_basename}] Waiting for lock file on {media_path} to be released...")
                         await asyncio.sleep(10)
                         waited += 10
                     if os.path.exists(media_path + ".lock"):
                         self.logger.warning(f"[{file_basename}] Lock file still exists after {max_wait} seconds. Proceeding to delete media file anyway.")
-                    os.remove(media_path)
-                    self.logger.info(f"[{file_basename}] Temporary media file deleted: {media_path}")
+                    
+                    try:
+                        os.remove(media_path)
+                        self.logger.info(f"[{file_basename}] Temporary media file deleted: {media_path}")
+                    except Exception as e_del:
+                        self.logger.error(f"[{file_basename}] Failed to delete temporary media file {media_path}: {e_del}")
+
 
         else: # --- This block now handles ALL non-significant videos ---
             video_info = {'text': video_response, 'callback': callback_file, 'timestamp': timestamp_text}
@@ -888,20 +959,23 @@ class FileHandler(FileSystemEventHandler):
                     )
                     self.logger.info(f"[{file_basename}] Successfully edited message to extend group.")
                 except telegram.error.BadRequest as e:
-                    self.logger.warning(f"[{file_basename}] Could not edit message: {e}. Retrying with escaped Markdown.")
-                    try:
-                        await self.app.bot.edit_message_text(
-                            chat_id=CHAT_ID,
-                            message_id=no_motion_group_message_id,
-                            text=escape_markdown(full_text, version=1),
-                            reply_markup=reply_markup,
-                            parse_mode='Markdown'
-                        )
-                        self.logger.info(f"[{file_basename}] Message edited successfully after escaping Markdown.")
-                    except Exception as retry_error:
-                        self.logger.error(f"[{file_basename}] Failed to edit message after escaping Markdown: {retry_error}", exc_info=True)
-                        no_motion_group_message_id = None # Force a new message
-                        no_motion_grouped_videos.clear()
+                    if "message is not modified" in str(e).lower():
+                        self.logger.info(f"[{file_basename}] Message was not modified, skipping edit.")
+                    else:
+                        self.logger.warning(f"[{file_basename}] Could not edit message: {e}. Retrying with escaped Markdown.")
+                        try:
+                            await self.app.bot.edit_message_text(
+                                chat_id=CHAT_ID,
+                                message_id=no_motion_group_message_id,
+                                text=escape_markdown(full_text, version=1),
+                                reply_markup=reply_markup,
+                                parse_mode='Markdown'
+                            )
+                            self.logger.info(f"[{file_basename}] Message edited successfully after escaping Markdown.")
+                        except Exception as retry_error:
+                            self.logger.error(f"[{file_basename}] Failed to edit message after escaping Markdown: {retry_error}", exc_info=True)
+                            no_motion_group_message_id = None # Force a new message
+                            no_motion_grouped_videos.clear()
                     
             elif no_motion_group_message_id is None or len(no_motion_grouped_videos) >= 4:
                 self.logger.info(f"[{file_basename}] Starting a new insignificant message group.")
@@ -935,11 +1009,59 @@ class FileHandler(FileSystemEventHandler):
                         self.logger.error(f"[{file_basename}] Failed to send new group message after escaping Markdown: {retry_error}", exc_info=True)
                         no_motion_group_message_id = None
                         no_motion_grouped_videos.clear()
-                except Exception as e:
-                    self.logger.error(f"[{file_basename}] Failed to send new group message: {e}", exc_info=True)
+                except Exception as e_send:
+                    self.logger.error(f"[{file_basename}] Failed to send new group message: {e_send}", exc_info=True)
                     no_motion_group_message_id = None
                     no_motion_grouped_videos.clear()
         
+        if insignificant_frames:
+            self.logger.info(f"[{file_basename}] Found {len(insignificant_frames)} insignificant motion frames to send.")
+            media_group = []
+            # Read all files into memory first to avoid issues with file handles
+            frame_data = []
+            for frame_path in insignificant_frames:
+                try:
+                    with open(frame_path, 'rb') as photo_file:
+                        frame_data.append(photo_file.read())
+                except Exception as e:
+                    self.logger.error(f"[{file_basename}] Failed to read frame file {frame_path}: {e}")
+
+            for data in frame_data:
+                media_group.append(InputMediaPhoto(media=data))
+
+            if media_group:
+                try:
+                    reply_to_id = None
+                    if sent_message:
+                        reply_to_id = sent_message.message_id
+                    elif no_motion_group_message_id:
+                        reply_to_id = no_motion_group_message_id
+
+                    if reply_to_id:
+                        await self.app.bot.send_media_group(
+                            chat_id=CHAT_ID,
+                            media=media_group,
+                            reply_to_message_id=reply_to_id,
+                            caption=f"_{timestamp_text}_ \U0001F4F8",
+                            parse_mode='Markdown'
+                        )
+                        self.logger.info(f"[{file_basename}] Sent media group of {len(media_group)} insignificant frames as a reply.")
+                    else:
+                        self.logger.warning(f"[{file_basename}] No message ID to reply to. Sending media group without reply.")
+                        await self.app.bot.send_media_group(chat_id=CHAT_ID, media=media_group, caption=f"_{timestamp_text}_ \U0001F4F8", parse_mode='Markdown')
+
+                except Exception as e:
+                    self.logger.error(f"[{file_basename}] Failed to send media group: {e}", exc_info=True)
+            
+            # Clean up the temporary frame files
+            for frame_path in insignificant_frames:
+                if os.path.exists(frame_path):
+                    try:
+                        os.remove(frame_path)
+                        self.logger.info(f"[{file_basename}] Deleted temporary frame: {frame_path}")
+                    except Exception as e:
+                        self.logger.error(f"[{file_basename}] Failed to delete temporary frame {frame_path}: {e}")
+
         self.logger.info(f"[{file_basename}] Telegram interaction finished.")
 
 
@@ -1221,8 +1343,9 @@ async def main():
         if RESTART_REQUESTED:
             logger.info("Fast shutdown for restart: Not waiting for current analysis to finish.")
             # Shutdown immediately without waiting for the worker.
-            executor.shutdown(wait=False, cancel_futures=True)
-            logger.info("Executor issued fast shutdown command.")
+            motion_executor.shutdown(wait=False, cancel_futures=True)
+            io_executor.shutdown(wait=False, cancel_futures=True)
+            logger.info("Executors issued fast shutdown command.")
 
             logger.info("RESTART_REQUESTED is True. Executing self-restart...")
             # Flush standard streams before exec, as they might be inherited
@@ -1240,7 +1363,8 @@ async def main():
         else:
             logger.info("Graceful shutdown: Allowing current analysis to finish...")
             # For a normal shutdown (e.g., Ctrl+C), we wait for the current task to complete.
-            executor.shutdown(wait=True, cancel_futures=False)
+            motion_executor.shutdown(wait=True, cancel_futures=False)
+            io_executor.shutdown(wait=True, cancel_futures=False)
             logger.info("Main application finished cleanly (no restart requested).")
 
 
