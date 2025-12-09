@@ -167,16 +167,16 @@ CROP_PADDING = 30  # Pixels to add around the ROI bounding box for safety
 MAX_BOX_AREA_PERCENT = 0.80
 
 NO_ACTION_RESPONSES = [
-    "Нема шо дивитись.",
-    "Ніц цікавого.",
-    "Та йойки, взагалі ніц.",
-    "Все спокійно.",
-    "Німа нічо.",
-    "Журбинка якась хіба.",
-    "Сумулька лиш.",
-    "Чортівні нема.",
-    "Всьо чотко.",
-    "Геть нема екшину."
+    "Нема шо дивитись",
+    "Ніц цікавого",
+    "Йойки, геть ніц",
+    "Все спокійно",
+    "Німа нічо",
+    "Журбинка якась",
+    "Сумулька лиш",
+    "Чортівні нема",
+    "Всьо чотко",
+    "Геть нема екшину"
 ]
 
 # --- Check Environment Variables ---
@@ -538,7 +538,7 @@ def detect_motion(input_video_path, output_dir):
 def run_gemini_analysis(motion_result, video_path):
     """Extract insights from the video using Gemini. Runs in the I/O executor."""
     file_basename = os.path.basename(video_path)
-    timestamp = f"_{file_basename[:6]}:_ "
+    timestamp = f"_{file_basename[:6]}_ "
     video_to_process = None
     video_bytes_obj = None # Renamed to avoid confusion with the data itself
     use_files_api = False
@@ -547,7 +547,7 @@ def run_gemini_analysis(motion_result, video_path):
     if now.hour < 6:
       # Between 00:00 and 05:59, add hour to timestamp since grouped messages could include videos from different hours
       hour_timestamp = video_path.split(os.path.sep)[-2][-2:]
-      timestamp = f"_{hour_timestamp}H{file_basename[:6]}:_ "
+      timestamp = f"_{hour_timestamp}H{file_basename[:6]}_ "
 
     # Handle case where motion detection fails
     if motion_result is None or not isinstance(motion_result, dict):
@@ -564,11 +564,11 @@ def run_gemini_analysis(motion_result, video_path):
     if now.hour < 9 or now.hour > 18:
         logger.info(f"[{file_basename}] Skipping Gemini analysis due to off-peak hours.")
         if detected_motion_status == "error":
-            return {'response': timestamp + "\U0001F4A2 Шось неясно.", 'insignificant_frames': motion_result['insignificant_frames'], 'clip_path': None}
+            return {'response': timestamp + "\U0001F4A2 Шось неясно", 'insignificant_frames': motion_result['insignificant_frames'], 'clip_path': None}
         elif detected_motion_status == "no_significant_motion":
             return {'response': timestamp + "\U0001F518 Шось там тойво...", 'insignificant_frames': motion_result['insignificant_frames'], 'clip_path': None}
         elif detected_motion_status == "significant_motion":
-            return {'response': timestamp + "\u2611\uFE0F Шось там точно цейво.", 'insignificant_frames': motion_result['insignificant_frames'], 'clip_path': motion_result['clip_path']}
+            return {'response': timestamp + "\u2611\uFE0F Шось там точно цейво", 'insignificant_frames': motion_result['insignificant_frames'], 'clip_path': motion_result['clip_path']}
 
     video_to_process = None
     if detected_motion_status == "error":
@@ -579,7 +579,6 @@ def run_gemini_analysis(motion_result, video_path):
         video_to_process = video_path
     elif detected_motion_status == "significant_motion":
         logger.info(f"[{file_basename}] Running Gemini analysis for {motion_result['clip_path']}")
-        timestamp += "*Отакої!* "
         video_to_process = motion_result['clip_path']
     
     # If there's nothing to process (e.g., no_significant_motion but we decide not to analyze full video)
@@ -730,7 +729,12 @@ def run_gemini_analysis(motion_result, video_path):
         if detected_motion_status == "significant_motion" and (9 <= now.hour <= 13):
             additional_text += "\n" + USERNAME
 
-        return {'response': timestamp + "\u2705 " + analysis_result + additional_text, 'insignificant_frames': motion_result['insignificant_frames'], 'clip_path': motion_result.get('clip_path')}
+        if detected_motion_status == "significant_motion":
+            timestamp += "\u2705 *Отакої!* "
+        else:
+            timestamp += "\u2747\uFE0F "
+
+        return {'response': timestamp + analysis_result + additional_text, 'insignificant_frames': motion_result['insignificant_frames'], 'clip_path': motion_result.get('clip_path')}
 
     except Exception as e_analysis:
         logger.error(f"[{file_basename}] Video analysis failed: {e_analysis}", exc_info=False)
