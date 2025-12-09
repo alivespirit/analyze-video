@@ -921,17 +921,19 @@ class FileHandler(FileSystemEventHandler):
             finally:
                 # Delete the generated clip after sending or if an error occurs
                 if media_path != file_path and os.path.exists(media_path):
-                    await asyncio.sleep(10)  # Small delay to ensure file is not in use
+                    await asyncio.sleep(5)  # Small delay to ensure file is not in use
                     max_wait = 120
                     waited = 0
+                    was_locked = False
                     # Wait for the lock file to be released
                     while os.path.exists(media_path + ".lock") and waited < max_wait:
                         self.logger.info(f"[{file_basename}] Waiting for lock file on {media_path} to be released...")
+                        was_locked = True
                         await asyncio.sleep(10)
                         waited += 10
                     if os.path.exists(media_path + ".lock"):
                         self.logger.warning(f"[{file_basename}] Lock file still exists after {max_wait} seconds. Proceeding to delete media file anyway.")
-                    else:
+                    elif was_locked:
                         await asyncio.sleep(10)  # Small delay to ensure file is not in use
                     try:
                         os.remove(media_path)
