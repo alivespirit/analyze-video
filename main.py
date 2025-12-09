@@ -538,7 +538,7 @@ def detect_motion(input_video_path, output_dir):
 def run_gemini_analysis(motion_result, video_path):
     """Extract insights from the video using Gemini. Runs in the I/O executor."""
     file_basename = os.path.basename(video_path)
-    timestamp = f"_{file_basename[:6]}_ "
+    timestamp = f"_{file_basename[:6]}:_ "
     video_to_process = None
     video_bytes_obj = None # Renamed to avoid confusion with the data itself
     use_files_api = False
@@ -547,7 +547,7 @@ def run_gemini_analysis(motion_result, video_path):
     if now.hour < 6:
       # Between 00:00 and 05:59, add hour to timestamp since grouped messages could include videos from different hours
       hour_timestamp = video_path.split(os.path.sep)[-2][-2:]
-      timestamp = f"_{hour_timestamp}H{file_basename[:6]}_ "
+      timestamp = f"_{hour_timestamp}H{file_basename[:6]}:_ "
 
     # Handle case where motion detection fails
     if motion_result is None or not isinstance(motion_result, dict):
