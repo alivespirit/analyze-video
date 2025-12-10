@@ -1,20 +1,33 @@
 # Analyze Video Bot
 
-This project is a Python-based application that monitors a folder for new video files, analyzes them with OpenCV to detect motion in the specified area, then generates description with Gemini AI platform, and sends the results to a Telegram chat. It is designed for surveillance camera footage and provides insights about detected motion, including highlight clips and interactive Telegram features.
+This project is a Python-based application that monitors a folder for new video files, analyzes them with OpenCV for motion in specified area, generates descriptions with the Gemini AI platform, and sends results to a Telegram chat. It's optimized for surveillance footage, featuring intelligent motion detection, dynamic AI model selection, and robust performance management.
 
 ---
 
 ## Features
 
-- **Folder Monitoring**: Automatically detects new `.mp4` files in a specified folder using `watchdog`.
-- **Motion Detection & Highlight Clips**: Detects significant motion events within Region Of Interest (ROI) using OpenCV, generates highlight clips with bounding boxes, and filters out noise/short events.
-- **Gemini AI Analysis**: Uses Gemini AI to analyze video content and generate a description of detected motion. Handles API rate limits using a semaphore and exponential backoff.
-- **Frame & Clip Extraction**: Extracts and sends highlight clips (as GIF/MP4 animation) for significant motion, and can extract frames at specific timestamps.
-- **Telegram Integration**: Sends analysis results to a Telegram chat, including highlight clips and an inline button to request the full video.
-- **Grouped "No Motion" Messages**: Groups multiple "no motion" events into a single Telegram message with multiple buttons.
-- **Customizable Prompts**: Uses a prompt file (`prompt.txt`) for tailored analysis.
-- **Self-Monitoring & Auto-Restart**: Automatically restarts the process if `main.py` is changed (useful for remote servers).
-- **Robust Logging**: Daily rotating log files with custom naming, and logs to both file and console.
+- **Folder Monitoring**: Automatically processes new `.mp4` files in a specified folder using `watchdog`.
+- **Advanced Motion Detection**:
+  - **Cropped ROI Analysis**: Performs analysis on a smaller, padded region around the ROI for better performance.
+  - **Background Pre-training**: Stabilizes the background model by training it on a later segment of the video, improving detection accuracy from the start.
+  - **Smart Event Filtering**: Differentiates between significant, insignificant, and noisy motion events based on duration and size.
+  - **Highlight Clips**: Generates clips for significant motion with interpolated bounding boxes for smooth tracking. Long events are automatically sped up.
+  - **Insignificant Motion Snapshots**: Extracts and sends a single frame for brief, insignificant motion events instead of discarding them.
+- **Dynamic Gemini AI Analysis**:
+  - **Time-Based Model Selection**: Automatically switches between different Gemini models (e.g., Pro vs. Flash) based on the time of day for cost and performance optimization.
+  - **Fallback Models**: Includes logic to fall back to secondary and final models if the primary one fails.
+  - **Custom Prompts**: Uses a `prompt.txt` file for tailored analysis.
+- **Robust Telegram Integration**:
+  - **Grouped Notifications**: Combines multiple insignificant/no-motion events into a single, editable Telegram message to reduce clutter.
+  - **Interactive Callbacks**: Allows users to request the full original video via inline buttons.
+  - **Media Handling**: Sends highlight clips as animations and insignificant motion as photos.
+- **Performance & Stability**:
+  - **Dual-Executor Design**: Uses separate, single-worker thread pools for CPU-bound (motion detection) and I/O-bound (AI analysis) tasks to prevent system overload and ensure sequential processing.
+  - **Graceful Shutdown & Auto-Restart**: Automatically restarts the script if `main.py` is modified, with robust shutdown logic.
+  - **Battery Monitoring**: Appends battery status to notifications if the device is on battery power and running low (requires `psutil`).
+- **Enhanced Logging**:
+  - **Custom Log Rotation**: Creates daily rotating log files with a clear `YYYY-MM-DD` naming convention.
+  - **Network Error Filtering**: Suppresses noisy network-related stack traces to keep logs clean.
 
 ---
 
@@ -31,6 +44,7 @@ This project is a Python-based application that monitors a folder for new video 
   - `moviepy`
   - `opencv-python`
   - `numpy`
+  - `psutil`
 
 Install dependencies with:
 ```bash
@@ -43,7 +57,7 @@ pip install -r requirements.txt
 
 1. **Clone the repository:**
    ```bash
-   git clone https://github.com/yourusername/analyze-video.git
+   git clone https://github.com/alivespirit/analyze-video.git
    cd analyze-video
    ```
 
@@ -68,10 +82,15 @@ pip install -r requirements.txt
    LOG_PATH=logs/
    ```
 
-5. **Generate `roi.json` for your specific ROI and place it in the project directory.**  
-   You can ask Gemini for a sample script to select ROI based on your video, or use script in `tools/gate_motion_detector.py`.
+5. **Configure Regions of Interest (ROI):**
+   - Generate a `roi.json` file defining the coordinates of the area you want to monitor.
+   - You can use the script in `tools/gate_motion_detector.py` as a starting point to select an ROI for your video.
 
-6. **(Optional) Place your custom prompt in `prompt.txt` in the project directory.**
+6. **(Optional) Configure AI Models and Prompts:**
+   - Place your custom analysis instructions in `prompt.txt`.
+   - To enable dynamic model switching, create the following files in the project root:
+     - `model_pro`: Contains the name of your preferred high-accuracy model (e.g., `gemini-2.5-pro`). This model will be used during peak hours (9 AM - 1 PM), with a fallback to default `gemini-2.5-flash`.
+     - `model_final_fallback`: Contains the name of a last-resort model to be used if all others fail.
 
 ---
 
@@ -83,62 +102,40 @@ pip install -r requirements.txt
    ```
 
 2. **Place `.mp4` video files in the folder specified by the `VIDEO_FOLDER` environment variable.**  
-   The application will automatically detect and process them.
+   The application will automatically detect, process, and send a notification to your Telegram chat.
 
-3. **Check the Telegram chat for analysis results, highlight clips, and interactive buttons.**
+3. **Interact with the bot in Telegram.**  
+   - View highlight clips and insignificant motion snapshots.
+   - Click the "Глянути" (View) or timestamp buttons to receive the full original video.
 
 ---
 
 ## How It Works
 
 1. **File Monitoring:**  
-   - Uses `watchdog` to monitor the `VIDEO_FOLDER` for new `.mp4` files. When a new file is detected, it waits for the file to become stable before processing.
+   - `watchdog` recursively monitors the `VIDEO_FOLDER`. When a new `.mp4` file is detected, it waits for the file size to stabilize before queuing it for analysis.
 
-2. **Motion Detection & Highlight Generation:**  
-   - Detects significant motion events using OpenCV.
-   - Filters out short/noisy events.
-   - Generates highlight clips with bounding boxes for significant motion.
-   - If no significant motion is found, groups up to 4 "no motion" events in a single Telegram message.
+2. **Processing Pipeline:**  
+   - **Motion Detection (CPU-Bound Task):** The video is passed to the `motion_executor`. OpenCV analyzes the frames within the cropped ROI, using a pre-trained background model to identify and classify motion events. It generates a highlight clip, insignificant motion snapshots, or determines there was no significant motion.
+   - **AI Analysis (I/O-Bound Task):** The result (highlight clip or full video) is passed to the `io_executor`. The script selects a Gemini model based on the time of day and file-based configuration, then sends the video for analysis.
 
-3. **Gemini AI Analysis:**  
-   - Analyzes the video or highlight clip using Gemini AI.
-   - Uses a semaphore to ensure only one Gemini API call at a time (avoiding rate limit errors).
-   - Retries with exponential backoff if rate limits are hit.
-   - Uses a custom prompt from `prompt.txt`.
+3. **Telegram Notification:**  
+   - A `telegram_lock` ensures that messages are sent or edited one at a time, preventing race conditions.
+   - **Significant Motion:** A message is sent with the generated highlight clip (as an animation) and a button to request the full video.
+   - **Insignificant/No Motion:** Events are grouped into a single message. The message text is updated, and new buttons are added for each subsequent event (up to 4).
 
-4. **Telegram Notification:**  
-   - Sends highlight clips as animations for significant motion, with a button to request the full video.
-   - Groups "no motion" events into a single message with multiple buttons.
-   - Handles Markdown formatting and Telegram API errors robustly.
+4. **Callback Handling:**  
+   - When a button is clicked, the bot retrieves the corresponding full video file and sends it as a reply.
 
-5. **Callback Handling:**  
-   - When a button is clicked, sends the corresponding video as a reply to the message.
-
-6. **Self-Monitoring & Auto-Restart:**  
-   - Watches `main.py` for changes and restarts the process automatically if the script is updated.
-
-7. **Logging:**  
-   - Logs to both console and daily rotating log files (with custom naming).
-   - Logs errors, warnings, and info for all major actions.
-
----
-
-## Troubleshooting
-
-- **Quota/Rate Limit Errors:**  
-  The script uses a semaphore and exponential backoff to avoid Gemini API rate limits. If you still hit limits, reduce the number of concurrent videos or increase the backoff time.
-- **Telegram Formatting Errors:**  
-  The script retries with escaped Markdown if Telegram rejects a message due to formatting.
-- **File Not Found:**  
-  If a video file is deleted before it can be sent, the bot will notify you in the chat.
+5. **Self-Monitoring & Auto-Restart:**  
+   - A separate `watchdog` instance monitors `main.py`. If the file is modified, it triggers a graceful shutdown of all tasks and restarts the script using `os.execv`.
 
 ---
 
 ## Customization
 
-- **Prompt:**  
-  Edit `prompt.txt` to change the analysis prompt sent to Gemini AI.
-- **Motion Detection Parameters:**  
-  Adjust constants like `MIN_CONTOUR_AREA`, `MIN_EVENT_DURATION_SECONDS`, etc., in `main.py` to fine-tune motion detection.
-- **Logging:**  
-  Change `LOG_PATH` and log rotation settings in `main.py` as needed.
+- **Prompt:** Edit `prompt.txt` to change the analysis prompt sent to Gemini AI.
+- **AI Models:** Create or remove `model_pro` and `model_final_fallback` to control which Gemini models are used.
+- **Motion Detection Parameters:** Adjust constants in `main.py` (e.g., `MIN_CONTOUR_AREA`, `MAX_EVENT_GAP_SECONDS`) to fine-tune motion sensitivity.
+- **Logging:** Change `LOG_PATH` and log rotation settings in `main.py` as needed.
+- **ROI:** Modify `roi.json` to change the monitored area in the video frame.
