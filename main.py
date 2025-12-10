@@ -571,7 +571,7 @@ def run_gemini_analysis(motion_result, video_path):
         elif detected_motion_status == "no_significant_motion":
             return {'response': timestamp + "\U0001F518 Шось там тойво...", 'insignificant_frames': motion_result['insignificant_frames'], 'clip_path': None}
         elif detected_motion_status == "significant_motion":
-            return {'response': timestamp + "\u2611\uFE0F Шось там точно цейво", 'insignificant_frames': motion_result['insignificant_frames'], 'clip_path': motion_result['clip_path']}
+            return {'response': timestamp + "\u2611\uFE0F Шось точно цейво", 'insignificant_frames': motion_result['insignificant_frames'], 'clip_path': motion_result['clip_path']}
 
     video_to_process = None
     if detected_motion_status == "error":
@@ -616,9 +616,11 @@ def run_gemini_analysis(motion_result, video_path):
                 logger.error(f"[{file_basename}] Error reading video file: {e}")
                 return {'response': timestamp + "Відео не вдалося прочитати.", 'insignificant_frames': motion_result['insignificant_frames'], 'clip_path': motion_result.get('clip_path')}
 
-        if os.path.exists(os.path.join(SCRIPT_DIR, "enable_pro")) and (9 <= now.hour <= 13):
+        pro_model_file = os.path.join(SCRIPT_DIR, "model_pro")
+        if os.path.exists(pro_model_file) and (9 <= now.hour <= 13):
             # If it's between 9:00 and 13:59, use the Pro model
-            model_main = 'gemini-2.5-pro'
+            with open(pro_model_file, "r", encoding="utf-8") as pro_model:
+                model_main = pro_model.read().strip()
             model_fallback = 'gemini-2.5-flash'
             model_fallback_text = '_[2.5F]_ '
         else:
@@ -627,8 +629,13 @@ def run_gemini_analysis(motion_result, video_path):
             model_fallback = 'gemini-2.5-flash-lite'
             model_fallback_text = '_[2.5FL]_ '
 
-        model_fallback_2_0 = 'gemini-2.0-flash'
-        model_fallback_2_0_text = '_[2.0]_ '
+        # Make final fallback optional
+        final_fallback_model_file = os.path.join(SCRIPT_DIR, "model_final_fallback")
+        final_fallback_enabled = os.path.exists(final_fallback_model_file)
+        if final_fallback_enabled:
+            with open(final_fallback_model_file, "r", encoding="utf-8") as final_fallback_model:
+                model_final_fallback = final_fallback_model.read().strip()
+        model_final_fallback_text = '_[FF]_ '
 
         sampling_rate = 5  # sampling rate in FPS, valid only for inline_data
         max_retries = 3
@@ -705,22 +712,26 @@ def run_gemini_analysis(motion_result, video_path):
                         logger.warning(f"[{file_basename}] Retrying in {wait_time}s...")
                         time.sleep(wait_time)
                     else:
-                        try:
-                            logger.info(f"[{file_basename}] Attempting {model_fallback_2_0} as final fallback...")
-                            response = client.models.generate_content(
-                                          model=model_fallback_2_0,
-                                          contents=contents,
-                                          config=types.GenerateContentConfig(
-                                              automatic_function_calling=types.AutomaticFunctionCallingConfig(
-                                                  disable=True
+                        if final_fallback_enabled:
+                            try:
+                                logger.info(f"[{file_basename}] Attempting {model_final_fallback} as final fallback...")
+                                response = client.models.generate_content(
+                                              model=model_final_fallback,
+                                              contents=contents,
+                                              config=types.GenerateContentConfig(
+                                                  automatic_function_calling=types.AutomaticFunctionCallingConfig(
+                                                      disable=True
+                                                  )
                                               )
                                           )
-                                      )
-                            logger.info(f"[{file_basename}] {model_fallback_2_0} response received.")
-                            analysis_result = model_fallback_2_0_text + response.text
-                            break
-                        except Exception as e_fallback_2_0:
-                            logger.error(f"[{file_basename}] {model_fallback_2_0} failed as well: {e_fallback_2_0}")
+                                logger.info(f"[{file_basename}] {model_final_fallback} response received.")
+                                analysis_result = model_final_fallback_text + response.text
+                                break
+                            except Exception as e_fallback_final:
+                                logger.error(f"[{file_basename}] {model_final_fallback} failed as well: {e_fallback_final}")
+                                logger.error(f"[{file_basename}] Giving up after retries.")
+                                raise # Re-raise the exception to handle it in the outer scope
+                        else:
                             logger.error(f"[{file_basename}] Giving up after retries.")
                             raise # Re-raise the exception to handle it in the outer scope
 
@@ -742,7 +753,7 @@ def run_gemini_analysis(motion_result, video_path):
     except Exception as e_analysis:
         logger.error(f"[{file_basename}] Video analysis failed: {e_analysis}", exc_info=False)
         if '429' in str(e_analysis):
-            return {'response': timestamp + "\u26A0\uFE0F Ти ставив забагато питань...", 'insignificant_frames': motion_result['insignificant_frames'], 'clip_path': motion_result.get('clip_path')}
+            return {'response': timestamp + "\u26A0\uFE0F Ти забагато питав...", 'insignificant_frames': motion_result['insignificant_frames'], 'clip_path': motion_result.get('clip_path')}
         else:
             return {'response': timestamp + "\u274C Відео не вдалося проаналізувати: " + str(e_analysis)[:512] + '...', 'insignificant_frames': motion_result['insignificant_frames'], 'clip_path': motion_result.get('clip_path')}
     finally:
