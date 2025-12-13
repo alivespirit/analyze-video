@@ -938,7 +938,7 @@ class FileHandler(FileSystemEventHandler):
                 finally:
                     # Delete the generated clip after sending or if an error occurs
                     if media_path != file_path and os.path.exists(media_path):
-                        await asyncio.sleep(5)  # Small delay to ensure file is not in use
+                        await asyncio.sleep(10)  # Small delay to ensure file is not in use
                         max_wait = 120
                         waited = 0
                         was_locked = False
