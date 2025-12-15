@@ -12,7 +12,7 @@ import numpy as np
 import psutil
 
 from dotenv import load_dotenv
-from telegram import Bot, InlineKeyboardMarkup, InlineKeyboardButton, InputMediaPhoto
+from telegram import InlineKeyboardMarkup, InlineKeyboardButton, InputMediaPhoto
 import telegram.error
 from telegram.ext import Application, CallbackQueryHandler
 from telegram.helpers import escape_markdown
@@ -26,6 +26,17 @@ from logging.handlers import TimedRotatingFileHandler
 
 # Importing ImageSequenceClip from moviepy for MP4 extraction
 from moviepy import ImageSequenceClip
+
+# --- NEW: Import YOLO for object detection ---
+from ultralytics import YOLO
+
+# --- NEW: Import teslapy for Tesla integration ---
+try:
+    import teslapy
+except ImportError:
+    print("teslapy is not installed. Tesla integration will be disabled.")
+    teslapy = None
+# -------------------------------------------
 
 # --- State for Grouping "No Motion" Messages ---
 # These are safe to use as globals because the executor has max_workers=1,
@@ -46,6 +57,10 @@ class MainScriptChangeHandler(FileSystemEventHandler):
         self.triggered_restart = False # Ensure we only trigger once
 
     def on_modified(self, event):
+        """
+        Handles the file modification event from watchdog.
+        If the modified file is the main script, it triggers a graceful restart.
+        """
         if self.triggered_restart:
             return
 
@@ -64,6 +79,10 @@ LOG_PATH = os.getenv("LOG_PATH", default="")
 
 class CustomTimedRotatingFileHandler(TimedRotatingFileHandler):
     def doRollover(self):
+        """
+        Overrides the default rollover to rename log files with a custom format.
+        e.g., from `video_processor.log.2025-05-25` to `video_processor_2025-05-25.log`.
+        """
         super().doRollover()
         # Find the most recent rotated file
         dirname, basename = os.path.split(self.baseFilename)
@@ -80,6 +99,10 @@ class CustomTimedRotatingFileHandler(TimedRotatingFileHandler):
 # Custom filter to suppress stacktraces for network errors while keeping the error messages
 class NetworkErrorFilter(logging.Filter):
     def filter(self, record):
+        """
+        Suppresses stack traces for common, non-critical network errors.
+        This keeps the logs cleaner by showing the error message without the full traceback.
+        """
         # Only suppress stacktraces (exc_info) for network-related errors, keep the message
         if record.levelname == 'ERROR' and record.exc_info:
             message = record.getMessage()
@@ -124,12 +147,16 @@ logger.addHandler(console_handler)
 logging.getLogger("httpx").setLevel(logging.WARNING)
 logging.getLogger("telegram.ext").setLevel(logging.WARNING)
 logging.getLogger("moviepy").setLevel(logging.WARNING) # Keep moviepy logs quiet
+logging.getLogger("ultralytics").setLevel(logging.WARNING) # Suppress YOLO logs
 
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 USERNAME = os.getenv("TELEGRAM_NOTIFY_USERNAME")
 VIDEO_FOLDER = os.getenv("VIDEO_FOLDER")
+OBJECT_DETECTION_MODEL_PATH = os.getenv("OBJECT_DETECTION_MODEL_PATH", default="best_openvino_model")
+TESLA_EMAIL = os.getenv("TESLA_EMAIL")
+TESLA_REFRESH_TOKEN = os.getenv("TESLA_REFRESH_TOKEN")
 
 # --- Define and create a local temporary directory ---
 # Get the directory where the script is located
@@ -147,9 +174,8 @@ except OSError as e:
 
 # --- Motion detection configuration ---
 MIN_CONTOUR_AREA = 1800         # Minimum area of a contour to be considered significant
-MIN_SOLIDITY = 0.8              # A person is a very solid shape. 1.0 is a perfect rectangle.
 ROI_CONFIG_FILE = os.path.join(SCRIPT_DIR, "roi.json")
-PADDING_SECONDS = 1.0
+PADDING_SECONDS = 1.5
 # ### WARM-UP CONFIGURATION ###
 # Number of initial frames to ignore while the background model stabilizes.
 # A value of 25-50 is usually good for a 25fps video (1-2 seconds).
@@ -159,7 +185,7 @@ WARMUP_FRAMES = 15
 MAX_EVENT_GAP_SECONDS = 3.0
 # ### DURATION FILTER CONFIGURATION ###
 # Discard any motion event that lasts for less than this many seconds.
-MIN_EVENT_DURATION_SECONDS = 2.0
+MIN_EVENT_DURATION_SECONDS = 1.0
 # From insignificant motions that last longer than this, a frame will be extracted
 MIN_INSIGNIFICANT_EVENT_DURATION_SECONDS = 0.2
 # ### PERFORMANCE CONFIGURATION ###
@@ -168,6 +194,24 @@ CROP_PADDING = 30  # Pixels to add around the ROI bounding box for safety
 # If a bounding box is larger than this percentage of the total analysis area,
 # discard it as it's likely a noise-polluted first frame.
 MAX_BOX_AREA_PERCENT = 0.80
+
+# --- NEW: Tesla SoC file ---
+TESLA_SOC_FILE = os.path.join(SCRIPT_DIR, "tesla_soc.txt")
+TESLA_LAST_CHECK = 0  # Timestamp of the last SoC check
+if not teslapy or not TESLA_REFRESH_TOKEN or not TESLA_EMAIL:
+    logger.info(f"Tesla integration not configured (teslapy or TESLA_REFRESH_TOKEN or TESLA_EMAIL missing). Tesla SoC checks disabled.")
+    TESLA_SOC_CHECK_ENABLED = False
+else:
+    TESLA_SOC_CHECK_ENABLED = True
+
+# --- NEW: Object Detection Configuration ---
+CONF_THRESHOLD = 0.45
+LINE_Y = 860  # Counting Line Y-Coordinate
+COLOR_PERSON = (100, 200, 0)
+COLOR_CAR = (200, 120, 0)
+COLOR_DEFAULT = (255, 255, 255)
+COLOR_LINE = (0, 255, 255)
+# -----------------------------------------
 
 NO_ACTION_RESPONSES = [
     "Нема шо дивитись",
@@ -189,6 +233,9 @@ if not all([GEMINI_API_KEY, TELEGRAM_TOKEN, CHAT_ID, USERNAME, VIDEO_FOLDER]):
 if not os.path.isdir(VIDEO_FOLDER):
     logger.critical(f"ERROR: VIDEO_FOLDER '{VIDEO_FOLDER}' does not exist or is not a directory. Exiting.")
     exit(1)
+if not os.path.exists(OBJECT_DETECTION_MODEL_PATH):
+    logger.critical(f"ERROR: OBJECT_DETECTION_MODEL_PATH '{OBJECT_DETECTION_MODEL_PATH}' does not exist. Exiting.")
+    exit(1)
 # -----------------------------------
 
 try:
@@ -197,6 +244,15 @@ try:
 except Exception as e:
     logger.critical(f"Failed to configure Gemini: {e}", exc_info=True) # Use exc_info for traceback
     exit(1)
+
+# --- NEW: Load Object Detection Model ---
+try:
+    object_detection_model = YOLO(OBJECT_DETECTION_MODEL_PATH, task='detect')
+    logger.info(f"Object detection model loaded successfully from {OBJECT_DETECTION_MODEL_PATH}.")
+except Exception as e:
+    logger.critical(f"Failed to load object detection model: {e}", exc_info=True)
+    exit(1)
+# ------------------------------------
 
 
 # Initialize the Application
@@ -233,35 +289,170 @@ except Exception as e:
      exit(1)
 
 
+def load_tesla_soc(filepath):
+    """Loads the Tesla SoC from the cache file if it exists."""
+    if os.path.exists(filepath):
+        with open(filepath, 'r') as f:
+            soc = int(f.read().strip())
+            return soc
+    return None
+
+# --- NEW: Tesla SoC Check Function ---
+def check_tesla_soc(file_basename):
+    """
+    Checks the Tesla's state of charge (SoC), using a cached value if recent.
+    
+    1. Checks for `tesla_soc.txt`.
+    2. If it exists and was modified < 2 hours ago, returns the value from the file.
+    3. Otherwise, fetches the SoC from the Tesla API, saves it to the file, and returns it.
+
+    Args:
+        file_basename (str): The basename of the video file being processed, for logging.
+
+    Returns:
+        int: The battery level (0-100) or None if an error occurs.
+    """
+    global TESLA_LAST_CHECK
+    soc = None
+    if os.path.exists(TESLA_SOC_FILE):
+        last_modified_time = os.path.getmtime(TESLA_SOC_FILE)
+        soc = load_tesla_soc(TESLA_SOC_FILE)
+        current_time = time.time()
+        if (current_time - last_modified_time < 7200) or (current_time - TESLA_LAST_CHECK < 600):  # 2 hours or cooldown 10 minutes
+            if soc is not None:
+                logger.info(f"[{file_basename}] Using cached Tesla SoC: {soc}%")
+                return soc
+            else:
+                logger.warning(f"[{file_basename}] Could not read cached SoC file. Will fetch fresh data.")
+
+    logger.info(f"[{file_basename}] Fetching fresh Tesla SoC from API...")
+    try:
+        with teslapy.Tesla(email=TESLA_EMAIL) as tesla:
+            if not tesla.authorized:
+                tesla.refresh_token(refresh_token=TESLA_REFRESH_TOKEN)
+            vehicles = tesla.vehicle_list()
+            if not vehicles:
+                logger.error(f"[{file_basename}] No vehicles found in Tesla account.")
+                return None
+            
+            # Use the first vehicle in the list
+            vehicle = vehicles[0]
+            
+            # Get charge state data
+            charge_state = vehicle.get_vehicle_data().get('charge_state', {})
+            battery_level = charge_state.get('battery_level')
+
+            TESLA_LAST_CHECK = time.time()
+
+            if battery_level is not None:
+                logger.info(f"[{file_basename}] Successfully fetched Tesla SoC: {battery_level}%")
+                try:
+                    with open(TESLA_SOC_FILE, 'w') as f:
+                        f.write(str(battery_level))
+                except IOError as e:
+                    logger.error(f"[{file_basename}] Could not write to Tesla SoC cache file: {e}")
+                return battery_level
+            else:
+                if soc is not None:
+                    logger.warning(f"[{file_basename}] Could not retrieve 'battery_level' from Tesla API response. Using cached Tesla SoC: {soc}%")
+                    return soc
+                else:
+                    logger.warning(f"[{file_basename}] Could not retrieve 'battery_level' from Tesla API response and no cached SoC available.")
+                    return None
+
+    except Exception as e:
+        TESLA_LAST_CHECK = time.time()
+        if soc is not None:
+            if "408 Client Error" in str(e):
+                logger.info(f"[{file_basename}] Tesla is asleep. Using cached Tesla SoC: {soc}%", exc_info=False)
+            else:
+                logger.warning(f"[{file_basename}] Tesla call failed: {e}. Using cached Tesla SoC: {soc}%", exc_info=False)
+            return soc
+        else:
+            logger.warning(f"[{file_basename}] Tesla call failed and no cached SoC available: {e}", exc_info=False)
+            return None
+
 # --- ROI Loading Function ---
 def load_roi(file_path):
+    """
+    Loads the Region of Interest (ROI) polygon points from a JSON file.
+
+    Args:
+        file_path (str): The path to the roi.json file.
+
+    Returns:
+        np.ndarray: A NumPy array of points defining the ROI, or None if the file doesn't exist.
+    """
     if os.path.exists(file_path):
         with open(file_path, 'r') as f:
             points = json.load(f)
         return np.array(points, dtype=np.int32)
     return None
 
-def is_likely_person_or_object(contour):
+def draw_tracked_box(frame, box, local_id, label_name, conf, soc):
     """
-    Checks if a contour has the shape properties of a person or solid object.
-    Returns True if it passes the checks, False otherwise.
-    """
-    # 1. Check Area (basic filter)
-    area = cv2.contourArea(contour)
-    if area < MIN_CONTOUR_AREA:
-        return False
+    Draws a bounding box with a label for a tracked object on a video frame.
+    If the object is a car in a specific location, it may display Tesla SoC.
 
-    # 2. Check Solidity
-    hull = cv2.convexHull(contour)
-    hull_area = cv2.contourArea(hull)
-    solidity = float(area) / hull_area if hull_area > 0 else 0
-    if solidity < MIN_SOLIDITY:
-        return False
+    Args:
+        frame (np.ndarray): The video frame to draw on.
+        box (list): The bounding box coordinates [x1, y1, x2, y2].
+        local_id (int): The local ID assigned to the tracked object.
+        label_name (str): The class name of the object (e.g., 'person', 'car').
+        conf (float): The detection confidence score.
+        soc (int | None): The Tesla State of Charge, if available.
+    """
+    x1, y1, x2, y2 = int(box[0]), int(box[1]), int(box[2]), int(box[3])
     
-    # If all checks pass, it's likely a person/solid object
-    return True
+    if label_name == 'person': color = COLOR_PERSON
+    elif label_name == 'car': color = COLOR_CAR
+    else: color = COLOR_DEFAULT
+
+    label_text = f"{label_name} {local_id} {conf:.0%}"
+
+    if TESLA_SOC_CHECK_ENABLED:
+        # Tesla location check
+        tx, ty = 1150, 450
+        
+        # Check if this object is a CAR and if the point is INSIDE the box
+        if label_name == 'car':
+            if x1 <= tx <= x2 and y1 <= ty <= y2:
+                # Overwrite the label text with Tesla SoC info
+                if soc is not None:
+                    label_text = f"Tesla {conf:.0%} / SoC {soc}%"
+                else:
+                    label_text = f"Tesla {conf:.0%}"
+    # ------------------------------------------------
+
+    cv2.rectangle(frame, (x1, y1), (x2, y2), color, 2)
+    
+    (w, h), _ = cv2.getTextSize(label_text, cv2.FONT_HERSHEY_DUPLEX, 1, 1)
+    
+    cv2.rectangle(frame, (x1, y1 - 30), (x1 + w, y1), color, -1)
+    cv2.putText(frame, label_text, (x1, y1 - 5), 
+                cv2.FONT_HERSHEY_DUPLEX, 1, (255, 255, 255), 1, cv2.LINE_AA)
 
 def detect_motion(input_video_path, output_dir):
+    """
+    Analyzes a video file for motion, identifies significant events, and uses an object tracker.
+
+    This function performs several steps:
+    1.  Crops the video to a region around the ROI for efficiency.
+    2.  Uses a background subtractor to find frames with motion.
+    3.  Groups motion frames into events and filters out short/insignificant ones.
+    4.  For significant events, it runs a YOLO object tracker to identify and count objects.
+    5.  It checks for 'gate crossing' events where people cross a predefined line.
+    6.  Generates a highlight clip (.mp4) of significant events with tracked objects boxed.
+    7.  Extracts and saves single frames (.jpg) for insignificant motion events.
+
+    Args:
+        input_video_path (str): The path to the input .mp4 video file.
+        output_dir (str): The directory to save generated clips and frames.
+
+    Returns:
+        dict: A dictionary containing the analysis status ('significant_motion', 'no_motion', etc.),
+              path to the generated clip, paths to insignificant frames, and detected object counts.
+    """
     file_basename = os.path.basename(input_video_path)
     roi_poly_points = load_roi(ROI_CONFIG_FILE)
     if roi_poly_points is None:
@@ -303,27 +494,59 @@ def detect_motion(input_video_path, output_dir):
     roi_mask = np.zeros((crop_h, crop_w), dtype=np.uint8)
     cv2.fillPoly(roi_mask, [analysis_roi_points], 255)
 
-    # --- NEW: Background Model Pre-training from 30s mark ---
-    logger.info(f"[{file_basename}] Pre-training background model from the 30s mark...")
-    model_building_start_frame = int(30 * fps)
-    model_building_frames = 150 # Train on ~6 seconds of video
+    # --- MODIFIED: Smarter background model pre-training ---
+    logger.info(f"[{file_basename}] Starting smart background model pre-training...")
     pre_trained = False
+    # Define candidate start times in seconds for pre-training (e.g., 20s, 30s, 40s, 50s)
+    training_candidate_times = [20, 30, 40, 50]
+    frames_to_sample = 25  # ~1 second to check for motion
+    frames_to_train = 150  # ~6 seconds to train the model
 
-    if total_frames > model_building_start_frame + model_building_frames:
-        cap.set(cv2.CAP_PROP_POS_FRAMES, model_building_start_frame)
-        for _ in range(model_building_frames):
+    for start_sec in training_candidate_times:
+        start_frame = int(start_sec * fps)
+        if total_frames < start_frame + frames_to_sample:
+            continue # Not enough frames for this candidate
+
+        cap.set(cv2.CAP_PROP_POS_FRAMES, start_frame)
+        
+        # Pre-check for motion in this segment
+        motion_detected_in_segment = False
+        temp_backSub = cv2.createBackgroundSubtractorKNN(history=50, dist2Threshold=800, detectShadows=True)
+        
+        for i in range(frames_to_sample):
             ret, frame = cap.read()
             if not ret: break
             
             cropped_frame = frame[crop_y1:crop_y2, crop_x1:crop_x2]
             roi_frame = cv2.bitwise_and(cropped_frame, cropped_frame, mask=roi_mask)
-            backSub.apply(roi_frame)
+            fg_mask = temp_backSub.apply(roi_frame)
+            
+            # A simple check for significant contours
+            if i > 5 and cv2.countNonZero(fg_mask) > (roi_mask.size * 0.1): # if >10% of ROI has motion
+                motion_detected_in_segment = True
+                logger.info(f"[{file_basename}] Motion detected in pre-training candidate segment at {start_sec}s. Trying next segment.")
+                break
         
+        if not motion_detected_in_segment:
+            logger.info(f"[{file_basename}] Found a static segment at {start_sec}s. Pre-training background model...")
+            # The first 25 frames are already read, continue reading for the full training duration
+            cap.set(cv2.CAP_PROP_POS_FRAMES, start_frame)
+            for _ in range(frames_to_train):
+                ret, frame = cap.read()
+                if not ret: break
+                
+                cropped_frame = frame[crop_y1:crop_y2, crop_x1:crop_x2]
+                roi_frame = cv2.bitwise_and(cropped_frame, cropped_frame, mask=roi_mask)
+                backSub.apply(roi_frame)
+            
+            pre_trained = True
+            break # Exit after successful training
+
+    if pre_trained:
         logger.info(f"[{file_basename}] Background model pre-trained. Resetting to start for analysis.")
         cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
-        pre_trained = True
     else:
-        logger.warning(f"[{file_basename}] Video is too short to pre-train background model from 20s mark. Using standard warm-up.")
+        logger.warning(f"[{file_basename}] Could not find a static segment to pre-train model. Using standard warm-up.")
     
     # If we pre-trained, we only need a few frames for camera stabilization. Otherwise, use original WARMUP.
     EFFECTIVE_WARMUP = 5 if pre_trained else WARMUP_FRAMES
@@ -341,9 +564,13 @@ def detect_motion(input_video_path, output_dir):
         fg_mask = cv2.morphologyEx(fg_mask, cv2.MORPH_OPEN, kernel, iterations=2)
         fg_mask = cv2.dilate(fg_mask, kernel, iterations=3)
         contours, _ = cv2.findContours(fg_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-        person_like_contours = [cnt for cnt in contours if is_likely_person_or_object(cnt)]
-        if person_like_contours:
-            motion_events.append((frame_index, person_like_contours))
+        
+        # --- MODIFIED: Check for large contours but don't filter by solidity here ---
+        # The object detector is more reliable than shape analysis.
+        # We still check for a minimum area to avoid noise triggering the expensive detector.
+        large_enough_contours = [cnt for cnt in contours if cv2.contourArea(cnt) > MIN_CONTOUR_AREA]
+        if large_enough_contours:
+            motion_events.append((frame_index, large_enough_contours))
 
     if not motion_events:
         logger.info(f"[{file_basename}] No significant motion found.")
@@ -352,41 +579,10 @@ def detect_motion(input_video_path, output_dir):
         logger.info(f"[{file_basename}] Motion detection took {elapsed_time:.2f} seconds.")
         return {'status': 'no_motion', 'clip_path': None, 'insignificant_frames': []}
 
-    union_rects = {}
-    discarded_boxes = []
-    motion_event_dict = dict(motion_events)
-    total_analysis_area = crop_w * crop_h
-    max_allowed_area = total_analysis_area * MAX_BOX_AREA_PERCENT
-
-    for frame_idx, contours in motion_event_dict.items():
-        min_x, min_y, max_x, max_y = float('inf'), float('inf'), float('-inf'), float('-inf')
-        for cnt in contours:
-            (x, y, w, h) = cv2.boundingRect(cnt)
-            min_x, min_y = min(min_x, x), min(min_y, y)
-            max_x, max_y = max(max_x, x + w), max(max_y, y + h)
-        
-        if min_x != float('inf'):
-            box_w = max_x - min_x
-            box_h = max_y - min_y
-            box_area = box_w * box_h
-            
-            if box_area < max_allowed_area:
-                union_rects[frame_idx] = (min_x, min_y, box_w, box_h)
-            else:
-                discarded_boxes.append(frame_idx)
-                logger.debug(f"[{file_basename}] Frame {frame_idx}: Discarding giant bounding box (area {box_area} > max {max_allowed_area}).")
-
-    if discarded_boxes:
-        logger.info(f"[{file_basename}] Discarded {len(discarded_boxes)} bounding boxes as noise due to excessive size. Discarded frames: {discarded_boxes}")
-
-    if not union_rects:
-        logger.info(f"[{file_basename}] All detected motion boxes were too large and discarded as noise.")
-        elapsed_time = time.time() - start_time
-        logger.info(f"[{file_basename}] Motion detection took {elapsed_time:.2f} seconds.")
-        cap.release()
-        return {'status': 'no_motion', 'clip_path': None, 'insignificant_frames': []}
-
-    motion_frame_indices = sorted(union_rects.keys())
+    # --- MODIFIED: Simplified motion event processing ---
+    # We no longer create union_rects or interpolate. We just need the frame ranges.
+    motion_frame_indices = [item[0] for item in motion_events]
+    
     max_gap_in_frames = MAX_EVENT_GAP_SECONDS * fps
     sub_clips = []
     if motion_frame_indices:
@@ -399,6 +595,9 @@ def detect_motion(input_video_path, output_dir):
             clip_end = motion_frame_indices[i]
         sub_clips.append((clip_start, clip_end))
 
+    # --- Check Tesla SoC once per video processing ---
+    soc = check_tesla_soc(file_basename) if TESLA_SOC_CHECK_ENABLED else None
+
     logger.info(f"[{file_basename}] Found {len(sub_clips)} raw motion event(s). Filtering by duration...")
     significant_sub_clips = []
     insignificant_motion_frames = []
@@ -406,29 +605,29 @@ def detect_motion(input_video_path, output_dir):
         duration_frames = end_frame - start_frame
         duration_seconds = duration_frames / fps
         if duration_seconds >= MIN_EVENT_DURATION_SECONDS:
-            logger.info(f"[{file_basename}]   - Event lasting {duration_seconds:.2f}s is SIGNIFICANT. Keeping.")
+            logger.info(f"[{file_basename}]   - Event lasting {duration_seconds:.2f}s is SIGNIFICANT. Will process with tracker.")
             significant_sub_clips.append((start_frame, end_frame))
         elif duration_seconds >= MIN_INSIGNIFICANT_EVENT_DURATION_SECONDS:
             logger.info(f"[{file_basename}]   - Event lasting {duration_seconds:.2f}s is insignificant. Extracting frame.")
             mid_frame_index = start_frame + (end_frame - start_frame) // 2
             
-            # Find the bounding box from the known motion frame closest to the middle frame
-            known_frames_in_event = [f for f in union_rects.keys() if start_frame <= f <= end_frame]
-            if not known_frames_in_event:
-                continue
-            
-            closest_known_frame = min(known_frames_in_event, key=lambda x: abs(x - mid_frame_index))
-            (x, y, w, h) = union_rects[closest_known_frame]
-
             cap.set(cv2.CAP_PROP_POS_FRAMES, mid_frame_index)
             ret, frame = cap.read()
             if ret:
-                # Draw the bounding box on the full frame
-                orig_x1 = int(x + crop_x1)
-                orig_y1 = int(y + crop_y1)
-                orig_x2 = int(x + w + crop_x1)
-                orig_y2 = int(y + h + crop_y1)
-                cv2.rectangle(frame, (orig_x1, orig_y1), (orig_x2, orig_y2), (0, 255, 255), 2) # Cyan for insignificant
+                # Run detection on the single frame
+                results = object_detection_model.track(frame, imgsz=640, conf=CONF_THRESHOLD, persist=False, verbose=False)
+                if results[0].boxes.id is not None:
+                    boxes = results[0].boxes.xyxy.cpu().tolist()
+                    clss = results[0].boxes.cls.int().cpu().tolist()
+                    confs = results[0].boxes.conf.float().cpu().tolist()
+                    class_names = object_detection_model.names
+                    
+                    # Use a simple counter for local ID on single frames
+                    local_id_counter = 1
+                    for box, cls, conf in zip(boxes, clss, confs):
+                        label_name = class_names[cls]
+                        draw_tracked_box(frame, box, local_id_counter, label_name, conf, soc)
+                        local_id_counter += 1
 
                 frame_filename = f"{os.path.splitext(file_basename)[0]}_insignificant_{mid_frame_index}.jpg"
                 frame_path = os.path.join(output_dir, frame_filename)
@@ -446,81 +645,100 @@ def detect_motion(input_video_path, output_dir):
         logger.info(f"[{file_basename}] Motion detection took {elapsed_time:.2f} seconds.")
         return {'status': 'no_significant_motion', 'clip_path': None, 'insignificant_frames': insignificant_motion_frames}
 
-    logger.info(f"[{file_basename}] Interpolating bounding boxes for smooth tracking...")
+    # --- NEW: Object Tracking on Significant Clips ---
+    logger.info(f"[{file_basename}] Starting object tracking for {len(significant_sub_clips)} significant event(s).")
+    
+    # Reset tracker state for the new video
+    if hasattr(object_detection_model, 'predictor') and object_detection_model.predictor is not None:
+        if hasattr(object_detection_model.predictor, 'trackers') and object_detection_model.predictor.trackers:
+            object_detection_model.predictor.trackers[0].reset()
+            logger.info(f"[{file_basename}] Object tracker state reset.")
 
-    interpolated_rects = {}
-    for start_frame, end_frame in significant_sub_clips:
-        known_frames_in_clip = sorted([f for f in union_rects.keys() if start_frame <= f <= end_frame])
-        if not known_frames_in_clip: continue
+    all_clip_frames_rgb = []
+    class_names = object_detection_model.names
+    id_mapping = {}
+    class_counters = {}
+    unique_objects_detected = {'person': set(), 'car': set()}
+    previous_positions = {}
+    persons_up = 0
+    persons_down = 0
 
-        for i in range(len(known_frames_in_clip) - 1):
-            start_anchor_frame, end_anchor_frame = known_frames_in_clip[i], known_frames_in_clip[i+1]
-            start_box, end_box = union_rects[start_anchor_frame], union_rects[end_anchor_frame]
-            total_gap_frames = float(end_anchor_frame - start_anchor_frame)
-            
-            interpolated_rects[start_anchor_frame] = start_box
-
-            if total_gap_frames > 0:
-                for j in range(1, int(total_gap_frames)):
-                    current_frame_in_gap = start_anchor_frame + j
-                    progress = j / total_gap_frames
-                    interp_x = int(start_box[0] + (end_box[0] - start_box[0]) * progress)
-                    interp_y = int(start_box[1] + (end_box[1] - start_box[1]) * progress)
-                    interp_w = int(start_box[2] + (end_box[2] - start_box[2]) * progress)
-                    interp_h = int(start_box[3] + (end_box[3] - start_box[3]) * progress)
-                    interpolated_rects[current_frame_in_gap] = (interp_x, interp_y, interp_w, interp_h)
-        
-        if known_frames_in_clip:
-            interpolated_rects[known_frames_in_clip[-1]] = union_rects[known_frames_in_clip[-1]]
-
-    logger.info(f"[{file_basename}] Assembling highlight reel with {len(interpolated_rects)} smooth boxes.")
-    all_clip_frames = []
-
+    # Get all frame indices that need processing by the tracker
+    frames_to_process_indices = set()
     for clip_index, (start_frame, end_frame) in enumerate(significant_sub_clips):
-        padded_start = max(0, start_frame - int(PADDING_SECONDS * fps))
-        padded_end = min(total_frames, end_frame + int(PADDING_SECONDS * fps))
+        duration_seconds = (end_frame - start_frame) / fps
+        is_long_motion = duration_seconds > 4.0
+        padding_seconds_adjusted = 0.5 if is_long_motion else PADDING_SECONDS
+        padded_start = max(0, start_frame - int(padding_seconds_adjusted * fps))
+        padded_end = min(total_frames, end_frame + int(padding_seconds_adjusted * fps))
 
         # NEW: If first motion is at the very start, include from frame 0
         if clip_index == 0 and start_frame <= (EFFECTIVE_WARMUP + fps * 1.0):
             logger.info(f"[{file_basename}] Motion starts at the beginning. Including video from frame 0.")
             padded_start = 0
 
-        cap.set(cv2.CAP_PROP_POS_FRAMES, padded_start)
-        
         # NEW: Check if this clip should be sped up
-        duration_seconds = (end_frame - start_frame) / fps
-        is_long_motion = duration_seconds > 5.0
         if is_long_motion:
             logger.info(f"[{file_basename}] Long motion event ({duration_seconds:.2f}s) detected. Speeding up clip segment.")
 
         for i in range(padded_start, padded_end):
-            ret, frame = cap.read()
-            if not ret: break
-
-            # NEW: If long motion, skip every other frame
             if is_long_motion and (i - padded_start) % 2 != 0:
-                continue
+                continue  # Skip every other frame for long motions
+            frames_to_process_indices.add(i)
+    
+    sorted_frame_indices = sorted(list(frames_to_process_indices))
 
-            if i in interpolated_rects:
-                (x, y, w, h) = interpolated_rects[i]
-                
-                orig_x1 = int(x + crop_x1)
-                orig_y1 = int(y + crop_y1)
-                orig_x2 = int(x + w + crop_x1)
-                orig_y2 = int(y + h + crop_y1)
-                
-                cv2.rectangle(frame, (orig_x1, orig_y1), (orig_x2, orig_y2), (0, 255, 0), 2)
-            
-            rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-            all_clip_frames.append(rgb_frame)
+    for frame_idx in sorted_frame_indices:
+        cap.set(cv2.CAP_PROP_POS_FRAMES, frame_idx)
+        ret, frame = cap.read()
+        if not ret: continue
+
+        # Run Tracking
+        results = object_detection_model.track(frame, imgsz=640, conf=CONF_THRESHOLD, persist=True, verbose=False, tracker="bytetrack.yaml")
+
+        if results[0].boxes.id is not None:
+            boxes = results[0].boxes.xyxy.cpu().tolist()
+            global_ids = results[0].boxes.id.int().cpu().tolist()
+            clss = results[0].boxes.cls.int().cpu().tolist()
+            confs = results[0].boxes.conf.float().cpu().tolist()
+
+            for box, global_id, cls, conf in zip(boxes, global_ids, clss, confs):
+                label_name = class_names[cls]
+
+                if label_name not in class_counters: class_counters[label_name] = 1
+                if global_id not in id_mapping:
+                    id_mapping[global_id] = class_counters[label_name]
+                    class_counters[label_name] += 1
+                local_id = id_mapping[global_id]
+
+                if label_name in unique_objects_detected:
+                    unique_objects_detected[label_name].add(global_id)
+
+                y_center = int((box[1] + box[3]) / 2)
+                if global_id in previous_positions:
+                    prev_y = previous_positions[global_id]
+                    if label_name == 'person':
+                        if prev_y < LINE_Y <= y_center: persons_down += 1
+                        elif prev_y > LINE_Y >= y_center: persons_up += 1
+                previous_positions[global_id] = y_center
+
+                draw_tracked_box(frame, box, local_id, label_name, conf, soc)
+        
+        # Draw crossing line on frame
+        cv2.line(frame, (0, LINE_Y), (orig_w, LINE_Y), COLOR_LINE, 1)
+        cv2.putText(frame, f"Hvirtka Y={LINE_Y}", (10, LINE_Y - 10), 
+                    cv2.FONT_HERSHEY_DUPLEX, 1, COLOR_LINE, 1, cv2.LINE_AA)
+
+        rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+        all_clip_frames_rgb.append(rgb_frame)
 
     cap.release()
 
-    if not all_clip_frames:
-        logger.error(f"[{file_basename}] No frames collected for the clip.")
+    if not all_clip_frames_rgb:
+        logger.error(f"[{file_basename}] No frames collected for the clip after tracking.")
         return {'status': 'error', 'clip_path': None, 'insignificant_frames': insignificant_motion_frames}
         
-    final_clip = ImageSequenceClip(all_clip_frames, fps=fps)
+    final_clip = ImageSequenceClip(all_clip_frames_rgb, fps=fps)
     output_filename = os.path.join(output_dir, file_basename)
     logger.info(f"[{file_basename}] Writing final highlight clip to {output_filename}...")
     final_clip.write_videofile(
@@ -531,19 +749,62 @@ def detect_motion(input_video_path, output_dir):
     file_duration = final_clip.duration
     file_size = os.path.getsize(output_filename) / (1024 * 1024)
     logger.info(f"[{file_basename}] Successfully created clip: {output_filename}. Duration: {file_duration:.2f}s, Size: {file_size:.2f} MB")
-    elapsed_time = time.time() - start_time
-    logger.info(f"[{file_basename}] Motion detection took {elapsed_time:.2f} seconds.")
     
-    return {'status': 'significant_motion', 'clip_path': output_filename, 'insignificant_frames': insignificant_motion_frames}
+    # --- Final result preparation ---
+    num_persons = len(unique_objects_detected['person'])
+    num_cars = len(unique_objects_detected['car'])
+    crossing_detected = persons_up > 0 or persons_down > 0
+    
+    final_status = 'significant_motion'
+    crossing_direction = None
+    if crossing_detected:
+        final_status = 'gate_crossing'
+        if persons_up > 0 and persons_down > 0:
+            crossing_direction = 'both'
+        elif persons_up > 0:
+            crossing_direction = 'up'
+        else:
+            crossing_direction = 'down'
+        logger.info(f"[{file_basename}] Gate crossing detected! Direction: {crossing_direction}. Persons Up: {persons_up}, Down: {persons_down}.")
+
+    elapsed_time = time.time() - start_time
+    logger.info(f"[{file_basename}] Full processing took {elapsed_time:.2f} seconds. Detected: {num_persons} persons, {num_cars} cars.")
+    
+    return {
+        'status': final_status,
+        'clip_path': output_filename,
+        'insignificant_frames': insignificant_motion_frames,
+        'persons_detected': num_persons,
+        'cars_detected': num_cars,
+        'crossing_direction': crossing_direction,
+        'persons_up': persons_up,
+        'persons_down': persons_down
+    }
 
 
-# --- NEW: Gemini analysis function, split from the old analyze_video ---
-def run_gemini_analysis(motion_result, video_path):
-    """Extract insights from the video using Gemini. Runs in the I/O executor."""
+def analyze_video(motion_result, video_path):
+    """
+    Generates a descriptive text for a video using Google's Gemini AI and formats the final response.
+
+    This function runs in the I/O executor. Its behavior depends on the motion detection result:
+    -   **No Motion**: Returns a random "nothing to see" message.
+    -   **Gate Crossing**: Returns a formatted message indicating the crossing event, skipping Gemini.
+    -   **Off-Peak Hours**: Skips Gemini and returns a summary based on object counts to save API calls.
+    -   **Significant Motion (Peak Hours)**: Sends the highlight clip to Gemini for analysis.
+    -   **Error/Insignificant Motion (Peak Hours)**: Sends the full video to Gemini for analysis.
+
+    It handles model selection (Pro vs. Flash), API retries, and error handling.
+
+    Args:
+        motion_result (dict): The result dictionary from the `detect_motion` function.
+        video_path (str): The path to the original video file.
+
+    Returns:
+        dict: A dictionary containing the formatted text response, paths to any insignificant frames,
+              and the path to the highlight clip if one was generated.
+    """
     file_basename = os.path.basename(video_path)
     timestamp = f"_{file_basename[:6]}:_ "
-    video_to_process = None
-    video_bytes_obj = None # Renamed to avoid confusion with the data itself
     use_files_api = False
     now = datetime.datetime.now()
 
@@ -559,21 +820,61 @@ def run_gemini_analysis(motion_result, video_path):
 
     detected_motion_status = motion_result['status']
     
+    # --- Skip Gemini analysis for no motion events ---
     if detected_motion_status == "no_motion":
-        logger.info(f"[{file_basename}] Skipping Gemini analysis.")
+        logger.info(f"[{file_basename}] Skipping Gemini analysis (no motion).")
         return {'response': timestamp + "\u2714\uFE0F " + random.choice(NO_ACTION_RESPONSES), 'insignificant_frames': [], 'clip_path': None}
 
-    # Skip Gemini analysis during off-peak hours to keep under rate limits
+    # --- Skip Gemini analysis for gate crossing events ---
+    if detected_motion_status == "gate_crossing":
+        logger.info(f"[{file_basename}] Skipping Gemini analysis (gate crossing).")
+        direction = motion_result.get('crossing_direction')
+        persons_up = motion_result.get('persons_up', 0)
+        persons_down = motion_result.get('persons_down', 0)
+        
+        direction_text = ""
+        if direction == 'up':
+            direction_text = "\U0001F6A7" +"\U0001F6B6\u200D\u27A1\uFE0F" * persons_up 
+        elif direction == 'down':
+            direction_text = "\U0001F6B6\u200D\u27A1\uFE0F" * persons_down + " \U0001F6A7"
+        elif direction == 'both':
+            direction_text = "\U0001F6B6\u200D\u27A1\uFE0F" * persons_down + " \U0001F6A7" + "\U0001F6B6\u200D\u27A1\uFE0F" * persons_up
+
+        analysis_result = direction_text
+        if 9 <= now.hour <= 13:
+            analysis_result += f"\n{USERNAME}"
+        return {
+            'response': timestamp + analysis_result,
+            'insignificant_frames': motion_result.get('insignificant_frames', []),
+            'clip_path': motion_result.get('clip_path')
+        }
+    # -----------------------------------------
+
+    # --- Skip Gemini analysis during off-peak hours to keep under rate limits ---
     if now.hour < 9 or now.hour > 18:
-        logger.info(f"[{file_basename}] Skipping Gemini analysis due to off-peak hours.")
+        logger.info(f"[{file_basename}] Skipping Gemini analysis (off-peak hours).")
         if detected_motion_status == "error":
             return {'response': timestamp + "\U0001F4A2 Шось неясно", 'insignificant_frames': motion_result['insignificant_frames'], 'clip_path': None}
         elif detected_motion_status == "no_significant_motion":
             return {'response': timestamp + "\U0001F518 Шось там тойво...", 'insignificant_frames': motion_result['insignificant_frames'], 'clip_path': None}
         elif detected_motion_status == "significant_motion":
-            return {'response': timestamp + "\u2611\uFE0F Шось точно цейво", 'insignificant_frames': motion_result['insignificant_frames'], 'clip_path': motion_result['clip_path']}
+            # --- MODIFIED: Append detected object counts to the off-peak message ---
+            persons = motion_result.get('persons_detected', 0)
+            cars = motion_result.get('cars_detected', 0)
+            details = []
+            if persons > 0:
+                details.append(f"{persons} \U0001F9CD")
+            if cars > 0:
+                details.append(f"{cars} \U0001F699")
+            
+            if details:
+                return {'response': timestamp + f"\u2611\uFE0F Шось там {', '.join(details)}", 'insignificant_frames': motion_result['insignificant_frames'], 'clip_path': motion_result.get('clip_path')}
+            else:
+                return {'response': timestamp + "\u2611\uFE0F Виявлено капець рух.", 'insignificant_frames': motion_result['insignificant_frames'], 'clip_path': motion_result.get('clip_path')}
 
+    # Analyze with Gemini
     video_to_process = None
+    video_bytes_obj = None
     if detected_motion_status == "error":
         logger.warning(f"[{file_basename}] Error during motion detection. Analyzing full video.")
         video_to_process = video_path
@@ -581,7 +882,7 @@ def run_gemini_analysis(motion_result, video_path):
         logger.info(f"[{file_basename}] Analyzing full video as there was no significant motion.")
         video_to_process = video_path
     elif detected_motion_status == "significant_motion":
-        logger.info(f"[{file_basename}] Running Gemini analysis for {motion_result['clip_path']}")
+        logger.info(f"[{file_basename}] Running Gemini analysis for detected motion at {motion_result['clip_path']}")
         video_to_process = motion_result['clip_path']
     
     # If there's nothing to process (e.g., no_significant_motion but we decide not to analyze full video)
@@ -599,7 +900,7 @@ def run_gemini_analysis(motion_result, video_path):
             while video_bytes_obj.state == "PROCESSING":
                 if waited >= max_wait_seconds:
                     logger.error(f"[{file_basename}] Video processing timed out after {max_wait_seconds} seconds.")
-                    return {'response': timestamp + "Відео не вдалося обробити (timeout).", 'insignificant_frames': motion_result['insignificant_frames'], 'clip_path': motion_result.get('clip_path')}
+                    return {'response': timestamp + "\u274C Відео не вдалося обробити (timeout).", 'insignificant_frames': motion_result['insignificant_frames'], 'clip_path': motion_result.get('clip_path')}
                 logger.info(f"[{file_basename}] Waiting for video to be processed ({waited}/{max_wait_seconds}s).")
                 time.sleep(wait_interval)
                 waited += wait_interval
@@ -607,14 +908,14 @@ def run_gemini_analysis(motion_result, video_path):
 
             if video_bytes_obj.state == "FAILED":
                 logger.error(f"[{file_basename}] Video processing failed: {video_bytes_obj.error_message}")
-                return {'response': timestamp + "Відео не вдалося обробити.", 'insignificant_frames': motion_result['insignificant_frames'], 'clip_path': motion_result.get('clip_path')}
+                return {'response': timestamp + "\u274C Відео не вдалося обробити.", 'insignificant_frames': motion_result['insignificant_frames'], 'clip_path': motion_result.get('clip_path')}
         else:
             try:
                 with open(video_to_process, 'rb') as f:
                     video_data = f.read()
             except Exception as e:
                 logger.error(f"[{file_basename}] Error reading video file: {e}")
-                return {'response': timestamp + "Відео не вдалося прочитати.", 'insignificant_frames': motion_result['insignificant_frames'], 'clip_path': motion_result.get('clip_path')}
+                return {'response': timestamp + "\u274C Відео не вдалося прочитати.", 'insignificant_frames': motion_result['insignificant_frames'], 'clip_path': motion_result.get('clip_path')}
 
         pro_model_file = os.path.join(SCRIPT_DIR, "model_pro")
         if os.path.exists(pro_model_file) and (9 <= now.hour <= 13):
@@ -739,9 +1040,22 @@ def run_gemini_analysis(motion_result, video_path):
 
         logger.info(f"[{file_basename}] Response: {analysis_result}")
 
-        # Notify username if needed
-        if detected_motion_status == "significant_motion" and (9 <= now.hour <= 13):
-            additional_text += "\n" + USERNAME
+        # --- MODIFIED: Append detected object counts to the Gemini result ---
+        persons = motion_result.get('persons_detected', 0)
+        cars = motion_result.get('cars_detected', 0)
+        details = []
+        if persons > 0:
+            details.append(f"{persons} \U0001F9CD")
+        if cars > 0:
+            details.append(f"{cars} \U0001F699")
+        
+        if details:
+            analysis_result += f" ({', '.join(details)})"
+        # ----------------------------------------------------------------
+
+        # Notify username if needed (disabled to have notifications only on gate crossings)
+        #if detected_motion_status == "significant_motion" and (9 <= now.hour <= 13):
+        #    additional_text += f"\n{USERNAME}"
 
         if detected_motion_status == "significant_motion":
             timestamp += "\u2705 *Отакої!* "
@@ -775,6 +1089,13 @@ class FileHandler(FileSystemEventHandler):
         self.telegram_lock = telegram_lock
 
     def on_created(self, event):
+        """
+        Handles the 'file created' event from watchdog for .mp4 files.
+        Schedules the `handle_event` coroutine to run on the event loop.
+
+        Args:
+            event (watchdog.events.FileSystemEvent): The event object from watchdog.
+        """
         if event.is_directory: return
         if not event.src_path.endswith('.mp4'): return
 
@@ -785,6 +1106,21 @@ class FileHandler(FileSystemEventHandler):
             self.logger.warning(f"Event loop not running when trying to schedule handler for {event.src_path}")
 
     async def handle_event(self, event):
+        """
+        The core asynchronous handler for processing a new video file.
+
+        This function orchestrates the entire pipeline for a single video:
+        1.  Waits for the file to be fully written to disk.
+        2.  Schedules `detect_motion` (CPU-bound) in its dedicated executor.
+        3.  Schedules `analyze_video` (I/O-bound) in its dedicated executor.
+        4.  Acquires a lock to safely interact with Telegram.
+        5.  Sends the results (animation, text, photos) to the Telegram chat.
+        6.  Groups messages for insignificant motion to avoid spam.
+        7.  Cleans up temporary files (highlight clips, frames).
+
+        Args:
+            event (watchdog.events.FileSystemEvent): The event object from watchdog.
+        """
         # This function is replaced with the new logic
         file_path = event.src_path
         file_basename = os.path.basename(file_path)
@@ -814,9 +1150,9 @@ class FileHandler(FileSystemEventHandler):
 
             # 2. Run I/O-bound Gemini analysis in the multi-worker executor.
             # This can run in parallel with the next video's motion detection.
-            self.logger.info(f"[{file_basename}] Queuing Gemini analysis...")
+            self.logger.info(f"[{file_basename}] Queuing motion analysis...")
             analysis_result = await current_loop.run_in_executor(
-                io_executor, run_gemini_analysis, motion_result, file_path
+                io_executor, analyze_video, motion_result, file_path
             )
             
             video_response = analysis_result['response']
@@ -825,7 +1161,7 @@ class FileHandler(FileSystemEventHandler):
             self.logger.info(f"[{file_basename}] Analysis complete.")
         except Exception as e:
             self.logger.error(f"[{file_basename}] Error during video processing pipeline: {e}", exc_info=True)
-            video_response = f"_{file_basename[:6]}:_ Failed to analyze video."
+            video_response = f"_{file_basename[:6]}:_ \u274C Відео не вдалося проаналізувати: " + str(e)[:512] + "..."
             insignificant_frames = []
             clip_path = None
 
@@ -853,11 +1189,6 @@ class FileHandler(FileSystemEventHandler):
             timestamp_text = file_basename[:6]
 
             if is_significant_motion:
-                # A significant motion video ALWAYS resets the group
-                self.logger.info(f"[{file_basename}] Significant motion detected. Resetting grouped message.")
-                no_motion_group_message_id = None
-                no_motion_grouped_videos.clear()
-
                 media_path = clip_path
                 if not os.path.exists(media_path):
                     self.logger.warning(f"[{file_basename}] Highlight clip not found, using original video.")
@@ -908,8 +1239,6 @@ class FileHandler(FileSystemEventHandler):
                                 self.logger.info(f"[{file_basename}] Message sent successfully after escaping Markdown.")
                             except Exception as e_final_fallback:
                                 self.logger.error(f"[{file_basename}] Failed to send message after escaping Markdown: {e_final_fallback}", exc_info=True)
-                        except Exception as e:
-                            self.logger.error(f"[{file_basename}] Error sending message: {e}", exc_info=True)
                 except Exception as e:
                     self.logger.error(f"[{file_basename}] Error sending animation: {e}", exc_info=True)
                     self.logger.info(f"[{file_basename}] Sending plain message with button to Telegram...")
@@ -933,8 +1262,8 @@ class FileHandler(FileSystemEventHandler):
                             self.logger.info(f"[{file_basename}] Message sent successfully after escaping Markdown.")
                         except Exception as retry_error:
                             self.logger.error(f"[{file_basename}] Failed to send message after escaping Markdown: {retry_error}", exc_info=True)
-                    except Exception as e:
-                        self.logger.error(f"[{file_basename}] Error sending message: {e}", exc_info=True)
+                    except Exception as e_send:
+                        self.logger.error(f"[{file_basename}] Failed to send plain message: {e_send}", exc_info=True)
                 finally:
                     # Delete the generated clip after sending or if an error occurs
                     if media_path != file_path and os.path.exists(media_path):
@@ -1091,7 +1420,19 @@ class FileHandler(FileSystemEventHandler):
 
 
     async def wait_for_file_stable(self, file_path, file_basename, wait_seconds=2, checks=2):
-        """Waits until the file size hasn't changed for a certain period."""
+        """
+        Waits until the file size hasn't changed for a certain period.
+        This ensures the file is fully written before processing begins.
+
+        Args:
+            file_path (str): The path to the file to check.
+            file_basename (str): The basename of the file for logging.
+            wait_seconds (int): The interval between size checks.
+            checks (int): The number of consecutive stable checks required.
+
+        Raises:
+            FileNotFoundError: If the file disappears during the check.
+        """
         self.logger.debug(f"[{file_basename}] Checking file stability for: {file_path}")
         last_size = -1
         stable_checks = 0
@@ -1120,6 +1461,14 @@ class FileHandler(FileSystemEventHandler):
 
 # --- Callback Handler ---
 async def button_callback(update, context):
+    """
+    Handles button presses from inline keyboards in Telegram messages.
+    When a user clicks a "Глянути" button, this function sends the corresponding full video.
+
+    Args:
+        update (telegram.Update): The update object from the Telegram API.
+        context (telegram.ext.ContextTypes.DEFAULT_TYPE): The context object.
+    """
     query = update.callback_query
     await query.answer() # Acknowledge callback quickly
 
@@ -1150,7 +1499,7 @@ async def button_callback(update, context):
          logger.error(f"[{file_basename}] Video file disappeared before sending from callback: {file_path}")
          try: await query.edit_message_text(text=f"{query.message.text}\n\n_{file_basename[:6]} Помилка: Відео файл зник._", parse_mode='Markdown')
          except Exception as edit_e:
-             logger.warning(f"[{file_basename}] Failed to edit message after video disappeared: {edit_e}", exc_info=True)
+            logger.warning(f"[{file_basename}] Failed to edit message after video disappeared: {edit_e}", exc_info=True)
     except Exception as e:
         logger.error(f"[{file_basename}] Failed to send video from callback: {e}", exc_info=True)
         pass
@@ -1163,7 +1512,13 @@ application.add_handler(CallbackQueryHandler(button_callback))
 # --- Main Execution and Shutdown Logic ---
 
 async def run_telegram_bot(stop_event):
-    """Run the Telegram bot until stop_event is set."""
+    """
+    Initializes and runs the Telegram bot's polling mechanism.
+    It listens for the `stop_event` to perform a graceful shutdown.
+
+    Args:
+        stop_event (asyncio.Event): An event that signals when the task should stop.
+    """
     logger.info("Starting Telegram bot polling...")
     try:
         await application.initialize()
@@ -1190,7 +1545,13 @@ async def run_telegram_bot(stop_event):
 
 
 async def run_file_watcher(stop_event):
-    """Run the file-watching logic until stop_event is set."""
+    """
+    Initializes and runs the watchdog observer to monitor the video folder.
+    It listens for the `stop_event` to perform a graceful shutdown.
+
+    Args:
+        stop_event (asyncio.Event): An event that signals when the task should stop.
+    """
     logger.info("Starting file watcher...")
     observer = None
     try:
@@ -1230,7 +1591,14 @@ async def run_file_watcher(stop_event):
         logger.info("File watcher stopped.")
 
 async def run_main_script_watcher(stop_event, script_to_watch):
-    """Run a watcher for the main script file."""
+    """
+    Initializes and runs a watchdog observer to monitor the main script file for changes.
+    If a change is detected, it sets the `stop_event` to trigger a graceful restart.
+
+    Args:
+        stop_event (asyncio.Event): The global stop event to set upon detecting a change.
+        script_to_watch (str): The absolute path to the main script file.
+    """
     logger.info(f"Starting self-watcher for script: {script_to_watch}")
     observer = None
     try:
@@ -1269,7 +1637,17 @@ async def run_main_script_watcher(stop_event, script_to_watch):
         logger.info("Main script watcher stopped.")
 
 async def main():
-    """Run bot and watcher, handle graceful shutdown and potential restart."""
+    """
+    The main entry point of the application.
+
+    It sets up and runs the primary asynchronous tasks:
+    - The Telegram bot poller.
+    - The video folder file watcher.
+    - The self-watcher for auto-restarts.
+
+    It also handles graceful shutdown on Ctrl+C or task failure, and orchestrates
+    the self-restart mechanism if the main script is modified.
+    """
     stop_event = asyncio.Event()
     global RESTART_REQUESTED # Allow main to modify it if needed, though not strictly necessary here
     RESTART_REQUESTED = False # Ensure it's reset if main is somehow called again in same process (unlikely)
@@ -1332,7 +1710,7 @@ async def main():
               stop_event.set()
         # If RESTART_REQUESTED is true, stop_event is already set by MainScriptChangeHandler.
         # If Ctrl+C happened, stop_event is set by the KeyboardInterrupt handler.
-        # If a task errored/cancelled, the loop above likely set stop_event.
+        # If a task errored/cancelled, the loop above set stop_event.
 
     except KeyboardInterrupt:
         logger.info("\nCtrl+C detected. Initiating graceful shutdown...")

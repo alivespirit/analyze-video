@@ -6,3 +6,6 @@ moviepy
 opencv-python
 numpy
 psutil
+ultralytics
+openvino
+teslapy

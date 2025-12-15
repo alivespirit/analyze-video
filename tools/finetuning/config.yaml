@@ -1,0 +1,6 @@
+path: "C:\\NAS\\finetuned\\datasets" # IMPORTANT: Use absolute path
+train: images/train
+val: images/val
+
+nc: 2  # number of classes
+names: ['person', 'car'] # your class names in order
