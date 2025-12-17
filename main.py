@@ -207,6 +207,7 @@ else:
 # --- NEW: Object Detection Configuration ---
 CONF_THRESHOLD = 0.45
 LINE_Y = 860  # Counting Line Y-Coordinate
+LINE_CROSSING_COOLDOWN_SECONDS = 3.0 # Seconds before the same object can trigger another crossing
 COLOR_PERSON = (100, 200, 0)
 COLOR_CAR = (200, 120, 0)
 COLOR_DEFAULT = (255, 255, 255)
@@ -594,10 +595,6 @@ def detect_motion(input_video_path, output_dir):
                 clip_start = motion_frame_indices[i]
             clip_end = motion_frame_indices[i]
         sub_clips.append((clip_start, clip_end))
-
-    # --- NEW: Cooldown configuration for line crossing ---
-    LINE_CROSSING_COOLDOWN_SECONDS = 2.0
-    # ----------------------------------------------------
 
     # --- Check Tesla SoC once per video processing ---
     soc = check_tesla_soc(file_basename) if TESLA_SOC_CHECK_ENABLED else None
