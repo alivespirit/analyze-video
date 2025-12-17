@@ -497,8 +497,8 @@ def detect_motion(input_video_path, output_dir):
     # --- MODIFIED: Smarter background model pre-training ---
     logger.info(f"[{file_basename}] Starting smart background model pre-training...")
     pre_trained = False
-    # Define candidate start times in seconds for pre-training (e.g., 20s, 30s, 40s, 50s)
-    training_candidate_times = [20, 30, 40, 50]
+    # Define candidate start times in seconds for pre-training (e.g., 30s, 40s, 50s, 20s)
+    training_candidate_times = [30, 40, 50, 20]
     frames_to_sample = 25  # ~1 second to check for motion
     frames_to_train = 150  # ~6 seconds to train the model
 
@@ -595,6 +595,10 @@ def detect_motion(input_video_path, output_dir):
             clip_end = motion_frame_indices[i]
         sub_clips.append((clip_start, clip_end))
 
+    # --- NEW: Cooldown configuration for line crossing ---
+    LINE_CROSSING_COOLDOWN_SECONDS = 2.0
+    # ----------------------------------------------------
+
     # --- Check Tesla SoC once per video processing ---
     soc = check_tesla_soc(file_basename) if TESLA_SOC_CHECK_ENABLED else None
 
@@ -662,6 +666,7 @@ def detect_motion(input_video_path, output_dir):
     previous_positions = {}
     persons_up = 0
     persons_down = 0
+    line_crossing_cooldown = {} # {global_id: cooldown_end_frame}
 
     # Get all frame indices that need processing by the tracker
     frames_to_process_indices = set()
@@ -718,8 +723,20 @@ def detect_motion(input_video_path, output_dir):
                 if global_id in previous_positions:
                     prev_y = previous_positions[global_id]
                     if label_name == 'person':
-                        if prev_y < LINE_Y <= y_center: persons_down += 1
-                        elif prev_y > LINE_Y >= y_center: persons_up += 1
+                        # Check if cooldown has passed for this person
+                        if frame_idx >= line_crossing_cooldown.get(global_id, 0):
+                            crossed = False
+                            if prev_y < LINE_Y <= y_center:
+                                persons_down += 1
+                                crossed = True
+                            elif prev_y > LINE_Y >= y_center:
+                                persons_up += 1
+                                crossed = True
+                            
+                            if crossed:
+                                # Set cooldown end frame
+                                cooldown_frames = int(LINE_CROSSING_COOLDOWN_SECONDS * fps)
+                                line_crossing_cooldown[global_id] = frame_idx + cooldown_frames
                 previous_positions[global_id] = y_center
 
                 draw_tracked_box(frame, box, local_id, label_name, conf, soc)
@@ -804,14 +821,9 @@ def analyze_video(motion_result, video_path):
               and the path to the highlight clip if one was generated.
     """
     file_basename = os.path.basename(video_path)
-    timestamp = f"_{file_basename[:6]}:_ "
+    timestamp = f"_{video_path.split(os.path.sep)[-2][-2:]}H{file_basename[:3]}:_ "
     use_files_api = False
     now = datetime.datetime.now()
-
-    if now.hour < 6:
-      # Between 00:00 and 05:59, add hour to timestamp since grouped messages could include videos from different hours
-      hour_timestamp = video_path.split(os.path.sep)[-2][-2:]
-      timestamp = f"_{hour_timestamp}H{file_basename[:6]}:_ "
 
     # Handle case where motion detection fails
     if motion_result is None or not isinstance(motion_result, dict):
@@ -1124,6 +1136,7 @@ class FileHandler(FileSystemEventHandler):
         # This function is replaced with the new logic
         file_path = event.src_path
         file_basename = os.path.basename(file_path)
+        timestamp_text = f"{file_path.split(os.path.sep)[-2][-2:]}H{file_basename[:3]}"
         self.logger.info(f"[{file_basename}] New file detected: {file_path}")
 
         try:
@@ -1161,7 +1174,7 @@ class FileHandler(FileSystemEventHandler):
             self.logger.info(f"[{file_basename}] Analysis complete.")
         except Exception as e:
             self.logger.error(f"[{file_basename}] Error during video processing pipeline: {e}", exc_info=True)
-            video_response = f"_{file_basename[:6]}:_ \u274C Відео не вдалося проаналізувати: " + str(e)[:512] + "..."
+            video_response = f"_{timestamp_text}:_ \u274C Відео не вдалося проаналізувати: " + str(e)[:512] + "..."
             insignificant_frames = []
             clip_path = None
 
@@ -1184,9 +1197,6 @@ class FileHandler(FileSystemEventHandler):
                 callback_file = file_path[len(safe_video_folder):].replace(os.path.sep, '/')
             else:
                 callback_file = file_basename
-            
-            # Extract just the timestamp part for button text
-            timestamp_text = file_basename[:6]
 
             if is_significant_motion:
                 media_path = clip_path
@@ -1281,11 +1291,16 @@ class FileHandler(FileSystemEventHandler):
                             self.logger.warning(f"[{file_basename}] Lock file still exists after {max_wait} seconds. Proceeding to delete media file anyway.")
                         elif was_locked:
                             await asyncio.sleep(10)  # Small delay to ensure file is not in use
-                        try:
+                        # Try deleting the file up to 3 times with 10s delay between attempts
+                        for attempt in range(3):
+                          try:
                             os.remove(media_path)
                             self.logger.info(f"[{file_basename}] Temporary media file deleted: {media_path}")
-                        except Exception as e_del:
-                            self.logger.error(f"[{file_basename}] Failed to delete temporary media file {media_path}: {e_del}")
+                            break
+                          except Exception as e_del:
+                            self.logger.warning(f"[{file_basename}] Failed to delete temporary media file {media_path} (attempt {attempt+1}/3): {e_del}")
+                            if attempt < 2:
+                              await asyncio.sleep(10)
 
 
             else: # --- This block now handles ALL non-significant videos ---
