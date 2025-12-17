@@ -1,0 +1,542 @@
+import os
+import time
+import json
+import logging
+
+import cv2
+import numpy as np
+
+from moviepy import ImageSequenceClip
+
+try:
+    from ultralytics import YOLO
+except Exception as e:
+    raise
+
+# --- Import teslapy for Tesla integration ---
+try:
+    import teslapy
+except ImportError:
+    teslapy = None
+
+logger = logging.getLogger()
+
+# Paths
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+
+# --- Motion detection configuration ---
+MIN_CONTOUR_AREA = 1800
+ROI_CONFIG_FILE = os.path.join(SCRIPT_DIR, "roi.json")
+PADDING_SECONDS = 1.5
+WARMUP_FRAMES = 15
+MAX_EVENT_GAP_SECONDS = 3.0
+MIN_EVENT_DURATION_SECONDS = 1.0
+MIN_INSIGNIFICANT_EVENT_DURATION_SECONDS = 0.2
+CROP_PADDING = 30
+MAX_BOX_AREA_PERCENT = 0.80
+
+# --- Tesla config ---
+TESLA_EMAIL = os.getenv("TESLA_EMAIL")
+TESLA_REFRESH_TOKEN = os.getenv("TESLA_REFRESH_TOKEN")
+TESLA_SOC_FILE = os.path.join(SCRIPT_DIR, "tesla_soc.txt")
+TESLA_LAST_CHECK = 0
+TESLA_SOC_CHECK_ENABLED = bool(teslapy and TESLA_REFRESH_TOKEN and TESLA_EMAIL)
+
+# --- Object Detection Configuration ---
+OBJECT_DETECTION_MODEL_PATH = os.getenv("OBJECT_DETECTION_MODEL_PATH", default="best_openvino_model")
+CONF_THRESHOLD = 0.45
+LINE_Y = 860
+LINE_CROSSING_COOLDOWN_SECONDS = 3.0
+COLOR_PERSON = (100, 200, 0)
+COLOR_CAR = (200, 120, 0)
+COLOR_DEFAULT = (255, 255, 255)
+COLOR_LINE = (0, 255, 255)
+
+# --- Load Object Detection Model ---
+try:
+    object_detection_model = YOLO(OBJECT_DETECTION_MODEL_PATH, task='detect')
+    logger.info(f"Object detection model loaded successfully from {OBJECT_DETECTION_MODEL_PATH}.")
+except Exception as e:
+    logger.critical(f"Failed to load object detection model: {e}", exc_info=True)
+    raise
+
+
+def load_tesla_soc(filepath):
+    """Loads the Tesla SoC from the cache file if it exists."""
+    if os.path.exists(filepath):
+        with open(filepath, 'r') as f:
+            soc = int(f.read().strip())
+            return soc
+    return None
+
+
+def check_tesla_soc(file_basename):
+    """
+    Checks the Tesla's state of charge (SoC), using a cached value if recent.
+    
+    1. Checks for `tesla_soc.txt`.
+    2. If it exists and was modified < 2 hours ago, returns the value from the file.
+    3. Otherwise, fetches the SoC from the Tesla API, saves it to the file, and returns it.
+
+    Args:
+        file_basename (str): The basename of the video file being processed, for logging.
+
+    Returns:
+        int: The battery level (0-100) or None if an error occurs.
+    """
+    global TESLA_LAST_CHECK
+    soc = None
+    if os.path.exists(TESLA_SOC_FILE):
+        last_modified_time = os.path.getmtime(TESLA_SOC_FILE)
+        soc = load_tesla_soc(TESLA_SOC_FILE)
+        current_time = time.time()
+        if (current_time - last_modified_time < 7200) or (current_time - TESLA_LAST_CHECK < 600):
+            if soc is not None:
+                logger.info(f"[{file_basename}] Using cached Tesla SoC: {soc}%")
+                return soc
+            else:
+                logger.warning(f"[{file_basename}] Could not read cached SoC file. Will fetch fresh data.")
+
+    logger.info(f"[{file_basename}] Fetching fresh Tesla SoC from API...")
+    try:
+        with teslapy.Tesla(email=TESLA_EMAIL) as tesla:
+            if not tesla.authorized:
+                tesla.refresh_token(refresh_token=TESLA_REFRESH_TOKEN)
+            vehicles = tesla.vehicle_list()
+            if not vehicles:
+                logger.error(f"[{file_basename}] No vehicles found in Tesla account.")
+                return None
+            vehicle = vehicles[0]
+            charge_state = vehicle.get_vehicle_data().get('charge_state', {})
+            battery_level = charge_state.get('battery_level')
+
+            TESLA_LAST_CHECK = time.time()
+
+            if battery_level is not None:
+                logger.info(f"[{file_basename}] Successfully fetched Tesla SoC: {battery_level}%")
+                try:
+                    with open(TESLA_SOC_FILE, 'w') as f:
+                        f.write(str(battery_level))
+                except IOError as e:
+                    logger.error(f"[{file_basename}] Could not write to Tesla SoC cache file: {e}")
+                return battery_level
+            else:
+                if soc is not None:
+                    logger.warning(f"[{file_basename}] Could not retrieve 'battery_level' from Tesla API response. Using cached Tesla SoC: {soc}%")
+                    return soc
+                else:
+                    logger.warning(f"[{file_basename}] Could not retrieve 'battery_level' from Tesla API response and no cached SoC available.")
+                    return None
+
+    except Exception as e:
+        TESLA_LAST_CHECK = time.time()
+        if soc is not None:
+            if "408 Client Error" in str(e):
+                logger.info(f"[{file_basename}] Tesla is asleep. Using cached Tesla SoC: {soc}%", exc_info=False)
+            else:
+                logger.warning(f"[{file_basename}] Tesla call failed: {e}. Using cached Tesla SoC: {soc}%", exc_info=False)
+            return soc
+        else:
+            logger.warning(f"[{file_basename}] Tesla call failed and no cached SoC available: {e}", exc_info=False)
+            return None
+
+
+def load_roi(file_path):
+    """
+    Loads the Region of Interest (ROI) polygon points from a JSON file.
+
+    Args:
+        file_path (str): The path to the roi.json file.
+
+    Returns:
+        np.ndarray: A NumPy array of points defining the ROI, or None if the file doesn't exist.
+    """
+    if os.path.exists(file_path):
+        with open(file_path, 'r') as f:
+            points = json.load(f)
+        return np.array(points, dtype=np.int32)
+    return None
+
+
+def draw_tracked_box(frame, box, local_id, label_name, conf, soc):
+    """
+    Draws a bounding box with a label for a tracked object on a video frame.
+    If the object is a car in a specific location, it may display Tesla SoC.
+
+    Args:
+        frame (np.ndarray): The video frame to draw on.
+        box (list): The bounding box coordinates [x1, y1, x2, y2].
+        local_id (int): The local ID assigned to the tracked object.
+        label_name (str): The class name of the object (e.g., 'person', 'car').
+        conf (float): The detection confidence score.
+        soc (int | None): The Tesla State of Charge, if available.
+    """
+    x1, y1, x2, y2 = int(box[0]), int(box[1]), int(box[2]), int(box[3])
+
+    if label_name == 'person':
+        color = COLOR_PERSON
+    elif label_name == 'car':
+        color = COLOR_CAR
+    else:
+        color = COLOR_DEFAULT
+
+    label_text = f"{label_name} {local_id} {conf:.0%}"
+
+    if TESLA_SOC_CHECK_ENABLED:
+        tx, ty = 1150, 450
+        if label_name == 'car':
+            if x1 <= tx <= x2 and y1 <= ty <= y2:
+                if soc is not None:
+                    label_text = f"Tesla {conf:.0%} / SoC {soc}%"
+                else:
+                    label_text = f"Tesla {conf:.0%}"
+
+    cv2.rectangle(frame, (x1, y1), (x2, y2), color, 2)
+
+    (w, h), _ = cv2.getTextSize(label_text, cv2.FONT_HERSHEY_DUPLEX, 1, 1)
+
+    cv2.rectangle(frame, (x1, y1 - 30), (x1 + w, y1), color, -1)
+    cv2.putText(frame, label_text, (x1, y1 - 5),
+                cv2.FONT_HERSHEY_DUPLEX, 1, (255, 255, 255), 1, cv2.LINE_AA)
+
+
+def detect_motion(input_video_path, output_dir):
+    """
+    Analyzes a video file for motion, identifies significant events, and uses an object tracker.
+
+    This function performs several steps:
+    1.  Crops the video to a region around the ROI for efficiency.
+    2.  Uses a background subtractor to find frames with motion.
+    3.  Groups motion frames into events and filters out short/insignificant ones.
+    4.  For significant events, it runs a YOLO object tracker to identify and count objects.
+    5.  It checks for 'gate crossing' events where people cross a predefined line.
+    6.  Generates a highlight clip (.mp4) of significant events with tracked objects boxed.
+    7.  Extracts and saves single frames (.jpg) for insignificant motion events.
+
+    Args:
+        input_video_path (str): The path to the input .mp4 video file.
+        output_dir (str): The directory to save generated clips and frames.
+
+    Returns:
+        dict: A dictionary containing the analysis status ('significant_motion', 'no_motion', etc.),
+              path to the generated clip, paths to insignificant frames, and detected object counts.
+    """
+    file_basename = os.path.basename(input_video_path)
+    roi_poly_points = load_roi(ROI_CONFIG_FILE)
+    if roi_poly_points is None:
+        logger.error(f"[{file_basename}] ROI config file not found.")
+        return {'status': 'error', 'clip_path': None, 'insignificant_frames': []}
+
+    cap = cv2.VideoCapture(input_video_path)
+    if not cap.isOpened():
+        logger.error(f"[{file_basename}] Could not open video file {input_video_path}")
+        return {'status': 'error', 'clip_path': None, 'insignificant_frames': []}
+
+    start_time = time.time()
+
+    fps = cap.get(cv2.CAP_PROP_FPS) or 25.0
+    total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+    orig_w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+    orig_h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+
+    x_coords = roi_poly_points[:, 0]
+    y_coords = roi_poly_points[:, 1]
+    crop_x1 = max(0, np.min(x_coords) - CROP_PADDING)
+    crop_y1 = max(0, np.min(y_coords) - CROP_PADDING)
+    crop_x2 = min(orig_w, np.max(x_coords) + CROP_PADDING)
+    crop_y2 = min(orig_h, np.max(y_coords) + CROP_PADDING)
+    crop_w = crop_x2 - crop_x1
+    crop_h = crop_y2 - crop_y1
+
+    logger.info(f"[{file_basename}] Original frame: {orig_w}x{orig_h}. Analyzing cropped region: {crop_w}x{crop_h} at ({crop_x1},{crop_y1}).")
+
+    local_roi_points = roi_poly_points.copy()
+    local_roi_points[:, 0] -= crop_x1
+    local_roi_points[:, 1] -= crop_y1
+
+    analysis_roi_points = local_roi_points.astype(np.int32)
+
+    backSub = cv2.createBackgroundSubtractorKNN(history=500, dist2Threshold=800, detectShadows=True)
+    roi_mask = np.zeros((crop_h, crop_w), dtype=np.uint8)
+    cv2.fillPoly(roi_mask, [analysis_roi_points], 255)
+
+    logger.info(f"[{file_basename}] Starting smart background model pre-training...")
+    pre_trained = False
+    training_candidate_times = [30, 40, 50, 20]
+    frames_to_sample = 25
+    frames_to_train = 150
+
+    for start_sec in training_candidate_times:
+        start_frame = int(start_sec * fps)
+        if total_frames < start_frame + frames_to_sample:
+            continue
+
+        cap.set(cv2.CAP_PROP_POS_FRAMES, start_frame)
+
+        motion_detected_in_segment = False
+        temp_backSub = cv2.createBackgroundSubtractorKNN(history=50, dist2Threshold=800, detectShadows=True)
+
+        for i in range(frames_to_sample):
+            ret, frame = cap.read()
+            if not ret:
+                break
+
+            cropped_frame = frame[crop_y1:crop_y2, crop_x1:crop_x2]
+            roi_frame = cv2.bitwise_and(cropped_frame, cropped_frame, mask=roi_mask)
+            fg_mask = temp_backSub.apply(roi_frame)
+
+            if i > 5 and cv2.countNonZero(fg_mask) > (roi_mask.size * 0.1):
+                motion_detected_in_segment = True
+                logger.info(f"[{file_basename}] Motion detected in pre-training candidate segment at {start_sec}s. Trying next segment.")
+                break
+
+        if not motion_detected_in_segment:
+            logger.info(f"[{file_basename}] Found a static segment at {start_sec}s. Pre-training background model...")
+            cap.set(cv2.CAP_PROP_POS_FRAMES, start_frame)
+            for _ in range(frames_to_train):
+                ret, frame = cap.read()
+                if not ret:
+                    break
+
+                cropped_frame = frame[crop_y1:crop_y2, crop_x1:crop_x2]
+                roi_frame = cv2.bitwise_and(cropped_frame, cropped_frame, mask=roi_mask)
+                backSub.apply(roi_frame)
+
+            pre_trained = True
+            break
+
+    if pre_trained:
+        logger.info(f"[{file_basename}] Background model pre-trained. Resetting to start for analysis.")
+        cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
+    else:
+        logger.warning(f"[{file_basename}] Could not find a static segment to pre-train model. Using standard warm-up.")
+
+    EFFECTIVE_WARMUP = 5 if pre_trained else WARMUP_FRAMES
+
+    motion_events = []
+    for frame_index in range(EFFECTIVE_WARMUP, total_frames):
+        ret, frame = cap.read()
+        if not ret:
+            break
+
+        cropped_frame = frame[crop_y1:crop_y2, crop_x1:crop_x2]
+        roi_frame = cv2.bitwise_and(cropped_frame, cropped_frame, mask=roi_mask)
+        fg_mask = backSub.apply(roi_frame)
+        _, fg_mask = cv2.threshold(fg_mask, 250, 255, cv2.THRESH_BINARY)
+        kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
+        fg_mask = cv2.morphologyEx(fg_mask, cv2.MORPH_OPEN, kernel, iterations=2)
+        fg_mask = cv2.dilate(fg_mask, kernel, iterations=3)
+        contours, _ = cv2.findContours(fg_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+
+        large_enough_contours = [cnt for cnt in contours if cv2.contourArea(cnt) > MIN_CONTOUR_AREA]
+        if large_enough_contours:
+            motion_events.append((frame_index, large_enough_contours))
+
+    if not motion_events:
+        logger.info(f"[{file_basename}] No significant motion found.")
+        cap.release()
+        elapsed_time = time.time() - start_time
+        logger.info(f"[{file_basename}] Motion detection took {elapsed_time:.2f} seconds.")
+        return {'status': 'no_motion', 'clip_path': None, 'insignificant_frames': []}
+
+    motion_frame_indices = [item[0] for item in motion_events]
+
+    max_gap_in_frames = MAX_EVENT_GAP_SECONDS * fps
+    sub_clips = []
+    if motion_frame_indices:
+        clip_start = motion_frame_indices[0]
+        clip_end = motion_frame_indices[0]
+        for i in range(1, len(motion_frame_indices)):
+            if motion_frame_indices[i] - clip_end > max_gap_in_frames:
+                sub_clips.append((clip_start, clip_end))
+                clip_start = motion_frame_indices[i]
+            clip_end = motion_frame_indices[i]
+        sub_clips.append((clip_start, clip_end))
+
+    soc = check_tesla_soc(file_basename) if TESLA_SOC_CHECK_ENABLED else None
+
+    logger.info(f"[{file_basename}] Found {len(sub_clips)} raw motion event(s). Filtering by duration...")
+    significant_sub_clips = []
+    insignificant_motion_frames = []
+    for start_frame, end_frame in sub_clips:
+        duration_frames = end_frame - start_frame
+        duration_seconds = duration_frames / fps
+        if duration_seconds >= MIN_EVENT_DURATION_SECONDS:
+            logger.info(f"[{file_basename}]   - Event lasting {duration_seconds:.2f}s is SIGNIFICANT. Will process with tracker.")
+            significant_sub_clips.append((start_frame, end_frame))
+        elif duration_seconds >= MIN_INSIGNIFICANT_EVENT_DURATION_SECONDS:
+            logger.info(f"[{file_basename}]   - Event lasting {duration_seconds:.2f}s is insignificant. Extracting frame.")
+            mid_frame_index = start_frame + (end_frame - start_frame) // 2
+
+            cap.set(cv2.CAP_PROP_POS_FRAMES, mid_frame_index)
+            ret, frame = cap.read()
+            if ret:
+                results = object_detection_model.track(frame, imgsz=640, conf=CONF_THRESHOLD, persist=False, verbose=False)
+                if results[0].boxes.id is not None:
+                    boxes = results[0].boxes.xyxy.cpu().tolist()
+                    clss = results[0].boxes.cls.int().cpu().tolist()
+                    confs = results[0].boxes.conf.float().cpu().tolist()
+                    class_names = object_detection_model.names
+
+                    local_id_counter = 1
+                    for box, cls, conf in zip(boxes, clss, confs):
+                        label_name = class_names[cls]
+                        draw_tracked_box(frame, box, local_id_counter, label_name, conf, soc)
+                        local_id_counter += 1
+
+                frame_filename = f"{os.path.splitext(file_basename)[0]}_insignificant_{mid_frame_index}.jpg"
+                frame_path = os.path.join(output_dir, frame_filename)
+                cv2.imwrite(frame_path, frame, [cv2.IMWRITE_JPEG_QUALITY, 85])
+                insignificant_motion_frames.append(frame_path)
+                logger.info(f"[{file_basename}] Saved insignificant motion frame to {frame_path}")
+        else:
+            logger.info(f"[{file_basename}]   - Event lasting {duration_seconds:.2f}s is too short. Discarding as noise/shadow.")
+
+    if not significant_sub_clips:
+        logger.info(f"[{file_basename}] No significant long-duration motion found.")
+        cap.release()
+        elapsed_time = time.time() - start_time
+        logger.info(f"[{file_basename}] Motion detection took {elapsed_time:.2f} seconds.")
+        return {'status': 'no_significant_motion', 'clip_path': None, 'insignificant_frames': insignificant_motion_frames}
+
+    logger.info(f"[{file_basename}] Starting object tracking for {len(significant_sub_clips)} significant event(s).")
+
+    if hasattr(object_detection_model, 'predictor') and object_detection_model.predictor is not None:
+        if hasattr(object_detection_model.predictor, 'trackers') and object_detection_model.predictor.trackers:
+            object_detection_model.predictor.trackers[0].reset()
+            logger.info(f"[{file_basename}] Object tracker state reset.")
+
+    all_clip_frames_rgb = []
+    class_names = object_detection_model.names
+    id_mapping = {}
+    class_counters = {}
+    unique_objects_detected = {'person': set(), 'car': set()}
+    previous_positions = {}
+    persons_up = 0
+    persons_down = 0
+    line_crossing_cooldown = {}
+
+    frames_to_process_indices = set()
+    for clip_index, (start_frame, end_frame) in enumerate(significant_sub_clips):
+        duration_seconds = (end_frame - start_frame) / fps
+        is_long_motion = duration_seconds > 4.0
+        padding_seconds_adjusted = 0.5 if is_long_motion else PADDING_SECONDS
+        padded_start = max(0, start_frame - int(padding_seconds_adjusted * fps))
+        padded_end = min(total_frames, end_frame + int(padding_seconds_adjusted * fps))
+
+        # NEW: If first motion is at the very start, include from frame 0
+        if clip_index == 0 and start_frame <= (EFFECTIVE_WARMUP + fps * 1.0):
+            logger.info(f"[{file_basename}] Motion starts at the beginning. Including video from frame 0.")
+            padded_start = 0
+
+        if is_long_motion:
+            logger.info(f"[{file_basename}] Long motion event ({duration_seconds:.2f}s) detected. Speeding up clip segment.")
+
+        for i in range(padded_start, padded_end):
+            if is_long_motion and (i - padded_start) % 2 != 0:
+                continue
+            frames_to_process_indices.add(i)
+
+    sorted_frame_indices = sorted(list(frames_to_process_indices))
+
+    for frame_idx in sorted_frame_indices:
+        cap.set(cv2.CAP_PROP_POS_FRAMES, frame_idx)
+        ret, frame = cap.read()
+        if not ret:
+            continue
+
+        results = object_detection_model.track(frame, imgsz=640, conf=CONF_THRESHOLD, persist=True, verbose=False, tracker="bytetrack.yaml")
+
+        if results[0].boxes.id is not None:
+            boxes = results[0].boxes.xyxy.cpu().tolist()
+            global_ids = results[0].boxes.id.int().cpu().tolist()
+            clss = results[0].boxes.cls.int().cpu().tolist()
+            confs = results[0].boxes.conf.float().cpu().tolist()
+
+            for box, global_id, cls, conf in zip(boxes, global_ids, clss, confs):
+                label_name = class_names[cls]
+
+                if label_name not in class_counters:
+                    class_counters[label_name] = 1
+                if global_id not in id_mapping:
+                    id_mapping[global_id] = class_counters[label_name]
+                    class_counters[label_name] += 1
+                local_id = id_mapping[global_id]
+
+                if label_name in unique_objects_detected:
+                    unique_objects_detected[label_name].add(global_id)
+
+                y_center = int((box[1] + box[3]) / 2)
+                if global_id in previous_positions:
+                    prev_y = previous_positions[global_id]
+                    if label_name == 'person':
+                        if frame_idx >= line_crossing_cooldown.get(global_id, 0):
+                            crossed = False
+                            if prev_y < LINE_Y <= y_center:
+                                persons_down += 1
+                                crossed = True
+                            elif prev_y > LINE_Y >= y_center:
+                                persons_up += 1
+                                crossed = True
+
+                            if crossed:
+                                cooldown_frames = int(LINE_CROSSING_COOLDOWN_SECONDS * fps)
+                                line_crossing_cooldown[global_id] = frame_idx + cooldown_frames
+                previous_positions[global_id] = y_center
+
+                draw_tracked_box(frame, box, local_id, label_name, conf, soc)
+
+        cv2.line(frame, (0, LINE_Y), (orig_w, LINE_Y), COLOR_LINE, 1)
+        cv2.putText(frame, f"Hvirtka Y={LINE_Y}", (10, LINE_Y - 10),
+                    cv2.FONT_HERSHEY_DUPLEX, 1, COLOR_LINE, 1, cv2.LINE_AA)
+
+        rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+        all_clip_frames_rgb.append(rgb_frame)
+
+    cap.release()
+
+    if not all_clip_frames_rgb:
+        logger.error(f"[{file_basename}] No frames collected for the clip after tracking.")
+        return {'status': 'error', 'clip_path': None, 'insignificant_frames': insignificant_motion_frames}
+
+    final_clip = ImageSequenceClip(all_clip_frames_rgb, fps=fps)
+    output_filename = os.path.join(output_dir, file_basename)
+    logger.info(f"[{file_basename}] Writing final highlight clip to {output_filename}...")
+    final_clip.write_videofile(
+        output_filename, codec='libx264', audio=False, bitrate='2000k',
+        preset='medium', threads=4, logger=None
+    )
+
+    file_duration = final_clip.duration
+    file_size = os.path.getsize(output_filename) / (1024 * 1024)
+    logger.info(f"[{file_basename}] Successfully created clip: {output_filename}. Duration: {file_duration:.2f}s, Size: {file_size:.2f} MB")
+
+    num_persons = len(unique_objects_detected['person'])
+    num_cars = len(unique_objects_detected['car'])
+    crossing_detected = persons_up > 0 or persons_down > 0
+
+    final_status = 'significant_motion'
+    crossing_direction = None
+    if crossing_detected:
+        final_status = 'gate_crossing'
+        if persons_up > 0 and persons_down > 0:
+            crossing_direction = 'both'
+        elif persons_up > 0:
+            crossing_direction = 'up'
+        else:
+            crossing_direction = 'down'
+        logger.info(f"[{file_basename}] Gate crossing detected! Direction: {crossing_direction}. Persons Up: {persons_up}, Down: {persons_down}.")
+
+    elapsed_time = time.time() - start_time
+    logger.info(f"[{file_basename}] Full processing took {elapsed_time:.2f} seconds. Detected: {num_persons} persons, {num_cars} cars.")
+
+    return {
+        'status': final_status,
+        'clip_path': output_filename,
+        'insignificant_frames': insignificant_motion_frames,
+        'persons_detected': num_persons,
+        'cars_detected': num_cars,
+        'crossing_direction': crossing_direction,
+        'persons_up': persons_up,
+        'persons_down': persons_down
+    }
