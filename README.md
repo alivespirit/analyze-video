@@ -27,7 +27,7 @@ This project is a Python-based application that monitors a folder for new video 
   - **Media Handling**: Sends highlight clips as animations and insignificant motion as photos.
 - **Performance & Stability**:
   - **Dual-Executor Design**: Uses separate, single-worker thread pools for CPU-bound (video analysis) and I/O-bound (API calls) tasks to prevent system overload.
-  - **Graceful Shutdown & Auto-Restart**: Automatically restarts the script if `main.py` is modified, with robust shutdown logic.
+  - **Graceful Shutdown & Auto-Restart**: Automatically restarts the script if any of the Python files is modified, with robust shutdown logic.
   - **Battery Monitoring**: Appends battery status to notifications if the device is on battery power and running low (requires `psutil`).
   - **Low Hardware Requirements**: Optimized to be efficient without losing accuracy, tested on Intel Core m5 CPU with 8Gb of RAM.
 - **Enhanced Logging**:
@@ -152,7 +152,7 @@ pip install -r requirements.txt
    - When a button is clicked, the bot retrieves the corresponding full video file and sends it as a reply.
 
 5. **Self-Monitoring & Auto-Restart:**
-   - A separate `watchdog` instance monitors `main.py`. If the file is modified, it triggers a graceful shutdown and restarts the script.
+   - A separate `watchdog` instance monitors `*.py`. If any Python file is modified, it triggers a graceful shutdown and restarts the script.
 
 ---
 
