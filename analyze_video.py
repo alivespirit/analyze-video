@@ -168,9 +168,9 @@ def analyze_video(motion_result, video_path):
             model_fallback = 'gemini-2.5-flash'
             model_fallback_text = '_[2.5F]_ '
         else:
-            model_main = 'gemini-2.5-flash'
-            model_fallback = 'gemini-2.5-flash-lite'
-            model_fallback_text = '_[2.5FL]_ '
+            model_main = 'gemini-3-flash-preview'
+            model_fallback = 'gemini-2.5-flash'
+            model_fallback_text = '_[2.5F]_ '
 
         final_fallback_model_file = os.path.join(SCRIPT_DIR, "model_final_fallback")
         final_fallback_enabled = os.path.exists(final_fallback_model_file)

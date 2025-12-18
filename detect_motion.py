@@ -21,7 +21,6 @@ except ImportError:
 
 logger = logging.getLogger()
 
-# Paths
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 
 # --- Motion detection configuration ---
@@ -34,6 +33,7 @@ MIN_EVENT_DURATION_SECONDS = 1.0
 MIN_INSIGNIFICANT_EVENT_DURATION_SECONDS = 0.2
 CROP_PADDING = 30
 MAX_BOX_AREA_PERCENT = 0.80
+PERSON_MIN_FRAMES = 10
 
 # --- Tesla config ---
 TESLA_EMAIL = os.getenv("TESLA_EMAIL")
@@ -44,7 +44,7 @@ TESLA_SOC_CHECK_ENABLED = bool(teslapy and TESLA_REFRESH_TOKEN and TESLA_EMAIL)
 
 # --- Object Detection Configuration ---
 OBJECT_DETECTION_MODEL_PATH = os.getenv("OBJECT_DETECTION_MODEL_PATH", default="best_openvino_model")
-CONF_THRESHOLD = 0.45
+CONF_THRESHOLD = 0.4
 LINE_Y = 860
 LINE_CROSSING_COOLDOWN_SECONDS = 3.0
 COLOR_PERSON = (100, 200, 0)
@@ -263,7 +263,7 @@ def detect_motion(input_video_path, output_dir):
     logger.info(f"[{file_basename}] Starting smart background model pre-training...")
     pre_trained = False
     training_candidate_times = [30, 40, 50, 20]
-    frames_to_sample = 25
+    frames_to_sample = 60
     frames_to_train = 150
 
     for start_sec in training_candidate_times:
@@ -386,6 +386,9 @@ def detect_motion(input_video_path, output_dir):
 
                 frame_filename = f"{os.path.splitext(file_basename)[0]}_insignificant_{mid_frame_index}.jpg"
                 frame_path = os.path.join(output_dir, frame_filename)
+                cv2.line(frame, (0, LINE_Y), (orig_w, LINE_Y), COLOR_LINE, 1)
+                cv2.putText(frame, f"Hvirtka Y={LINE_Y}", (10, LINE_Y - 10),
+                        cv2.FONT_HERSHEY_DUPLEX, 1, COLOR_LINE, 1, cv2.LINE_AA)
                 cv2.imwrite(frame_path, frame, [cv2.IMWRITE_JPEG_QUALITY, 85])
                 insignificant_motion_frames.append(frame_path)
                 logger.info(f"[{file_basename}] Saved insignificant motion frame to {frame_path}")
@@ -406,17 +409,18 @@ def detect_motion(input_video_path, output_dir):
             object_detection_model.predictor.trackers[0].reset()
             logger.info(f"[{file_basename}] Object tracker state reset.")
 
+    # Prepare ROI polygon for point-in-polygon checks
+    roi_polygon_cv = roi_poly_points.reshape((-1, 1, 2))
+
     all_clip_frames_rgb = []
     class_names = object_detection_model.names
     id_mapping = {}
     class_counters = {}
     unique_objects_detected = {'person': set(), 'car': set()}
-    previous_positions = {}
     persons_up = 0
     persons_down = 0
-    line_crossing_cooldown = {}
 
-    frames_to_process_indices = set()
+    # Process each event separately and include only those with person inside ROI for >= PERSON_MIN_FRAMES
     for clip_index, (start_frame, end_frame) in enumerate(significant_sub_clips):
         duration_seconds = (end_frame - start_frame) / fps
         is_long_motion = duration_seconds > 4.0
@@ -424,7 +428,6 @@ def detect_motion(input_video_path, output_dir):
         padded_start = max(0, start_frame - int(padding_seconds_adjusted * fps))
         padded_end = min(total_frames, end_frame + int(padding_seconds_adjusted * fps))
 
-        # NEW: If first motion is at the very start, include from frame 0
         if clip_index == 0 and start_frame <= (EFFECTIVE_WARMUP + fps * 1.0):
             logger.info(f"[{file_basename}] Motion starts at the beginning. Including video from frame 0.")
             padded_start = 0
@@ -432,72 +435,113 @@ def detect_motion(input_video_path, output_dir):
         if is_long_motion:
             logger.info(f"[{file_basename}] Long motion event ({duration_seconds:.2f}s) detected. Speeding up clip segment.")
 
-        for i in range(padded_start, padded_end):
-            if is_long_motion and (i - padded_start) % 2 != 0:
+        # Event-scoped accumulators
+        event_frames_rgb = []
+        event_unique_objects = {'person': set(), 'car': set()}
+        event_persons_up = 0
+        event_persons_down = 0
+        event_previous_positions = {}
+        event_line_crossing_cooldown = {}
+        person_frames_in_roi = 0
+
+        # Seek once to the start of the event, then advance sequentially to avoid decoder seek artifacts
+        cap.set(cv2.CAP_PROP_POS_FRAMES, padded_start)
+        frame_idx = padded_start
+        while frame_idx < padded_end:
+            grabbed = cap.grab()
+            if not grabbed:
+                frame_idx += 1
                 continue
-            frames_to_process_indices.add(i)
 
-    sorted_frame_indices = sorted(list(frames_to_process_indices))
+            skip_frame = is_long_motion and (frame_idx - padded_start) % 2 != 0
+            if skip_frame:
+                frame_idx += 1
+                continue
 
-    for frame_idx in sorted_frame_indices:
-        cap.set(cv2.CAP_PROP_POS_FRAMES, frame_idx)
-        ret, frame = cap.read()
-        if not ret:
-            continue
+            ret, frame = cap.retrieve()
+            frame_idx += 1
+            if not ret or frame is None:
+                continue
 
-        results = object_detection_model.track(frame, imgsz=640, conf=CONF_THRESHOLD, persist=True, verbose=False, tracker="bytetrack.yaml")
+            results = object_detection_model.track(frame, imgsz=640, conf=CONF_THRESHOLD, persist=True, verbose=False, tracker="tracker.yaml")
 
-        if results[0].boxes.id is not None:
-            boxes = results[0].boxes.xyxy.cpu().tolist()
-            global_ids = results[0].boxes.id.int().cpu().tolist()
-            clss = results[0].boxes.cls.int().cpu().tolist()
-            confs = results[0].boxes.conf.float().cpu().tolist()
+            # Count whether this frame contains a person within ROI
+            frame_has_person_in_roi = False
 
-            for box, global_id, cls, conf in zip(boxes, global_ids, clss, confs):
-                label_name = class_names[cls]
+            if results[0].boxes.id is not None:
+                boxes = results[0].boxes.xyxy.cpu().tolist()
+                global_ids = results[0].boxes.id.int().cpu().tolist()
+                clss = results[0].boxes.cls.int().cpu().tolist()
+                confs = results[0].boxes.conf.float().cpu().tolist()
 
-                if label_name not in class_counters:
-                    class_counters[label_name] = 1
-                if global_id not in id_mapping:
-                    id_mapping[global_id] = class_counters[label_name]
-                    class_counters[label_name] += 1
-                local_id = id_mapping[global_id]
+                for box, global_id, cls, conf in zip(boxes, global_ids, clss, confs):
+                    label_name = class_names[cls]
 
-                if label_name in unique_objects_detected:
-                    unique_objects_detected[label_name].add(global_id)
+                    if label_name not in class_counters:
+                        class_counters[label_name] = 1
+                    if global_id not in id_mapping:
+                        id_mapping[global_id] = class_counters[label_name]
+                        class_counters[label_name] += 1
+                    local_id = id_mapping[global_id]
 
-                y_center = int((box[1] + box[3]) / 2)
-                if global_id in previous_positions:
-                    prev_y = previous_positions[global_id]
+                    if label_name in event_unique_objects:
+                        event_unique_objects[label_name].add(global_id)
+
+                    # Line crossing detection (per event)
+                    y_center = int((box[1] + box[3]) / 2)
+                    if global_id in event_previous_positions:
+                        prev_y = event_previous_positions[global_id]
+                        if label_name == 'person':
+                            if frame_idx >= event_line_crossing_cooldown.get(global_id, 0):
+                                crossed = False
+                                if prev_y < LINE_Y <= y_center:
+                                    event_persons_down += 1
+                                    crossed = True
+                                elif prev_y > LINE_Y >= y_center:
+                                    event_persons_up += 1
+                                    crossed = True
+
+                                if crossed:
+                                    cooldown_frames = int(LINE_CROSSING_COOLDOWN_SECONDS * fps)
+                                    event_line_crossing_cooldown[global_id] = frame_idx + cooldown_frames
+                    event_previous_positions[global_id] = y_center
+
+                    # Person-in-ROI check using center point inside ROI polygon
                     if label_name == 'person':
-                        if frame_idx >= line_crossing_cooldown.get(global_id, 0):
-                            crossed = False
-                            if prev_y < LINE_Y <= y_center:
-                                persons_down += 1
-                                crossed = True
-                            elif prev_y > LINE_Y >= y_center:
-                                persons_up += 1
-                                crossed = True
+                        cx = int((box[0] + box[2]) / 2)
+                        cy = int((box[1] + box[3]) / 2)
+                        if cv2.pointPolygonTest(roi_polygon_cv, (cx, cy), False) >= 0:
+                            frame_has_person_in_roi = True
 
-                            if crossed:
-                                cooldown_frames = int(LINE_CROSSING_COOLDOWN_SECONDS * fps)
-                                line_crossing_cooldown[global_id] = frame_idx + cooldown_frames
-                previous_positions[global_id] = y_center
+                    draw_tracked_box(frame, box, local_id, label_name, conf, soc)
 
-                draw_tracked_box(frame, box, local_id, label_name, conf, soc)
+            if frame_has_person_in_roi:
+                person_frames_in_roi += 1
 
-        cv2.line(frame, (0, LINE_Y), (orig_w, LINE_Y), COLOR_LINE, 1)
-        cv2.putText(frame, f"Hvirtka Y={LINE_Y}", (10, LINE_Y - 10),
-                    cv2.FONT_HERSHEY_DUPLEX, 1, COLOR_LINE, 1, cv2.LINE_AA)
+            cv2.line(frame, (0, LINE_Y), (orig_w, LINE_Y), COLOR_LINE, 1)
+            cv2.putText(frame, f"Hvirtka Y={LINE_Y}", (10, LINE_Y - 10),
+                        cv2.FONT_HERSHEY_DUPLEX, 1, COLOR_LINE, 1, cv2.LINE_AA)
 
-        rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-        all_clip_frames_rgb.append(rgb_frame)
+            rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+            event_frames_rgb.append(rgb_frame)
+
+        # Decide whether to include this event based on person frames within ROI
+        if person_frames_in_roi >= PERSON_MIN_FRAMES:
+            logger.info(f"[{file_basename}] Event kept: person present in ROI for {person_frames_in_roi} frames (>= {PERSON_MIN_FRAMES}).")
+            all_clip_frames_rgb.extend(event_frames_rgb)
+            # Merge event stats into overall
+            unique_objects_detected['person'].update(event_unique_objects['person'])
+            unique_objects_detected['car'].update(event_unique_objects['car'])
+            persons_up += event_persons_up
+            persons_down += event_persons_down
+        else:
+            logger.info(f"[{file_basename}] Event discarded: person in ROI only {person_frames_in_roi} frames (< {PERSON_MIN_FRAMES}).")
 
     cap.release()
 
     if not all_clip_frames_rgb:
-        logger.error(f"[{file_basename}] No frames collected for the clip after tracking.")
-        return {'status': 'error', 'clip_path': None, 'insignificant_frames': insignificant_motion_frames}
+        logger.info(f"[{file_basename}] No significant events with person in ROI found.")
+        return {'status': 'no_significant_motion', 'clip_path': None, 'insignificant_frames': insignificant_motion_frames}
 
     final_clip = ImageSequenceClip(all_clip_frames_rgb, fps=fps)
     output_filename = os.path.join(output_dir, file_basename)
