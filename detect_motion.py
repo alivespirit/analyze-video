@@ -266,6 +266,9 @@ def detect_motion(input_video_path, output_dir):
     training_candidate_times = [30, 40, 50, 20]
     frames_to_sample = 60
     frames_to_train = 150
+    # Validate candidate segment across the entire training window to avoid
+    # pretraining on periods with subtle motion.
+    frames_to_sample = frames_to_train
 
     for start_sec in training_candidate_times:
         start_frame = int(start_sec * fps)

@@ -6,6 +6,7 @@ import logging
 
 from google import genai
 from google.genai import types
+from dotenv import dotenv_values
 
 logger = logging.getLogger()
 
@@ -161,23 +162,40 @@ def analyze_video(motion_result, video_path):
                 logger.error(f"[{file_basename}] Error reading video file: {e}")
                 return {'response': timestamp + "\u274C Відео не вдалося прочитати.", 'insignificant_frames': motion_result['insignificant_frames'], 'clip_path': motion_result.get('clip_path')}
 
-        pro_model_file = os.path.join(SCRIPT_DIR, "model_pro")
-        if os.path.exists(pro_model_file) and (9 <= now.hour <= 13):
-            with open(pro_model_file, "r", encoding="utf-8") as pro_model:
-                model_main = pro_model.read().strip()
-            model_fallback = 'gemini-2.5-flash'
-            model_fallback_text = '_[2.5F]_ '
-        else:
-            model_main = 'gemini-2.5-flash'
-            model_fallback = 'gemini-2.5-flash-lite'
-            model_fallback_text = '_[2.5FL]_ '
+        # --- Load model names from gemini_models.env on each call ---
+        models_env_path = os.path.join(SCRIPT_DIR, "gemini_models.env")
+        try:
+            models_env = dotenv_values(models_env_path) or {}
+        except Exception as e_env:
+            logger.warning(f"[{file_basename}] Failed to load gemini_models.env: {e_env}. Using defaults.")
+            models_env = {}
 
-        final_fallback_model_file = os.path.join(SCRIPT_DIR, "model_final_fallback")
-        final_fallback_enabled = os.path.exists(final_fallback_model_file)
-        if final_fallback_enabled:
-            with open(final_fallback_model_file, "r", encoding="utf-8") as final_fallback_model:
-                model_final_fallback = final_fallback_model.read().strip()
-        model_final_fallback_text = '_[FF]_ '
+        MODEL_PRO = (models_env.get("MODEL_PRO") or "").strip() or None
+        MODEL_MAIN = (models_env.get("MODEL_MAIN") or "").strip() or "gemini-2.5-flash"
+        MODEL_FALLBACK = (models_env.get("MODEL_FALLBACK") or "").strip() or "gemini-2.5-flash-lite"
+        MODEL_FINAL_FALLBACK = (models_env.get("MODEL_FINAL_FALLBACK") or "").strip() or None
+
+        # Codename mapping for known models
+        MODEL_CODENAMES = {
+            "gemini-3-flash-preview": "3FP",
+            "gemini-2.5-flash": "2.5F",
+            "gemini-2.5-flash-lite": "2.5FL",
+            "gemini-2.5-pro": "2.5Pro",
+        }
+
+        # Select main and fallback based on PRO presence and time window
+        if MODEL_PRO and (9 <= now.hour <= 13):
+            model_main = MODEL_PRO
+            model_fallback = MODEL_MAIN
+            model_fallback_text = f'_[{MODEL_CODENAMES.get(MODEL_MAIN, "FB")}]_ '
+        else:
+            model_main = MODEL_MAIN
+            model_fallback = MODEL_FALLBACK
+            model_fallback_text = f'_[{MODEL_CODENAMES.get(MODEL_FALLBACK, "FB")}]_ '
+        # Final fallback
+        final_fallback_enabled = bool(MODEL_FINAL_FALLBACK)
+        model_final_fallback = MODEL_FINAL_FALLBACK
+        model_final_fallback_text = f'_[{MODEL_CODENAMES.get(MODEL_FINAL_FALLBACK, "FF")}]_ '
 
         sampling_rate = 5
         max_retries = 3

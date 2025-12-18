@@ -104,10 +104,18 @@ pip install -r requirements.txt
    - You can use the script in `tools/gate_motion_detector.py` as a starting point to select an ROI for your video.
 
 6. **(Optional) Configure AI Models and Prompts:**
-   - Place your custom analysis instructions in `prompt.txt`.
-   - To enable dynamic model switching, create the following files in the project root:
-     - `model_pro`: Contains the name of your preferred high-accuracy model (e.g., `gemini-2.5-pro`).
-     - `model_final_fallback`: Contains the name of a last-resort model.
+    - Place your custom analysis instructions in `prompt.txt`.
+    - Configure Gemini model selection via `gemini_models.env` (read on every analysis call, no restart needed):
+       ```env
+       MODEL_PRO=
+       MODEL_MAIN=gemini-2.5-flash
+       MODEL_FALLBACK=gemini-2.5-flash-lite
+       MODEL_FINAL_FALLBACK=
+       ```
+       - If `MODEL_PRO` is set and the current hour is between 09 and 13, `MODEL_PRO` is used as the main model and `MODEL_MAIN` becomes the fallback.
+       - If `MODEL_PRO` is empty or outside 09–13, `MODEL_MAIN` is used as main and `MODEL_FALLBACK` as fallback.
+       - If `MODEL_FINAL_FALLBACK` is set, it will be used as a last resort.
+       - Known codenames are displayed with responses: `gemini-3-flash-preview → 3FP`, `gemini-2.5-flash → 2.5F`, `gemini-2.5-flash-lite → 2.5FL`, `gemini-2.5-pro → 2.5P` (unknown models display `FF` for final fallback).
 
 ---
 
@@ -159,7 +167,7 @@ pip install -r requirements.txt
 ## Customization
 
 - **Prompt:** Edit `prompt.txt` to change the analysis prompt sent to Gemini AI.
-- **AI Models:** Create or remove `model_pro` and `model_final_fallback` to control which Gemini models are used.
+- **AI Models:** Edit `gemini_models.env` to control which Gemini models are used; changes apply without restarting the app.
 - **Motion & Detection Parameters:** Adjust constants in `main.py` (e.g., `MIN_CONTOUR_AREA`, `CONF_THRESHOLD`, `LINE_Y`) to fine-tune sensitivity.
 - **ROI:** Modify `roi.json` to change the monitored area.
 - **Object Detection Model:** Replace the contents of the `best_openvino_model` directory with your own exported YOLOv11 OpenVINO model.
