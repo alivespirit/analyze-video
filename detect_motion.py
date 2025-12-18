@@ -31,6 +31,7 @@ WARMUP_FRAMES = 15
 MAX_EVENT_GAP_SECONDS = 3.0
 MIN_EVENT_DURATION_SECONDS = 1.0
 MIN_INSIGNIFICANT_EVENT_DURATION_SECONDS = 0.2
+SEND_INSIGNIFICANT_FRAMES = False
 CROP_PADDING = 30
 MAX_BOX_AREA_PERCENT = 0.80
 PERSON_MIN_FRAMES = 10
@@ -358,6 +359,7 @@ def detect_motion(input_video_path, output_dir):
     logger.info(f"[{file_basename}] Found {len(sub_clips)} raw motion event(s). Filtering by duration...")
     significant_sub_clips = []
     insignificant_motion_frames = []
+    all_shorter_than_insignificant = True
     for start_frame, end_frame in sub_clips:
         duration_frames = end_frame - start_frame
         duration_seconds = duration_frames / fps
@@ -365,35 +367,47 @@ def detect_motion(input_video_path, output_dir):
             logger.info(f"[{file_basename}]   - Event lasting {duration_seconds:.2f}s is SIGNIFICANT. Will process with tracker.")
             significant_sub_clips.append((start_frame, end_frame))
         elif duration_seconds >= MIN_INSIGNIFICANT_EVENT_DURATION_SECONDS:
-            logger.info(f"[{file_basename}]   - Event lasting {duration_seconds:.2f}s is insignificant. Extracting frame.")
-            mid_frame_index = start_frame + (end_frame - start_frame) // 2
+            all_shorter_than_insignificant = False
+            if SEND_INSIGNIFICANT_FRAMES:
+                logger.info(f"[{file_basename}]   - Event lasting {duration_seconds:.2f}s is insignificant. Extracting frame.")
+                mid_frame_index = start_frame + (end_frame - start_frame) // 2
 
-            cap.set(cv2.CAP_PROP_POS_FRAMES, mid_frame_index)
-            ret, frame = cap.read()
-            if ret:
-                results = object_detection_model.track(frame, imgsz=640, conf=CONF_THRESHOLD, persist=False, verbose=False)
-                if results[0].boxes.id is not None:
-                    boxes = results[0].boxes.xyxy.cpu().tolist()
-                    clss = results[0].boxes.cls.int().cpu().tolist()
-                    confs = results[0].boxes.conf.float().cpu().tolist()
-                    class_names = object_detection_model.names
+                cap.set(cv2.CAP_PROP_POS_FRAMES, mid_frame_index)
+                ret, frame = cap.read()
+                if ret:
+                    results = object_detection_model.track(frame, imgsz=640, conf=CONF_THRESHOLD, persist=False, verbose=False)
+                    if results[0].boxes.id is not None:
+                        boxes = results[0].boxes.xyxy.cpu().tolist()
+                        clss = results[0].boxes.cls.int().cpu().tolist()
+                        confs = results[0].boxes.conf.float().cpu().tolist()
+                        class_names = object_detection_model.names
 
-                    local_id_counter = 1
-                    for box, cls, conf in zip(boxes, clss, confs):
-                        label_name = class_names[cls]
-                        draw_tracked_box(frame, box, local_id_counter, label_name, conf, soc)
-                        local_id_counter += 1
+                        local_id_counter = 1
+                        for box, cls, conf in zip(boxes, clss, confs):
+                            label_name = class_names[cls]
+                            draw_tracked_box(frame, box, local_id_counter, label_name, conf, soc)
+                            local_id_counter += 1
 
-                frame_filename = f"{os.path.splitext(file_basename)[0]}_insignificant_{mid_frame_index}.jpg"
-                frame_path = os.path.join(output_dir, frame_filename)
-                cv2.line(frame, (0, LINE_Y), (orig_w, LINE_Y), COLOR_LINE, 1)
-                cv2.putText(frame, f"Hvirtka Y={LINE_Y}", (10, LINE_Y - 10),
-                        cv2.FONT_HERSHEY_DUPLEX, 1, COLOR_LINE, 1, cv2.LINE_AA)
-                cv2.imwrite(frame_path, frame, [cv2.IMWRITE_JPEG_QUALITY, 85])
-                insignificant_motion_frames.append(frame_path)
-                logger.info(f"[{file_basename}] Saved insignificant motion frame to {frame_path}")
+                    frame_filename = f"{os.path.splitext(file_basename)[0]}_insignificant_{mid_frame_index}.jpg"
+                    frame_path = os.path.join(output_dir, frame_filename)
+                    cv2.line(frame, (0, LINE_Y), (orig_w, LINE_Y), COLOR_LINE, 1)
+                    cv2.putText(frame, f"Hvirtka Y={LINE_Y}", (10, LINE_Y - 10),
+                            cv2.FONT_HERSHEY_DUPLEX, 1, COLOR_LINE, 1, cv2.LINE_AA)
+                    cv2.imwrite(frame_path, frame, [cv2.IMWRITE_JPEG_QUALITY, 85])
+                    insignificant_motion_frames.append(frame_path)
+                    logger.info(f"[{file_basename}] Saved insignificant motion frame to {frame_path}")
+            else:
+                logger.info(f"[{file_basename}]   - Event lasting {duration_seconds:.2f}s is insignificant. Skipping frame extraction.")
         else:
             logger.info(f"[{file_basename}]   - Event lasting {duration_seconds:.2f}s is too short. Discarding as noise/shadow.")
+
+    # If all sub-clips were shorter than the insignificant threshold, treat as no motion
+    if not significant_sub_clips and all_shorter_than_insignificant:
+        logger.info(f"[{file_basename}] All motion events shorter than MIN_INSIGNIFICANT_EVENT_DURATION_SECONDS. Treating as no motion.")
+        cap.release()
+        elapsed_time = time.time() - start_time
+        logger.info(f"[{file_basename}] Motion detection took {elapsed_time:.2f} seconds.")
+        return {'status': 'no_motion', 'clip_path': None, 'insignificant_frames': []}
 
     if not significant_sub_clips:
         logger.info(f"[{file_basename}] No significant long-duration motion found.")
