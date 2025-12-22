@@ -22,7 +22,7 @@ no_motion_grouped_videos = []
 telegram_lock = asyncio.Lock()
 
 
-async def wait_for_unlock(media_path: str, max_wait: int = 120, interval: int = 10, logger: logging.Logger = None) -> bool:
+async def wait_for_unlock(media_path: str, max_wait: int = 120, interval: int = 10, logger: logging.Logger = None, file_basename: str = "") -> bool:
     """Waits for a "*.lock" file to disappear up to max_wait seconds.
 
     Returns True if a lock was observed during waiting, False otherwise.
@@ -32,44 +32,44 @@ async def wait_for_unlock(media_path: str, max_wait: int = 120, interval: int = 
     saw_lock = False
     while os.path.exists(lock_path) and (time.monotonic() - start) < max_wait:
         if logger:
-            logger.info(f"Waiting for lock file on {media_path} to be released...")
+            logger.info(f"[{file_basename}] Waiting for lock file on {media_path} to be released...")
         saw_lock = True
         await asyncio.sleep(interval)
 
     if os.path.exists(lock_path) and logger:
-        logger.warning(f"Lock file still exists after {max_wait} seconds. Proceeding anyway: {lock_path}")
+        logger.warning(f"[{file_basename}] Lock file still exists after {max_wait} seconds. Proceeding anyway: {lock_path}")
     return saw_lock
 
 
-async def delete_with_retries(media_path: str, retries: int = 5, delay: int = 10, logger: logging.Logger = None) -> None:
+async def delete_with_retries(media_path: str, retries: int = 5, delay: int = 10, logger: logging.Logger = None, file_basename: str = "") -> None:
     """Deletes a file with simple retry/backoff."""
     for attempt in range(1, retries + 1):
         try:
             os.remove(media_path)
             if logger:
-                logger.info(f"Temporary media file deleted: {media_path}")
+                logger.info(f"[{file_basename}] Temporary media file deleted: {media_path}")
             return
         except FileNotFoundError:
             # Already gone, treat as success
             if logger:
-                logger.info(f"Temporary media file already deleted: {media_path}")
+                logger.info(f"[{file_basename}] Temporary media file already deleted: {media_path}")
             return
         except Exception as e:
             if logger:
-                logger.warning(f"Failed to delete temporary media file {media_path} (attempt {attempt}/{retries}): {e}")
+                logger.warning(f"[{file_basename}] Failed to delete temporary media file {media_path} (attempt {attempt}/{retries}): {e}")
             if attempt < retries:
                 await asyncio.sleep(delay)
 
 
-async def cleanup_temp_media(media_path: str, file_path: str, logger: logging.Logger) -> None:
+async def cleanup_temp_media(media_path: str, file_path: str, logger: logging.Logger, file_basename: str) -> None:
     """Waits for optional lock then deletes temporary media file if different from original."""
     if media_path == file_path or not os.path.exists(media_path):
         return
-    saw_lock = await wait_for_unlock(media_path, max_wait=120, interval=10, logger=logger)
+    saw_lock = await wait_for_unlock(media_path, max_wait=120, interval=10, logger=logger, file_basename=file_basename)
     if saw_lock:
         # Grace period after lock release
         await asyncio.sleep(10)
-    await delete_with_retries(media_path, retries=5, delay=10, logger=logger)
+    await delete_with_retries(media_path, retries=5, delay=10, logger=logger, file_basename=file_basename)
 
 
 async def button_callback(update, context):
@@ -225,7 +225,7 @@ async def send_notifications(app, video_response, insignificant_frames, clip_pat
                 except Exception as e_send:
                     logger.error(f"[{file_basename}] Failed to send plain message: {e_send}", exc_info=True)
             finally:
-                await cleanup_temp_media(media_path, file_path, logger)
+                await cleanup_temp_media(media_path, file_path, logger, file_basename)
 
         else: # --- This block now handles ALL non-significant videos ---
             video_info = {'text': video_response, 'callback': callback_file, 'timestamp': timestamp_text}
