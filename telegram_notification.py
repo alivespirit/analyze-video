@@ -65,6 +65,7 @@ async def cleanup_temp_media(media_path: str, file_path: str, logger: logging.Lo
     """Waits for optional lock then deletes temporary media file if different from original."""
     if media_path == file_path or not os.path.exists(media_path):
         return
+    await asyncio.sleep(10)  # Initial delay before checking for lock
     saw_lock = await wait_for_unlock(media_path, max_wait=120, interval=10, logger=logger, file_basename=file_basename)
     if saw_lock:
         # Grace period after lock release
