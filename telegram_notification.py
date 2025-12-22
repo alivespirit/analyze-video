@@ -1,6 +1,7 @@
 import os
 import asyncio
 import logging
+import time
 
 from telegram import InlineKeyboardMarkup, InlineKeyboardButton, InputMediaPhoto
 import telegram.error
@@ -19,6 +20,56 @@ no_motion_grouped_videos = []
 
 # --- NEW: Add a lock for Telegram message grouping ---
 telegram_lock = asyncio.Lock()
+
+
+async def wait_for_unlock(media_path: str, max_wait: int = 120, interval: int = 10, logger: logging.Logger = None) -> bool:
+    """Waits for a "*.lock" file to disappear up to max_wait seconds.
+
+    Returns True if a lock was observed during waiting, False otherwise.
+    """
+    start = time.monotonic()
+    lock_path = media_path + ".lock"
+    saw_lock = False
+    while os.path.exists(lock_path) and (time.monotonic() - start) < max_wait:
+        if logger:
+            logger.info(f"Waiting for lock file on {media_path} to be released...")
+        saw_lock = True
+        await asyncio.sleep(interval)
+
+    if os.path.exists(lock_path) and logger:
+        logger.warning(f"Lock file still exists after {max_wait} seconds. Proceeding anyway: {lock_path}")
+    return saw_lock
+
+
+async def delete_with_retries(media_path: str, retries: int = 5, delay: int = 10, logger: logging.Logger = None) -> None:
+    """Deletes a file with simple retry/backoff."""
+    for attempt in range(1, retries + 1):
+        try:
+            os.remove(media_path)
+            if logger:
+                logger.info(f"Temporary media file deleted: {media_path}")
+            return
+        except FileNotFoundError:
+            # Already gone, treat as success
+            if logger:
+                logger.info(f"Temporary media file already deleted: {media_path}")
+            return
+        except Exception as e:
+            if logger:
+                logger.warning(f"Failed to delete temporary media file {media_path} (attempt {attempt}/{retries}): {e}")
+            if attempt < retries:
+                await asyncio.sleep(delay)
+
+
+async def cleanup_temp_media(media_path: str, file_path: str, logger: logging.Logger) -> None:
+    """Waits for optional lock then deletes temporary media file if different from original."""
+    if media_path == file_path or not os.path.exists(media_path):
+        return
+    saw_lock = await wait_for_unlock(media_path, max_wait=120, interval=10, logger=logger)
+    if saw_lock:
+        # Grace period after lock release
+        await asyncio.sleep(10)
+    await delete_with_retries(media_path, retries=5, delay=10, logger=logger)
 
 
 async def button_callback(update, context):
@@ -174,29 +225,7 @@ async def send_notifications(app, video_response, insignificant_frames, clip_pat
                 except Exception as e_send:
                     logger.error(f"[{file_basename}] Failed to send plain message: {e_send}", exc_info=True)
             finally:
-                if media_path != file_path and os.path.exists(media_path):
-                    await asyncio.sleep(10)
-                    max_wait = 120
-                    waited = 0
-                    was_locked = False
-                    while os.path.exists(media_path + ".lock") and waited < max_wait:
-                        logger.info(f"[{file_basename}] Waiting for lock file on {media_path} to be released...")
-                        was_locked = True
-                        await asyncio.sleep(10)
-                        waited += 10
-                    if os.path.exists(media_path + ".lock"):
-                        logger.warning(f"[{file_basename}] Lock file still exists after {max_wait} seconds. Proceeding to delete media file anyway.")
-                    elif was_locked:
-                        await asyncio.sleep(10)
-                    for attempt in range(3):
-                        try:
-                            os.remove(media_path)
-                            logger.info(f"[{file_basename}] Temporary media file deleted: {media_path}")
-                            break
-                        except Exception as e_del:
-                            logger.warning(f"[{file_basename}] Failed to delete temporary media file {media_path} (attempt {attempt+1}/3): {e_del}")
-                            if attempt < 2:
-                                await asyncio.sleep(10)
+                await cleanup_temp_media(media_path, file_path, logger)
 
         else: # --- This block now handles ALL non-significant videos ---
             video_info = {'text': video_response, 'callback': callback_file, 'timestamp': timestamp_text}
