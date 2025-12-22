@@ -1,2 +1,5 @@
 .env
 venv
+temp/
+__pycache__/
+debug/

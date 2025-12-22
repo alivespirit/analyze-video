@@ -31,7 +31,7 @@ WARMUP_FRAMES = 15
 MAX_EVENT_GAP_SECONDS = 3.0
 MIN_EVENT_DURATION_SECONDS = 0.8
 MIN_INSIGNIFICANT_EVENT_DURATION_SECONDS = 0.2
-SEND_INSIGNIFICANT_FRAMES = False
+SEND_INSIGNIFICANT_FRAMES = True
 CROP_PADDING = 30
 MAX_BOX_AREA_PERCENT = 0.80
 PERSON_MIN_FRAMES = 8
@@ -201,6 +201,56 @@ def draw_tracked_box(frame, box, local_id, label_name, conf, soc):
                 cv2.FONT_HERSHEY_DUPLEX, 1, (255, 255, 255), 1, cv2.LINE_AA)
 
 
+def format_mmss(seconds):
+    """Formats an integer number of seconds as MM:SS (e.g., 00:53)."""
+    try:
+        secs = int(seconds)
+    except Exception:
+        secs = 0
+    mins = secs // 60
+    rem = secs % 60
+    return f"{mins:02d}:{rem:02d}"
+
+
+def draw_event_overlay(frame, event_idx, total_events, seconds_from_start):
+    """
+    Draws a static black box in the bottom-right with white text showing
+    current event number, total events, and seconds from start of source video.
+
+    Example: "1/2 - 00:02"
+
+    Args:
+        frame (np.ndarray): BGR frame to draw on.
+        event_idx (int): Current event index (1-based).
+        total_events (int): Total number of significant events.
+        seconds_from_start (int): Seconds from the start of the source video.
+    """
+    h, w = frame.shape[:2]
+    text = f"{event_idx}/{total_events} - {format_mmss(seconds_from_start)}"
+
+    font = cv2.FONT_HERSHEY_DUPLEX
+    font_scale = 1
+    thickness = 1
+    (text_w, text_h), _ = cv2.getTextSize(text, font, font_scale, thickness)
+
+    pad_x = 20
+    pad_y = 14
+
+    # Bottom-right anchor with margins
+    x2 = w
+    y2 = h
+    x1 = x2 - (text_w + pad_x * 2)
+    y1 = y2 - (text_h + pad_y * 2)
+
+    # Black box background
+    cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 0, 0), -1)
+
+    # Text in white centered within padding
+    text_x = x1 + pad_x
+    text_y = y1 + pad_y + text_h - 2
+    cv2.putText(frame, text, (text_x, text_y), font, font_scale, (255, 255, 255), thickness, cv2.LINE_AA)
+
+
 def detect_motion(input_video_path, output_dir):
     """
     Analyzes a video file for motion, identifies significant events, and uses an object tracker.
@@ -257,15 +307,15 @@ def detect_motion(input_video_path, output_dir):
 
     analysis_roi_points = local_roi_points.astype(np.int32)
 
-    backSub = cv2.createBackgroundSubtractorKNN(history=500, dist2Threshold=800, detectShadows=True)
+    backSub = cv2.createBackgroundSubtractorKNN(history=500, dist2Threshold=600, detectShadows=True)
     roi_mask = np.zeros((crop_h, crop_w), dtype=np.uint8)
     cv2.fillPoly(roi_mask, [analysis_roi_points], 255)
 
     logger.info(f"[{file_basename}] Starting smart background model pre-training...")
     pre_trained = False
     training_candidate_times = [30, 40, 50, 20]
-    frames_to_sample = 60
-    frames_to_train = 150
+
+    frames_to_train = 5 * int(fps)
     # Validate candidate segment across the entire training window to avoid
     # pretraining on periods with subtle motion.
     frames_to_sample = frames_to_train
@@ -278,7 +328,7 @@ def detect_motion(input_video_path, output_dir):
         cap.set(cv2.CAP_PROP_POS_FRAMES, start_frame)
 
         motion_detected_in_segment = False
-        temp_backSub = cv2.createBackgroundSubtractorKNN(history=50, dist2Threshold=800, detectShadows=True)
+        temp_backSub = cv2.createBackgroundSubtractorKNN(history=50, dist2Threshold=400, detectShadows=True)
 
         for i in range(frames_to_sample):
             ret, frame = cap.read()
@@ -397,7 +447,7 @@ def detect_motion(input_video_path, output_dir):
                     cv2.putText(frame, f"Hvirtka Y={LINE_Y}", (10, LINE_Y - 10),
                             cv2.FONT_HERSHEY_DUPLEX, 1, COLOR_LINE, 1, cv2.LINE_AA)
                     cv2.imwrite(frame_path, frame, [cv2.IMWRITE_JPEG_QUALITY, 85])
-                    insignificant_motion_frames.append(frame_path)
+                    #insignificant_motion_frames.append(frame_path) # disabled to keep frames for further analysis only
                     logger.info(f"[{file_basename}] Saved insignificant motion frame to {frame_path}")
             else:
                 logger.info(f"[{file_basename}]   - Event lasting {duration_seconds:.2f}s is insignificant. Skipping frame extraction.")
@@ -441,7 +491,7 @@ def detect_motion(input_video_path, output_dir):
     for clip_index, (start_frame, end_frame) in enumerate(significant_sub_clips):
         duration_seconds = (end_frame - start_frame) / fps
         is_long_motion = duration_seconds > 4.0
-        padding_seconds_adjusted = 0.5 if is_long_motion else PADDING_SECONDS
+        padding_seconds_adjusted = 1 if is_long_motion else PADDING_SECONDS
         padded_start = max(0, start_frame - int(padding_seconds_adjusted * fps))
         padded_end = min(total_frames, end_frame + int(padding_seconds_adjusted * fps))
 
@@ -539,6 +589,10 @@ def detect_motion(input_video_path, output_dir):
             cv2.putText(frame, f"Hvirtka Y={LINE_Y}", (10, LINE_Y - 10),
                         cv2.FONT_HERSHEY_DUPLEX, 1, COLOR_LINE, 1, cv2.LINE_AA)
 
+            # Draw static event overlay in bottom-right: "<idx>/<total> - MM:SS"
+            current_seconds = int((frame_idx - 1) / fps)
+            draw_event_overlay(frame, clip_index + 1, len(significant_sub_clips), current_seconds)
+
             rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
             event_frames_rgb.append(rgb_frame)
 
@@ -553,6 +607,36 @@ def detect_motion(input_video_path, output_dir):
             persons_down += event_persons_down
         else:
             logger.info(f"[{file_basename}] Event discarded: person in ROI only {person_frames_in_roi} frames (< {PERSON_MIN_FRAMES}).")
+            # Save a representative middle frame for significant-but-no-person events
+            if SEND_INSIGNIFICANT_FRAMES:
+                try:
+                    mid_frame_index = start_frame + (end_frame - start_frame) // 2
+                    cap.set(cv2.CAP_PROP_POS_FRAMES, mid_frame_index)
+                    ret, frame = cap.read()
+                    if ret and frame is not None:
+                        results = object_detection_model.track(frame, imgsz=640, conf=CONF_THRESHOLD, persist=False, verbose=False)
+                        if results[0].boxes.id is not None:
+                            boxes = results[0].boxes.xyxy.cpu().tolist()
+                            clss = results[0].boxes.cls.int().cpu().tolist()
+                            confs = results[0].boxes.conf.float().cpu().tolist()
+                            class_names = object_detection_model.names
+
+                            local_id_counter = 1
+                            for box, cls, conf in zip(boxes, clss, confs):
+                                label_name = class_names[cls]
+                                draw_tracked_box(frame, box, local_id_counter, label_name, conf, soc)
+                                local_id_counter += 1
+
+                        frame_filename = f"{os.path.splitext(file_basename)[0]}_no_person_{mid_frame_index}.jpg"
+                        frame_path = os.path.join(output_dir, frame_filename)
+                        cv2.line(frame, (0, LINE_Y), (orig_w, LINE_Y), COLOR_LINE, 1)
+                        cv2.putText(frame, f"Hvirtka Y={LINE_Y}", (10, LINE_Y - 10),
+                                    cv2.FONT_HERSHEY_DUPLEX, 1, COLOR_LINE, 1, cv2.LINE_AA)
+                        cv2.imwrite(frame_path, frame, [cv2.IMWRITE_JPEG_QUALITY, 85])
+                        #insignificant_motion_frames.append(frame_path) # disabled to keep frames for further analysis only
+                        logger.info(f"[{file_basename}] Saved no_person frame to {frame_path}")
+                except Exception as e:
+                    logger.warning(f"[{file_basename}] Failed to save no_person frame: {e}")
 
     cap.release()
 
