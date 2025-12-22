@@ -446,7 +446,7 @@ def detect_motion(input_video_path, output_dir):
                     date_folder = datetime.now().strftime("%Y%m%d")
                     daily_dir = os.path.join(output_dir, date_folder)
                     os.makedirs(daily_dir, exist_ok=True)
-                    frame_filename = f"{os.path.splitext(file_basename)[0]}_insignificant_{mid_frame_index}.jpg"
+                    frame_filename = f"{input_video_path.split(os.path.sep)[-2][-2:]}H{os.path.splitext(file_basename)[0]}_insignificant_{mid_frame_index}.jpg"
                     frame_path = os.path.join(daily_dir, frame_filename)
                     cv2.line(frame, (0, LINE_Y), (orig_w, LINE_Y), COLOR_LINE, 1)
                     cv2.putText(frame, f"Hvirtka Y={LINE_Y}", (10, LINE_Y - 10),
@@ -636,7 +636,7 @@ def detect_motion(input_video_path, output_dir):
                         date_folder = datetime.now().strftime("%Y%m%d")
                         daily_dir = os.path.join(output_dir, date_folder)
                         os.makedirs(daily_dir, exist_ok=True)
-                        frame_filename = f"{os.path.splitext(file_basename)[0]}_no_person_{mid_frame_index}.jpg"
+                        frame_filename = f"{input_video_path.split(os.path.sep)[-2][-2:]}H{os.path.splitext(file_basename)[0]}_no_person_{mid_frame_index}.jpg"
                         frame_path = os.path.join(daily_dir, frame_filename)
                         cv2.line(frame, (0, LINE_Y), (orig_w, LINE_Y), COLOR_LINE, 1)
                         cv2.putText(frame, f"Hvirtka Y={LINE_Y}", (10, LINE_Y - 10),
