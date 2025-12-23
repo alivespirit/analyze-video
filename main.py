@@ -274,9 +274,12 @@ class FileHandler(FileSystemEventHandler):
             clip_path = None
 
         battery = psutil.sensors_battery()
-        if not battery.power_plugged and battery.percent <= 50:
+        if not battery.power_plugged:
             battery_time_left = time.strftime("%H:%M", time.gmtime(battery.secsleft))
-            video_response += f"\n\U0001FAAB *{battery.percent}% ~{battery_time_left}*"
+            if battery.percent <= 50:
+                video_response += f"\n\U0001FAAB *{battery.percent}% ~{battery_time_left}*"
+            else:
+                video_response += f"\n\U0001F50B *{battery.percent}% ~{battery_time_left}*"
 
         await send_notifications(self.app, video_response, insignificant_frames, clip_path, file_path, file_basename, timestamp_text)
 
