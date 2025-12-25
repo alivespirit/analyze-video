@@ -650,7 +650,8 @@ def detect_motion(input_video_path, output_dir):
     cap.release()
 
     if not all_clip_frames_rgb:
-        logger.info(f"[{file_basename}] No significant events with person in ROI found.")
+        elapsed_time = time.time() - start_time
+        logger.info(f"[{file_basename}] No significant events with person in ROI found. Elapsed time: {elapsed_time:.2f} seconds.")
         return {'status': 'no_significant_motion', 'clip_path': None, 'insignificant_frames': insignificant_motion_frames}
 
     final_clip = ImageSequenceClip(all_clip_frames_rgb, fps=fps)
