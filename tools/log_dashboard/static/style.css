@@ -29,7 +29,7 @@ main{max-width:1200px;margin:0 auto;padding:20px}
 .card summary{cursor:pointer;font-weight:600;margin-bottom:10px;list-style:none}
 .card summary::-webkit-details-marker{display:none}
 .logs{list-style:none;padding:0;margin:0}
-.log{display:grid;grid-template-columns:120px 64px 220px 1fr;gap:8px;padding:10px;border-bottom:1px solid #1d2030}
+.log{display:grid;grid-template-columns:96px 64px 220px 1fr;gap:5px;padding:5px;border-bottom:1px solid #1d2030}
 .log .meta{display:none}
 .log .ts{color:var(--muted)}
 .log .lvl{font-weight:700}
