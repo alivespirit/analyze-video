@@ -241,34 +241,63 @@ def index():
     return tmpl.render(ordered_days=ordered_days, log_dir=LOG_DIR)
 
 
-@app.get("/today")
-def today_alias(
+@app.get("/today", response_class=HTMLResponse)
+def today_view(
     severity: Optional[str] = Query(default=None, description="Filter by severity: INFO/WARNING/ERROR/etc."),
     status: Optional[str] = Query(default=None, description="Filter by final video status: gate_crossing/no_motion/..."),
 ):
-    """Redirects to today's log page. If today's log is missing, redirect to latest available day.
+    """Render today's log page without redirect.
 
-    Preserves optional `severity` and `status` filters as query params.
+    If today's log is missing, shows the latest available day.
     """
     days = list_log_files()
     today_str = date.today().strftime("%Y-%m-%d")
-    target_day = None
-
-    if today_str in days:
-        target_day = today_str
-    elif days:
-        # Fallback to latest available day
-        target_day = sorted(days.keys())[-1]
-    else:
+    if not days:
         raise HTTPException(status_code=404, detail="No log files available")
 
-    q = []
+    day = today_str if today_str in days else sorted(days.keys())[-1]
+    path = days[day]
+
+    entries_all = parse_log_lines(path, day)
+    metrics_all = collect_metrics(entries_all)
+
+    entries = entries_all
     if severity:
-        q.append(f"severity={severity}")
+        entries = [e for e in entries if e["level"] == severity]
     if status:
-        q.append(f"status={status}")
-    qs = ("?" + "&".join(q)) if q else ""
-    return RedirectResponse(url=f"/day/{target_day}{qs}")
+        spv = metrics_all["status_per_video"]
+        entries = [e for e in entries if e.get("video") and spv.get(e["video"]) == status]
+
+    metrics = collect_metrics(entries)
+
+    def color_for(video: str) -> str:
+        h = (abs(hash(video)) % 360)
+        return f"hsl({h}, 70%, 70%)"
+
+    videos_present = {e["video"] for e in entries if e.get("video")}
+    video_colors = {v: color_for(v) for v in videos_present}
+
+    ptpv = metrics.get("processing_time_per_video", {})
+    fst = metrics.get("first_seen_ts_per_video", {})
+    ordered_videos = sorted(ptpv.keys(), key=lambda v: (fst.get(v) or datetime.min, v))
+    chart_pairs = [(v, ptpv[v]) for v in ordered_videos]
+
+    tmpl = env.get_template("day.html")
+    return tmpl.render(
+        day=day,
+        severity=severity,
+        status=status,
+        entries=entries,
+        metrics=metrics,
+        chart_pairs=chart_pairs,
+        levels=severity_levels(),
+        statuses=sorted(metrics_all["status_counts"].keys()),
+        video_colors=video_colors,
+        status_colors=STATUS_COLORS,
+        statuses_present=sorted(metrics["status_counts"].keys()),
+        total_videos_all=metrics_all.get("videos_total", 0),
+        log_dir=LOG_DIR,
+    )
 
 
 @app.get("/day/{day}", response_class=HTMLResponse)

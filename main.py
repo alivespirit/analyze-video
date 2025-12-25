@@ -382,7 +382,7 @@ class FileHandler(FileSystemEventHandler):
             analysis_result = await current_loop.run_in_executor(
                 io_executor, analyze_video, motion_result, file_path
             )
-            
+
             video_response = analysis_result['response']
             insignificant_frames = analysis_result['insignificant_frames']
             clip_path = analysis_result.get('clip_path')

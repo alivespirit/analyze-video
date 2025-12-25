@@ -71,12 +71,13 @@ nav a{color:#9fb0ff;text-decoration:none}
 
   /* Logs: stack entries with clearer hierarchy */
   .log{grid-template-columns:1fr;gap:6px;padding:10px}
-  .log .meta{display:flex;align-items:center;gap:8px;flex-wrap:nowrap}
+  .log .meta{display:flex;align-items:baseline;gap:8px;flex-wrap:nowrap}
   .log .meta .ts,.log .meta .lvl,.log .meta .video-inline{white-space:nowrap}
   .log > .ts, .log > .lvl{display:none}
   .log > .video{display:none}
   .log .ts{color:var(--muted)}
   .log .video{margin-top:2px}
+  .log .meta .video-inline{margin-top:0}
   .log .msg{margin-top:2px}
 
   /* Table: full width and wrap content */
