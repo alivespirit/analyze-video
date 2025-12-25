@@ -206,7 +206,7 @@ class NetworkErrorFilter(logging.Filter):
 
 # --- Logging Setup ---
 log_formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s', datefmt='%Y-%m-%d %H:%M:%S')
-log_file = os.path.join(LOG_PATH, "video_processor.log")  # No date in filename; handler adds it
+log_file = os.path.join(LOG_PATH, "video_processor.log")
 file_handler = CustomTimedRotatingFileHandler(
     log_file, when="midnight", interval=1, backupCount=30, encoding='utf8', utc=False
 )

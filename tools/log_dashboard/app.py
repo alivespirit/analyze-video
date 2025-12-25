@@ -4,7 +4,7 @@ from datetime import datetime, date
 from typing import List, Dict, Optional
 
 from fastapi import FastAPI, Query, HTTPException
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from jinja2 import Environment, FileSystemLoader, select_autoescape
 
@@ -239,6 +239,36 @@ def index():
 
     tmpl = env.get_template("index.html")
     return tmpl.render(ordered_days=ordered_days, log_dir=LOG_DIR)
+
+
+@app.get("/today")
+def today_alias(
+    severity: Optional[str] = Query(default=None, description="Filter by severity: INFO/WARNING/ERROR/etc."),
+    status: Optional[str] = Query(default=None, description="Filter by final video status: gate_crossing/no_motion/..."),
+):
+    """Redirects to today's log page. If today's log is missing, redirect to latest available day.
+
+    Preserves optional `severity` and `status` filters as query params.
+    """
+    days = list_log_files()
+    today_str = date.today().strftime("%Y-%m-%d")
+    target_day = None
+
+    if today_str in days:
+        target_day = today_str
+    elif days:
+        # Fallback to latest available day
+        target_day = sorted(days.keys())[-1]
+    else:
+        raise HTTPException(status_code=404, detail="No log files available")
+
+    q = []
+    if severity:
+        q.append(f"severity={severity}")
+    if status:
+        q.append(f"status={status}")
+    qs = ("?" + "&".join(q)) if q else ""
+    return RedirectResponse(url=f"/day/{target_day}{qs}")
 
 
 @app.get("/day/{day}", response_class=HTMLResponse)
