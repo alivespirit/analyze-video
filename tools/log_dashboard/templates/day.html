@@ -7,12 +7,15 @@
   <link rel="stylesheet" href="/static/style.css" />
 </head>
 <body>
-  <header>
+  <header id="page-top">
     <h1>Logs for {{ day }}</h1>
     <nav><a href="/">← Back</a></nav>
   </header>
 
   <main>
+    <!-- Floating action buttons (mobile): jump to end / top -->
+    <a href="#page-bottom" class="fab" aria-label="Jump to end">↓</a>
+    <a href="#page-top" class="fab-top" aria-label="Back to top">↑</a>
     <section class="controls">
       <form method="get" class="filters">
         <label>Severity:
@@ -92,6 +95,7 @@
     <details class="card">
       <summary>Per-Video Summary</summary>
       {% if metrics.status_per_video %}
+        <div class="table-wrap">
         <table class="table">
           <thead>
             <tr>
@@ -128,6 +132,7 @@
             {% endfor %}
           </tbody>
         </table>
+        </div>
       {% else %}
         <p>No video summaries.</p>
       {% endif %}
@@ -195,15 +200,25 @@
         <ul class="logs">
           {% for e in entries %}
           <li class="log {{ e.level|lower }}"{% if e.video and not ns.seen.get(e.video) %} id="log-{{ e.video }}"{% set _ = ns.seen.update({e.video: True}) %}{% endif %}>
-            <span class="ts">{{ e.ts.strftime('%Y-%m-%d %H:%M:%S') }}</span>
+            <div class="meta">
+              <span class="ts">{{ e.ts.strftime('%H:%M:%S') }}</span>
+              <span class="lvl">{{ e.level }}</span>
+              {% if e.video %}
+                {% set vc = video_colors.get(e.video, '#9fb0ff') %}
+                {% set parts = e.video.split('.') %}
+                {% set base = parts[:-1] | join('.') %}
+                <span class="video video-inline" style="color: {{ vc }}">{{ base }}</span>
+              {% endif %}
+            </div>
+            <span class="ts">{{ e.ts.strftime('%H:%M:%S') }}</span>
             <span class="lvl">{{ e.level }}</span>
             {% if e.video %}
               {% set vc = video_colors.get(e.video, '#9fb0ff') %}
-              <span class="video" style="color: {{ vc }}">{{ e.video }}</span>
+              <div class="video" style="color: {{ vc }}">{{ e.video }}</div>
             {% else %}
-              <span class="video none">—</span>
+              <div class="video none">—</div>
             {% endif %}
-            <span class="msg">{{ e.content }}</span>
+            <div class="msg">{{ e.content }}</div>
           </li>
           {% endfor %}
         </ul>
@@ -212,5 +227,7 @@
       {% endif %}
     </section>
   </main>
+  <!-- Target anchor for jump-to-end -->
+  <div id="page-bottom"></div>
 </body>
 </html>

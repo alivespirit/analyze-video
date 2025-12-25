@@ -354,7 +354,7 @@ class FileHandler(FileSystemEventHandler):
         file_path = event.src_path
         file_basename = os.path.basename(file_path)
         timestamp_text = f"{file_path.split(os.path.sep)[-2][-2:]}H{file_basename[:3]}"
-        self.logger.info(f"[{file_basename}] New file detected: {file_path}")
+        self.logger.info(f"[{file_basename}] New file detected: {file_path.split(os.path.sep)[-2]}/{file_basename}")
 
         try:
             await self.wait_for_file_stable(file_path, file_basename)
