@@ -49,23 +49,73 @@ load_dotenv()  ## load all the environment variables
 LOG_PATH = os.getenv("LOG_PATH", default="")
 
 class CustomTimedRotatingFileHandler(TimedRotatingFileHandler):
-    def doRollover(self):
+    def rotation_filename(self, default_name):
         """
-        Overrides the default rollover to rename log files with a custom format.
-        e.g., from `video_processor.log.2025-05-25` to `video_processor_2025-05-25.log`.
+        Produce a custom rotated filename without a post-rename step.
+
+        Default TimedRotatingFileHandler builds `default_name` like:
+        <dir>/<basename>.YYYY-MM-DD (for when="midnight")
+
+        We transform it to:
+        <dir>/<basename_without_ext>_YYYY-MM-DD.log
         """
-        super().doRollover()
-        # Find the most recent rotated file
-        dirname, basename = os.path.split(self.baseFilename)
-        for filename in os.listdir(dirname or "."):
-            if filename.startswith(basename + "."):
-                # e.g., video_processor.log.2025-05-25
-                old_path = os.path.join(dirname, filename)
-                # e.g., video_processor_2025-05-25.log
-                new_name = filename.replace(".log.", "_") + ".log"
-                new_path = os.path.join(dirname, new_name)
-                if not os.path.exists(new_path):
-                    os.rename(old_path, new_path)
+        dir_name, base_name = os.path.split(self.baseFilename)
+        # Extract the date suffix from default_name (everything after "<base_name>.")
+        _, default_base = os.path.split(default_name)
+        if default_base.startswith(base_name + "."):
+            suffix = default_base[len(base_name) + 1:]
+        else:
+            # Fallback: use the default base as-is (unlikely, but safe)
+            suffix = default_base
+
+        # Remove trailing .log only if present
+        base_no_ext = base_name[:-4] if base_name.endswith(".log") else base_name
+        return os.path.join(dir_name, f"{base_no_ext}_{suffix}.log")
+
+    def getFilesToDelete(self):
+        """
+        Return the list of old rotated files to delete, honoring backupCount.
+
+        Supports both patterns to ensure cleanup works even if older runs used
+        the default naming or the custom naming:
+          - <basename>.YYYY-MM-DD
+          - <basename_without_ext>_YYYY-MM-DD.log
+        """
+        if self.backupCount <= 0:
+            return []
+
+        dir_name, base_name = os.path.split(self.baseFilename)
+        base_no_ext = base_name[:-4] if base_name.endswith(".log") else base_name
+
+        candidates = []
+        try:
+            for fname in os.listdir(dir_name or "."):
+                # Pattern 1: default rotation `<basename>.YYYY-MM-DD`
+                if fname.startswith(base_name + "."):
+                    suffix = fname[len(base_name) + 1:]
+                    if hasattr(self, "extMatch") and self.extMatch and self.extMatch.match(suffix):
+                        candidates.append(os.path.join(dir_name, fname))
+                        continue
+
+                # Pattern 2: custom rotation `<basename_without_ext>_YYYY-MM-DD.log`
+                if fname.startswith(base_no_ext + "_") and fname.endswith(".log"):
+                    suffix = fname[len(base_no_ext) + 1:-4]
+                    if hasattr(self, "extMatch") and self.extMatch and self.extMatch.match(suffix):
+                        candidates.append(os.path.join(dir_name, fname))
+        except FileNotFoundError:
+            return []
+
+        # Sort by modification time (oldest first) for robust cleanup
+        try:
+            candidates.sort(key=lambda p: os.path.getmtime(p))
+        except Exception:
+            # Fallback to lexicographic sort if mtime fails
+            candidates.sort()
+
+        if len(candidates) <= self.backupCount:
+            return []
+        # Delete oldest files beyond backupCount
+        return candidates[: len(candidates) - self.backupCount]
 
 # Custom filter to suppress stacktraces for network errors while keeping the error messages
 class NetworkErrorFilter(logging.Filter):
