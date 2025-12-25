@@ -272,6 +272,11 @@ def day_view(
 
     videos_present = {e["video"] for e in entries if e.get("video")}
     video_colors = {v: color_for(v) for v in videos_present}
+    # Build deterministic chart order: by first-seen timestamp, then name
+    ptpv = metrics.get("processing_time_per_video", {})
+    fst = metrics.get("first_seen_ts_per_video", {})
+    ordered_videos = sorted(ptpv.keys(), key=lambda v: (fst.get(v) or datetime.min, v))
+    chart_pairs = [(v, ptpv[v]) for v in ordered_videos]
     tmpl = env.get_template("day.html")
     return tmpl.render(
         day=day,
@@ -279,6 +284,7 @@ def day_view(
         status=status,
         entries=entries,
         metrics=metrics,
+        chart_pairs=chart_pairs,
         levels=severity_levels(),
         statuses=sorted(metrics_all["status_counts"].keys()),
         video_colors=video_colors,

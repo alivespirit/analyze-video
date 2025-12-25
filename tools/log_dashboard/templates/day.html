@@ -135,9 +135,8 @@
 
     <section class="card">
       <h2>Processing Times Chart</h2>
-      {% set data = metrics.processing_time_per_video %}
-      {% if data and data|length > 0 %}
-        {% set pairs = data.items()|list %}
+      {% if chart_pairs and chart_pairs|length > 0 %}
+        {% set pairs = chart_pairs %}
         {% set maxv = (pairs|map(attribute=1)|list|max) %}
         {% set n = pairs|length %}
         <!-- Normalize to a fixed viewBox and space bars across full width -->

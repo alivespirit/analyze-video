@@ -15,7 +15,6 @@ from watchdog.observers.polling import PollingObserver as Observer
 
 from logging.handlers import TimedRotatingFileHandler
 
-from telegram_notification import button_callback, send_notifications
 
 RESTART_REQUESTED = False
 MAIN_SCRIPT_PATH = os.path.abspath(__file__)
@@ -42,6 +41,70 @@ class MainScriptChangeHandler(FileSystemEventHandler):
             RESTART_REQUESTED = True
             self.stop_event.set() # Signal all other components to stop
             self.triggered_restart = True # Prevent further triggers from this handler instance
+
+class LogDashboardChangeHandler(FileSystemEventHandler):
+    def __init__(self, runner, exts=(".py", ".html", ".css")):
+        self.runner = runner
+        self.exts = exts
+        self._last_restart = 0
+
+    def on_modified(self, event):
+        if event.is_directory:
+            return
+        if not any(event.src_path.endswith(ext) for ext in self.exts):
+            return
+        # Debounce rapid successive changes
+        now = time.time()
+        if now - self._last_restart < 0.5:
+            return
+        self._last_restart = now
+        logger.info(f"Log dashboard change detected in {event.src_path}. Restarting dashboard...")
+        try:
+            self.runner.restart()
+            logger.info("Log dashboard restarted.")
+        except Exception as e:
+            logger.error(f"Failed to restart log dashboard: {e}", exc_info=True)
+
+class DashboardRunner:
+    def __init__(self, app, host: str, port: int, log_level: str = "info"):
+        self.app = app
+        self.host = host
+        self.port = port
+        self.log_level = log_level
+        self.server = None
+        self.thread = None
+
+    def start(self):
+        import uvicorn
+        config = uvicorn.Config(self.app, host=self.host, port=self.port, log_level=self.log_level)
+        self.server = uvicorn.Server(config)
+
+        def _run_dashboard():
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            self.server.run()
+
+        self.thread = threading.Thread(target=_run_dashboard, name="LogDashboard", daemon=True)
+        self.thread.start()
+        logger.info(f"Log dashboard started at http://{self.host}:{self.port}")
+
+    def stop(self):
+        if self.server is not None:
+            try:
+                self.server.should_exit = True
+            except Exception:
+                pass
+        if self.thread and self.thread.is_alive():
+            try:
+                self.thread.join(timeout=3.0)
+            except Exception:
+                pass
+        self.server = None
+        self.thread = None
+
+    def restart(self):
+        self.stop()
+        self.start()
 
 load_dotenv()  ## load all the environment variables
 
@@ -210,6 +273,7 @@ if not os.path.exists(OBJECT_DETECTION_MODEL_PATH):
 # Import after .env and logging are configured to ensure modules read env vars
 from analyze_video import analyze_video
 from detect_motion import detect_motion
+from telegram_notification import button_callback, send_notifications
 
 
 # Initialize the Application
@@ -522,24 +586,12 @@ async def main():
     """
     stop_event = asyncio.Event()
     # Optionally start the log dashboard in a background thread
-    dashboard_server = None
-    dashboard_thread = None
+    dashboard_runner = None
     if ENABLE_LOG_DASHBOARD:
         try:
             from tools.log_dashboard.app import app as log_dashboard_app
-            import uvicorn
-
-            config = uvicorn.Config(log_dashboard_app, host=LOG_DASHBOARD_HOST, port=LOG_DASHBOARD_PORT, log_level="info")
-            dashboard_server = uvicorn.Server(config)
-
-            def _run_dashboard():
-                loop = asyncio.new_event_loop()
-                asyncio.set_event_loop(loop)
-                dashboard_server.run()
-
-            dashboard_thread = threading.Thread(target=_run_dashboard, name="LogDashboard", daemon=True)
-            dashboard_thread.start()
-            logger.info(f"Log dashboard started at http://{LOG_DASHBOARD_HOST}:{LOG_DASHBOARD_PORT}")
+            dashboard_runner = DashboardRunner(log_dashboard_app, LOG_DASHBOARD_HOST, LOG_DASHBOARD_PORT, log_level="info")
+            dashboard_runner.start()
         except Exception as e:
             logger.error(f"Failed to start log dashboard: {e}")
     global RESTART_REQUESTED # Allow main to modify it if needed, though not strictly necessary here
@@ -554,6 +606,35 @@ async def main():
     )
 
     tasks = {telegram_task, watcher_task, main_script_monitor_task}
+
+    # Add log dashboard watcher to auto-restart the dashboard on changes
+    if ENABLE_LOG_DASHBOARD and dashboard_runner is not None:
+        try:
+            log_dashboard_dir = os.path.join(SCRIPT_DIR, "tools", "log_dashboard")
+            if os.path.isdir(log_dashboard_dir):
+                observer = Observer()
+                observer.schedule(LogDashboardChangeHandler(dashboard_runner), path=log_dashboard_dir, recursive=True)
+                observer.start()
+                logger.info(f"Watching log dashboard directory for changes: {log_dashboard_dir}")
+
+                async def _monitor_dashboard_observer(stop_event):
+                    try:
+                        while not stop_event.is_set():
+                            if not observer.is_alive():
+                                logger.error("Log dashboard watcher died unexpectedly.")
+                                break
+                            await asyncio.sleep(1)
+                    finally:
+                        try:
+                            observer.stop()
+                            observer.join(timeout=2.0)
+                        except Exception:
+                            pass
+
+                dashboard_watch_task = asyncio.create_task(_monitor_dashboard_observer(stop_event), name="LogDashboardWatcher")
+                tasks.add(dashboard_watch_task)
+        except Exception as e:
+            logger.error(f"Failed to initialize log dashboard watcher: {e}")
     logger.info("Application started. Press Ctrl+C to exit. Will auto-restart on any *.py change in SCRIPT_DIR.")
 
     # Monitor tasks
@@ -637,11 +718,9 @@ async def main():
         logger.info("All application tasks have finished.")
 
         # Stop dashboard if running
-        if dashboard_server is not None:
+        if dashboard_runner is not None:
             try:
-                dashboard_server.should_exit = True
-                if dashboard_thread and dashboard_thread.is_alive():
-                    dashboard_thread.join(timeout=3.0)
+                dashboard_runner.stop()
                 logger.info("Log dashboard stopped.")
             except Exception as e_dash:
                 logger.error(f"Error stopping log dashboard: {e_dash}")
