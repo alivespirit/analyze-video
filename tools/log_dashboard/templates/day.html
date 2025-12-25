@@ -1,0 +1,217 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Logs for {{ day }}</title>
+  <link rel="stylesheet" href="/static/style.css" />
+</head>
+<body>
+  <header>
+    <h1>Logs for {{ day }}</h1>
+    <nav><a href="/">← Back</a></nav>
+  </header>
+
+  <main>
+    <section class="controls">
+      <form method="get" class="filters">
+        <label>Severity:
+          <select name="severity">
+            <option value="" {% if not severity %}selected{% endif %}>All</option>
+            {% for lvl in levels %}
+            <option value="{{ lvl }}" {% if severity==lvl %}selected{% endif %}>{{ lvl }}</option>
+            {% endfor %}
+          </select>
+        </label>
+        <label>Status:
+          <select name="status">
+            <option value="" {% if not status %}selected{% endif %}>All</option>
+            {% for s in statuses %}
+            <option value="{{ s }}" {% if status==s %}selected{% endif %}>{{ s }}</option>
+            {% endfor %}
+          </select>
+        </label>
+        <button type="submit">Apply</button>
+      </form>
+    </section>
+
+    <section class="grid">
+      <div class="card">
+        <h2>Status Counts</h2>
+        {% if severity or status %}
+          <p class="muted">Filtered videos: <strong>{{ metrics.videos_total }}</strong> (Total today: <strong>{{ total_videos_all }}</strong>)</p>
+        {% else %}
+          <p class="muted">Total videos: <strong>{{ total_videos_all }}</strong></p>
+        {% endif %}
+        {% if metrics.status_counts %}
+          <ul class="stats">
+            {% for k,v in metrics.status_counts.items() %}
+              <li><span class="tag">{{ k }}</span> <strong>{{ v }}</strong></li>
+            {% endfor %}
+          </ul>
+        {% else %}
+          <p>No status entries.</p>
+        {% endif %}
+      </div>
+
+      <div class="card">
+        <h2>Gate Crossings</h2>
+        <ul class="stats">
+          <li><span class="tag">up</span> <strong>{{ metrics.gate_counts.up }}</strong></li>
+          <li><span class="tag">down</span> <strong>{{ metrics.gate_counts.down }}</strong></li>
+        </ul>
+      </div>
+
+      <div class="card">
+        <h2>Full Processing Time</h2>
+        {% if metrics.full_processing_stats %}
+          <ul class="stats">
+            <li>min: <strong>{{ '%.2f'|format(metrics.full_processing_stats.min) }}s</strong></li>
+            <li>avg: <strong>{{ '%.2f'|format(metrics.full_processing_stats.avg) }}s</strong></li>
+            <li>max: <strong>{{ '%.2f'|format(metrics.full_processing_stats.max) }}s</strong></li>
+          </ul>
+        {% else %}
+          <p>No full processing timings.</p>
+        {% endif %}
+      </div>
+
+      <div class="card">
+        <h2>Motion Detection Time</h2>
+        {% if metrics.motion_detection_stats %}
+          <ul class="stats">
+            <li>min: <strong>{{ '%.2f'|format(metrics.motion_detection_stats.min) }}s</strong></li>
+            <li>avg: <strong>{{ '%.2f'|format(metrics.motion_detection_stats.avg) }}s</strong></li>
+            <li>max: <strong>{{ '%.2f'|format(metrics.motion_detection_stats.max) }}s</strong></li>
+          </ul>
+        {% else %}
+          <p>No motion detection timing entries.</p>
+        {% endif %}
+      </div>
+    </section>
+
+    <details class="card">
+      <summary>Per-Video Summary</summary>
+      {% if metrics.status_per_video %}
+        <table class="table">
+          <thead>
+            <tr>
+              <th>Start</th>
+              <th>Video</th>
+              <th>Status</th>
+              <th>Raw Events</th>
+              <th>Processing Time (s)</th>
+            </tr>
+          </thead>
+          <tbody>
+            {% for vid, status in metrics.status_per_video.items() %}
+            <tr>
+              <td>
+                {% set t = metrics.first_seen_ts_per_video.get(vid) %}
+                {% if t %}
+                  {{ t.strftime('%H:%M:%S') }}
+                {% else %}
+                  —
+                {% endif %}
+              </td>
+              <td><a href="#log-{{ vid }}" class="link-log">{{ vid }}</a></td>
+              <td><span class="tag">{{ status }}</span></td>
+              <td>{{ metrics.raw_events_per_video.get(vid, 0) }}</td>
+              <td>
+                {% set p = metrics.processing_time_per_video.get(vid) %}
+                {% if p %}
+                  {{ '%.2f'|format(p) }}
+                {% else %}
+                  —
+                {% endif %}
+              </td>
+            </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      {% else %}
+        <p>No video summaries.</p>
+      {% endif %}
+    </details>
+
+    <section class="card">
+      <h2>Processing Times Chart</h2>
+      {% set data = metrics.processing_time_per_video %}
+      {% if data and data|length > 0 %}
+        {% set pairs = data.items()|list %}
+        {% set maxv = (pairs|map(attribute=1)|list|max) %}
+        {% set n = pairs|length %}
+        <!-- Normalize to a fixed viewBox and space bars across full width -->
+        {% set vbw = 1000 %}
+        {% set vbh = 240 %}
+        {% set left = 60 %}
+        {% set right = 20 %}
+        {% set axisW = vbw - left - right %}
+        {% set step = axisW / n %}
+        {% set barW = (step * 0.6) if step * 0.6 < 40 else 40 %}
+        <div class="chart-wrap">
+          <svg class="chart" width="100%" height="240" viewBox="0 0 {{ vbw }} {{ vbh }}">
+            <!-- Axis -->
+            <line x1="{{ left }}" y1="200" x2="{{ vbw - right }}" y2="200" stroke="#444" />
+            <line x1="{{ left }}" y1="20" x2="{{ left }}" y2="200" stroke="#444" />
+            <!-- Bars evenly spaced across full width -->
+            {% for i in range(n) %}
+              {% set vid = pairs[i][0] %}
+              {% set val = pairs[i][1] %}
+              {% set st = metrics.status_per_video.get(vid, 'unknown') %}
+              {% set col = status_colors.get(st, '#3b82f6') %}
+              {% set x = left + i * step + (step - barW) / 2 %}
+              {% set h = (val / maxv) * 160 %}
+              {% set y = 200 - h %}
+              <a href="#log-{{ vid }}">
+                <rect x="{{ x }}" y="{{ y }}" width="{{ barW }}" height="{{ h }}" fill="{{ col }}">
+                  <title>{{ vid }} ({{ '%.2f'|format(val) }}s)</title>
+                </rect>
+              </a>
+              <line x1="{{ left + i * step + step / 2 }}" y1="200" x2="{{ left + i * step + step / 2 }}" y2="204" stroke="#444" />
+            {% endfor %}
+            <!-- Y labels -->
+            <text x="6" y="200" font-size="10" fill="#a8adc0">0</text>
+            <text x="6" y="36" font-size="10" fill="#a8adc0">{{ '%.1f'|format(maxv) }}</text>
+          </svg>
+        </div>
+        {% if statuses_present and statuses_present|length > 0 %}
+        <div class="chart-legend">
+          <ul>
+            {% for s in statuses_present %}
+              {% set col = status_colors.get(s, '#3b82f6') %}
+              <li class="legend-item"><span class="legend-chip" style="background: {{ col }}"></span> {{ s }}</li>
+            {% endfor %}
+          </ul>
+        </div>
+        {% endif %}
+      {% else %}
+        <p>No processing time data.</p>
+      {% endif %}
+    </section>
+
+    <section class="card">
+      <h2>Log Entries{% if severity %} ({{ severity }}){% endif %}</h2>
+      {% if entries %}
+        {% set ns = namespace(seen={}) %}
+        <ul class="logs">
+          {% for e in entries %}
+          <li class="log {{ e.level|lower }}"{% if e.video and not ns.seen.get(e.video) %} id="log-{{ e.video }}"{% set _ = ns.seen.update({e.video: True}) %}{% endif %}>
+            <span class="ts">{{ e.ts.strftime('%Y-%m-%d %H:%M:%S') }}</span>
+            <span class="lvl">{{ e.level }}</span>
+            {% if e.video %}
+              {% set vc = video_colors.get(e.video, '#9fb0ff') %}
+              <span class="video" style="color: {{ vc }}">{{ e.video }}</span>
+            {% else %}
+              <span class="video none">—</span>
+            {% endif %}
+            <span class="msg">{{ e.content }}</span>
+          </li>
+          {% endfor %}
+        </ul>
+      {% else %}
+        <p>No entries for this day and filter.</p>
+      {% endif %}
+    </section>
+  </main>
+</body>
+</html>

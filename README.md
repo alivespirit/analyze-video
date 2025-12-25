@@ -172,3 +172,44 @@ pip install -r requirements.txt
 - **ROI:** Modify `roi.json` to change the monitored area.
 - **Object Detection Model:** Replace the contents of the `best_openvino_model` directory with your own exported YOLOv11 OpenVINO model.
   - Follow instructions in [tools/finetuning/](tools/finetuning/) to train your own model if needed.
+
+---
+
+## Log Dashboard
+
+A lightweight web dashboard that reads existing log files and provides per-day insights and a readable log viewer.
+
+- Per-day views: timestamp, severity, video basename, message
+- Filters: Severity and Status (`no_motion`, `gate_crossing`, `no_significant_motion`, `error`)
+- Status Counts with totals and filtered counts
+- Collapsible Per-Video Summary: Start time (first “New file detected”), status, raw events, processing time (prefers motion detection; falls back to full processing)
+- Processing Times Chart: bars evenly spaced, colored by status with legend; click a bar to jump to the first log entry for that video
+- Stable per-video colors in the log list for quick visual grouping
+- “Available Days” page shows today first, then past days in descending order
+
+### Enable from main.py
+
+Set in `.env`:
+
+```bash
+ENABLE_LOG_DASHBOARD=true
+LOG_DASHBOARD_PORT=8000        # optional, defaults to 8000
+LOG_DASHBOARD_HOST=0.0.0.0     # optional, defaults to 0.0.0.0
+```
+
+With `ENABLE_LOG_DASHBOARD=true`, the dashboard starts in a background thread and stops automatically on graceful shutdown. It will be reachable at `http://<host>:<port>` on your LAN.
+
+### Standalone run
+
+You can also run it independently:
+
+```bash
+python -m uvicorn tools.log_dashboard.app:app --port 8000 --reload
+```
+
+Optional configuration:
+
+- `LOG_PATH`: directory containing `video_processor.log` and rotated files
+- `LOG_BASENAME`: default `video_processor.log`
+
+See [tools/log_dashboard/README.md](tools/log_dashboard/README.md) for details.

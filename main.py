@@ -5,6 +5,7 @@ import logging
 import sys
 import time
 import psutil
+import threading
 
 from dotenv import load_dotenv
 from telegram.ext import Application, CallbackQueryHandler
@@ -14,8 +15,6 @@ from watchdog.observers.polling import PollingObserver as Observer
 
 from logging.handlers import TimedRotatingFileHandler
 
-from analyze_video import analyze_video
-from detect_motion import detect_motion
 from telegram_notification import button_callback, send_notifications
 
 RESTART_REQUESTED = False
@@ -47,6 +46,9 @@ class MainScriptChangeHandler(FileSystemEventHandler):
 load_dotenv()  ## load all the environment variables
 
 LOG_PATH = os.getenv("LOG_PATH", default="")
+ENABLE_LOG_DASHBOARD = os.getenv("ENABLE_LOG_DASHBOARD", "false").lower() == "true"
+LOG_DASHBOARD_PORT = int(os.getenv("LOG_DASHBOARD_PORT", "8000"))
+LOG_DASHBOARD_HOST = os.getenv("LOG_DASHBOARD_HOST", "0.0.0.0")
 
 class CustomTimedRotatingFileHandler(TimedRotatingFileHandler):
     def rotation_filename(self, default_name):
@@ -204,6 +206,10 @@ if not os.path.exists(OBJECT_DETECTION_MODEL_PATH):
     logger.critical(f"ERROR: OBJECT_DETECTION_MODEL_PATH '{OBJECT_DETECTION_MODEL_PATH}' does not exist. Exiting.")
     exit(1)
 # -----------------------------------
+
+# Import after .env and logging are configured to ensure modules read env vars
+from analyze_video import analyze_video
+from detect_motion import detect_motion
 
 
 # Initialize the Application
@@ -515,6 +521,27 @@ async def main():
     the self-restart mechanism if the main script is modified.
     """
     stop_event = asyncio.Event()
+    # Optionally start the log dashboard in a background thread
+    dashboard_server = None
+    dashboard_thread = None
+    if ENABLE_LOG_DASHBOARD:
+        try:
+            from tools.log_dashboard.app import app as log_dashboard_app
+            import uvicorn
+
+            config = uvicorn.Config(log_dashboard_app, host=LOG_DASHBOARD_HOST, port=LOG_DASHBOARD_PORT, log_level="info")
+            dashboard_server = uvicorn.Server(config)
+
+            def _run_dashboard():
+                loop = asyncio.new_event_loop()
+                asyncio.set_event_loop(loop)
+                dashboard_server.run()
+
+            dashboard_thread = threading.Thread(target=_run_dashboard, name="LogDashboard", daemon=True)
+            dashboard_thread.start()
+            logger.info(f"Log dashboard started at http://{LOG_DASHBOARD_HOST}:{LOG_DASHBOARD_PORT}")
+        except Exception as e:
+            logger.error(f"Failed to start log dashboard: {e}")
     global RESTART_REQUESTED # Allow main to modify it if needed, though not strictly necessary here
     RESTART_REQUESTED = False # Ensure it's reset if main is somehow called again in same process (unlikely)
 
@@ -608,6 +635,16 @@ async def main():
                  logger.info(f"Task '{task_name}' finished shutdown cleanly.")
 
         logger.info("All application tasks have finished.")
+
+        # Stop dashboard if running
+        if dashboard_server is not None:
+            try:
+                dashboard_server.should_exit = True
+                if dashboard_thread and dashboard_thread.is_alive():
+                    dashboard_thread.join(timeout=3.0)
+                logger.info("Log dashboard stopped.")
+            except Exception as e_dash:
+                logger.error(f"Error stopping log dashboard: {e_dash}")
 
         if RESTART_REQUESTED:
             logger.info("Fast shutdown for restart: Not waiting for current analysis to finish.")

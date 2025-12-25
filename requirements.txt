@@ -9,3 +9,6 @@ psutil
 ultralytics
 openvino
 teslapy
+fastapi
+uvicorn
+jinja2

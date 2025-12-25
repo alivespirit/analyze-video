@@ -1,0 +1,33 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Analyze-Video Logs</title>
+  <link rel="stylesheet" href="/static/style.css" />
+</head>
+<body>
+  <header>
+    <h1>Analyze-Video Logs</h1>
+    <p>Log directory: <strong>{{ log_dir }}</strong></p>
+  </header>
+
+  <main>
+    {% if ordered_days and ordered_days|length > 0 %}
+      <section class="card">
+        <h2>Available Days</h2>
+        <ul class="days">
+        {% for d, p in ordered_days %}
+          <li><a href="/day/{{ d }}">{{ d }}</a></li>
+        {% endfor %}
+        </ul>
+      </section>
+    {% else %}
+      <section class="card">
+        <h2>No log files found</h2>
+        <p>Ensure logs are in the directory and named like <code>video_processor.log</code> or <code>video_processor_YYYY-MM-DD.log</code>.</p>
+      </section>
+    {% endif %}
+  </main>
+</body>
+</html>
