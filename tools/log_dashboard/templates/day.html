@@ -212,7 +212,7 @@
 
     {% if video_src %}
     <section class="card" id="player">
-      <h2>Video Player{% if play %} — {{ play }}{% endif %}</h2>
+      <h2>{% if play %}{{ play }}{% endif %}</h2>
       <div class="video-wrap">
         <video class="video-embed" controls preload="metadata" src="{{ video_src }}">
           Your browser does not support the video tag.
@@ -260,6 +260,8 @@
             {% for i in range(n) %}
               {% set vid = pairs[i][0] %}
               {% set val = pairs[i][1] %}
+              {% set t = metrics.first_seen_ts_per_video.get(vid) %}
+              {% set hour = t.strftime('%H') if t else None %}
               {% set st = metrics.status_per_video.get(vid, 'unknown') %}
               {% set col = status_colors.get(st, '#3b82f6') %}
               {% set x = left + i * step + (step - barW) / 2 %}
@@ -271,6 +273,18 @@
                 </rect>
               </a>
               <line x1="{{ left + i * step + step / 2 }}" y1="{{ yBottom }}" x2="{{ left + i * step + step / 2 }}" y2="{{ yBottom + 4 }}" stroke="#444" />
+              {% if not loop.last %}
+                {% set next_vid = pairs[i + 1][0] %}
+                {% set t_next = metrics.first_seen_ts_per_video.get(next_vid) %}
+                {% set next_hour = t_next.strftime('%H') if t_next else None %}
+                {% if hour is not none and next_hour is not none and next_hour != hour %}
+                  <!-- Hour boundary line (between bars i and i+1) -->
+                  {% set x_sep = left + (i + 1) * step %}
+                  <line x1="{{ x_sep }}" y1="{{ yTop }}" x2="{{ x_sep }}" y2="{{ yBottom }}" stroke="#2a2f40" stroke-dasharray="4,4" />
+                  <!-- Hour label -->
+                  <text class="axis-label" x="{{ x_sep }}" y="{{ yTop + 12 }}" text-anchor="middle" fill="#a8adc0">{{ next_hour }}h</text>
+                {% endif %}
+              {% endif %}
             {% endfor %}
             <!-- Y labels (right-aligned to the Y axis, numeric only) -->
             <text class="axis-label" x="{{ left - 8 }}" y="{{ yBottom }}" text-anchor="end" fill="#a8adc0">0</text>
