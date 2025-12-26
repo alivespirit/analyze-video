@@ -82,6 +82,8 @@ header nav .nav-btn{white-space:nowrap}
 .chart-legend ul{list-style:none;padding:0;margin:0;display:flex;flex-wrap:wrap;gap:8px}
 .legend-item{display:flex;align-items:center;gap:6px;padding:4px 8px;background:#161922;border-radius:8px}
 .legend-chip{display:inline-block;width:12px;height:12px;border-radius:2px}
+/* Legend links should look like plain text */
+.chart-legend a{color:var(--text);text-decoration:none}
 /* Badge row: single line severity chips */
 .badge-row{display:flex;gap:8px;align-items:baseline;flex-wrap:nowrap;overflow-x:auto;padding:0}
 .badge-row .link-log{display:flex;align-items:center}

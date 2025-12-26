@@ -29,7 +29,8 @@
           {% for lvl in levels %}
             {% set scol = severity_colors.get(lvl, '#3b82f6') %}
             {% set stcol = severity_text_colors.get(lvl, '#ffffff') %}
-            <a class="link-log" href="{% if severity == lvl %}{{ base }}{% if status %}?status={{ status }}{% endif %}{% else %}{{ base }}?severity={{ lvl }}{% if status %}&status={{ status }}{% endif %}{% endif %}" title="{% if severity == lvl %}Clear severity filter{% else %}Filter by {{ lvl }}{% endif %}">
+            {% set status_csv = status_list|join(',') if status_list and (status_list|length > 0) else '' %}
+            <a class="link-log" href="{% if severity == lvl %}{{ base }}{% if status_csv %}?status={{ status_csv }}{% endif %}{% else %}{{ base }}?severity={{ lvl }}{% if status_csv %}&status={{ status_csv }}{% endif %}{% endif %}" title="{% if severity == lvl %}Clear severity filter{% else %}Filter by {{ lvl }}{% endif %}">
               <span class="tag {% if severity == lvl %}active{% endif %}" style="background: {{ scol }}; color: {{ stcol }}">{{ lvl }}</span>
             </a>
           {% endfor %}
@@ -40,20 +41,47 @@
     <section class="grid">
       <div class="card">
         <h2>Status Counts</h2>
-        {% if severity or status or gate %}
-          <p class="muted">Filtered videos: <strong>{{ metrics.videos_total }}</strong> (Total today: <strong>{{ total_videos_all }}</strong>)</p>
+        {# Ensure we have a list from backend-provided status_list #}
+        {% set status_list = status_list or [] %}
+        {% set has_status = status_list and (status_list|length > 0) %}
+        {% if severity or has_status or gate %}
+          <p class="muted">
+            Filtered videos: <strong>{{ metrics.videos_total }}</strong>
+            (Total today: <strong>{{ total_videos_all }}</strong>)
+            {# Clear all filters when any filter is selected #}
+            {% if is_today_route %}{% set base = '/today' %}{% else %}{% set base = '/day/' ~ day %}{% endif %}
+            <a class="link-log" href="{{ base }}" title="Clear all filters">
+              <span class="tag">Clear</span>
+            </a>
+          </p>
         {% else %}
           <p class="muted">Total videos: <strong>{{ total_videos_all }}</strong></p>
         {% endif %}
-        {% if metrics.status_counts %}
+        {% if statuses and statuses|length > 0 %}
           {% if is_today_route %}{% set base = '/today' %}{% else %}{% set base = '/day/' ~ day %}{% endif %}
           <ul class="stats status-badges">
-            {% for k,v in metrics.status_counts.items() %}
+            {% for k in statuses %}
+              {% set v = status_counts_all.get(k, 0) %}
               {% set col = status_colors.get(k, '#3b82f6') %}
               {% set tcol = status_text_colors.get(k, '#ffffff') %}
               <li>
-                <a class="link-log" href="{% if status == k %}{{ base }}{% if severity %}?severity={{ severity }}{% endif %}{% else %}{{ base }}?status={{ k }}{% if severity %}&severity={{ severity }}{% endif %}{% endif %}" title="{% if status == k %}Clear status filter{% else %}Filter by {{ k }}{% endif %}">
-                  <span class="tag" style="background: {{ col }}; color: {{ tcol }}">{{ k }}</span>
+                {% set active = has_status and (k in status_list) %}
+                {% set qs = '' %}
+                {% if severity %}{% set qs = qs ~ 'severity=' ~ severity %}{% endif %}
+                {% if gate %}{% if qs %}{% set qs = qs ~ '&' %}{% endif %}{% set qs = qs ~ 'gate=' ~ gate %}{% endif %}
+                {% set new_list = [] %}
+                {% if active %}
+                  {% for s in status_list %}{% if s != k %}{% set _ = new_list.append(s) %}{% endif %}{% endfor %}
+                {% else %}
+                  {% for s in status_list %}{% set _ = new_list.append(s) %}{% endfor %}
+                  {% set _ = new_list.append(k) %}
+                {% endif %}
+                {% if new_list and (new_list|length > 0) %}
+                  {% set status_csv = new_list|join(',') %}
+                  {% if qs %}{% set qs = qs ~ '&' %}{% endif %}{% set qs = qs ~ 'status=' ~ status_csv %}
+                {% endif %}
+                <a class="link-log" href="{{ base }}{% if qs %}?{{ qs }}{% endif %}" title="{% if active %}Remove {{ k }}{% else %}Add {{ k }} filter{% endif %}">
+                  <span class="tag {% if active %}active{% endif %}" style="background: {{ col }}; color: {{ tcol }}">{{ k }}</span>
                 </a>
                 <strong>{{ v }}</strong>
               </li>
@@ -66,15 +94,16 @@
 
       <div class="card">
         <h2>Gate Crossings</h2>
+        {% set status_csv = status_list|join(',') if status_list and (status_list|length > 0) else '' %}
         <ul class="stats">
           <li>
-            <a class="link-log" href="{% if gate == 'up' %}{{ base }}{% if severity or status %}?{% endif %}{% if severity %}severity={{ severity }}{% endif %}{% if status %}{% if severity %}&{% endif %}status={{ status }}{% endif %}{% else %}{{ base }}?gate=up{% if severity %}&severity={{ severity }}{% endif %}{% if status %}&status={{ status }}{% endif %}{% endif %}" title="{% if gate == 'up' %}Clear gate filter{% else %}Filter by gate: up{% endif %}">
+            <a class="link-log" href="{% if gate == 'up' %}{{ base }}{% if severity or status_csv %}?{% endif %}{% if severity %}severity={{ severity }}{% endif %}{% if status_csv %}{% if severity %}&{% endif %}status={{ status_csv }}{% endif %}{% else %}{{ base }}?gate=up{% if severity %}&severity={{ severity }}{% endif %}{% if status_csv %}&status={{ status_csv }}{% endif %}{% endif %}" title="{% if gate == 'up' %}Clear gate filter{% else %}Filter by gate: up{% endif %}">
               <span class="tag {% if gate == 'up' %}active{% endif %}">up</span>
             </a>
             <strong>{{ metrics.gate_counts.up }}</strong>
           </li>
           <li>
-            <a class="link-log" href="{% if gate == 'down' %}{{ base }}{% if severity or status %}?{% endif %}{% if severity %}severity={{ severity }}{% endif %}{% if status %}{% if severity %}&{% endif %}status={{ status }}{% endif %}{% else %}{{ base }}?gate=down{% if severity %}&severity={{ severity }}{% endif %}{% if status %}&status={{ status }}{% endif %}{% endif %}" title="{% if gate == 'down' %}Clear gate filter{% else %}Filter by gate: down{% endif %}">
+            <a class="link-log" href="{% if gate == 'down' %}{{ base }}{% if severity or status_csv %}?{% endif %}{% if severity %}severity={{ severity }}{% endif %}{% if status_csv %}{% if severity %}&{% endif %}status={{ status_csv }}{% endif %}{% else %}{{ base }}?gate=down{% if severity %}&severity={{ severity }}{% endif %}{% if status_csv %}&status={{ status_csv }}{% endif %}{% endif %}" title="{% if gate == 'down' %}Clear gate filter{% else %}Filter by gate: down{% endif %}">
               <span class="tag {% if gate == 'down' %}active{% endif %}">down</span>
             </a>
             <strong>{{ metrics.gate_counts.down }}</strong>
@@ -137,7 +166,15 @@
               </td>
               <td>
                 {% if is_today_route %}{% set base = '/today' %}{% else %}{% set base = '/day/' ~ day %}{% endif %}
-                <a href="{{ base }}?play={{ vid }}{% if severity %}&severity={{ severity }}{% endif %}{% if status_filter %}&status={{ status_filter }}{% endif %}{% if gate %}&gate={{ gate }}{% endif %}#player" class="link-log" title="Open video player">{{ vid }}</a>
+                {# Build query with existing filters, keeping multi-status selections #}
+                {% set qs = 'play=' ~ vid %}
+                {% if severity %}{% set qs = qs ~ '&severity=' ~ severity %}{% endif %}
+                {% if status_list and (status_list|length > 0) %}
+                  {% set status_csv = status_list|join(',') %}
+                  {% set qs = qs ~ '&status=' ~ status_csv %}
+                {% endif %}
+                {% if gate %}{% set qs = qs ~ '&gate=' ~ gate %}{% endif %}
+                <a href="{{ base }}?{{ qs }}#player" class="link-log" title="Open video player">{{ vid }}</a>
               </td>
               {% set col = status_colors.get(st, '#3b82f6') %}
               {% set tcol = status_text_colors.get(st, '#ffffff') %}
@@ -247,7 +284,26 @@
           <ul>
             {% for s in statuses_present %}
               {% set col = status_colors.get(s, '#3b82f6') %}
-              <li class="legend-item"><span class="legend-chip" style="background: {{ col }}"></span> {{ s }}</li>
+              {% set active = has_status and (s in status_list) %}
+              {% set qs = '' %}
+              {% if severity %}{% set qs = qs ~ 'severity=' ~ severity %}{% endif %}
+              {% if gate %}{% if qs %}{% set qs = qs ~ '&' %}{% endif %}{% set qs = qs ~ 'gate=' ~ gate %}{% endif %}
+              {% set new_list = [] %}
+              {% if active %}
+                {% for t in status_list %}{% if t != s %}{% set _ = new_list.append(t) %}{% endif %}{% endfor %}
+              {% else %}
+                {% for t in status_list %}{% set _ = new_list.append(t) %}{% endfor %}
+                {% set _ = new_list.append(s) %}
+              {% endif %}
+              {% if new_list and (new_list|length > 0) %}
+                {% set status_csv = new_list|join(',') %}
+                {% if qs %}{% set qs = qs ~ '&' %}{% endif %}{% set qs = qs ~ 'status=' ~ status_csv %}
+              {% endif %}
+              <li class="legend-item">
+                <a class="link-log" href="{{ base }}{% if qs %}?{{ qs }}{% endif %}" title="{% if active %}Remove {{ s }}{% else %}Add {{ s }} filter{% endif %}">
+                  <span class="legend-chip" style="background: {{ col }}"></span> {{ s }}
+                </a>
+              </li>
             {% endfor %}
           </ul>
         </div>

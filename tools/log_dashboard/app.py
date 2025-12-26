@@ -359,7 +359,7 @@ def index():
 @app.get("/today", response_class=HTMLResponse)
 def today_view(
     severity: Optional[str] = Query(default=None, description="Filter by severity: INFO/WARNING/ERROR/etc."),
-    status: Optional[str] = Query(default=None, description="Filter by final video status: gate_crossing/no_motion/..."),
+    status: Optional[str] = Query(default=None, description="Comma-separated final video statuses (e.g., gate_crossing,significant_motion)"),
     gate: Optional[str] = Query(default=None, description="Filter by gate crossing direction: up/down"),
     play: Optional[str] = Query(default=None, description="Basename of video to embed (.mp4)"),
 ):
@@ -381,9 +381,13 @@ def today_view(
     entries = entries_all
     if severity:
         entries = [e for e in entries if e["level"] == severity]
+    status_list_ctx: List[str] = []
     if status:
         spv = metrics_all["status_per_video"]
-        entries = [e for e in entries if e.get("video") and spv.get(e["video"]) == status]
+        allowed = set([s.strip() for s in status.split(",") if s.strip()])
+        status_list_ctx = sorted(list(allowed))
+        if allowed:
+            entries = [e for e in entries if e.get("video") and spv.get(e["video"]) in allowed]
     if gate in ("up", "down"):
         gpv = metrics_all.get("gate_direction_per_video", {})
         entries = [
@@ -421,6 +425,7 @@ def today_view(
         severity=severity,
         status=status,
         gate=gate,
+        status_list=status_list_ctx,
         entries=entries,
         metrics=metrics,
         chart_pairs=chart_pairs,
@@ -436,6 +441,7 @@ def today_view(
         log_dir=LOG_DIR,
         play=play,
         video_src=video_src,
+            status_counts_all=metrics_all.get("status_counts", {}),
     )
 
 
@@ -443,7 +449,7 @@ def today_view(
 def day_view(
     day: str,
     severity: Optional[str] = Query(default=None, description="Filter by severity: INFO/WARNING/ERROR/etc."),
-    status: Optional[str] = Query(default=None, description="Filter by final video status: gate_crossing/no_motion/..."),
+    status: Optional[str] = Query(default=None, description="Comma-separated final video statuses (e.g., gate_crossing,significant_motion)"),
     gate: Optional[str] = Query(default=None, description="Filter by gate crossing direction: up/down"),
     play: Optional[str] = Query(default=None, description="Basename of video to embed (.mp4)"),
 ):
@@ -459,9 +465,13 @@ def day_view(
     entries = entries_all
     if severity:
         entries = [e for e in entries if e["level"] == severity]
+    status_list_ctx: List[str] = []
     if status:
         spv = metrics_all["status_per_video"]
-        entries = [e for e in entries if e.get("video") and spv.get(e["video"]) == status]
+        allowed = set([s.strip() for s in status.split(",") if s.strip()])
+        status_list_ctx = sorted(list(allowed))
+        if allowed:
+            entries = [e for e in entries if e.get("video") and spv.get(e["video"]) in allowed]
     if gate in ("up", "down"):
         gpv = metrics_all.get("gate_direction_per_video", {})
         entries = [
@@ -499,6 +509,7 @@ def day_view(
         severity=severity,
         status=status,
         gate=gate,
+        status_list=status_list_ctx,
         entries=entries,
         metrics=metrics,
         chart_pairs=chart_pairs,
@@ -514,6 +525,7 @@ def day_view(
         log_dir=LOG_DIR,
         play=play,
         video_src=video_src,
+            status_counts_all=metrics_all.get("status_counts", {}),
     )
 
 
