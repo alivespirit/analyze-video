@@ -56,9 +56,9 @@ nav a{color:#9fb0ff;text-decoration:none}
 .legend-chip{display:inline-block;width:12px;height:12px;border-radius:2px}
 
 /* Floating action button (mobile only) */
-.fab{position:fixed;right:16px;bottom:16px;width:44px;height:44px;border-radius:999px;background:#1c2130;color:var(--text);display:none;align-items:center;justify-content:center;box-shadow:0 6px 16px rgba(0,0,0,0.35);border:1px solid #2a2f40;z-index:9999;text-decoration:none;font-size:22px;line-height:1}
+.fab{position:fixed;right:16px;bottom:16px;width:44px;height:44px;border-radius:999px;background:#1c2130;color:var(--text);display:flex;align-items:center;justify-content:center;box-shadow:0 6px 16px rgba(0,0,0,0.35);border:1px solid #2a2f40;z-index:9999;text-decoration:none;font-size:22px;line-height:1}
 .fab:active{transform:scale(0.98)}
-.fab-top{position:fixed;right:16px;bottom:72px;width:44px;height:44px;border-radius:999px;background:#1c2130;color:var(--text);display:none;align-items:center;justify-content:center;box-shadow:0 6px 16px rgba(0,0,0,0.35);border:1px solid #2a2f40;z-index:9999;text-decoration:none;font-size:22px;line-height:1}
+.fab-top{position:fixed;right:16px;bottom:72px;width:44px;height:44px;border-radius:999px;background:#1c2130;color:var(--text);display:flex;align-items:center;justify-content:center;box-shadow:0 6px 16px rgba(0,0,0,0.35);border:1px solid #2a2f40;z-index:9999;text-decoration:none;font-size:22px;line-height:1}
 .fab-top:active{transform:scale(0.98)}
 
 /* Responsive tweaks for mobile */
