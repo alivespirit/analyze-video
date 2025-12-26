@@ -351,6 +351,32 @@
   <div id="page-bottom"></div>
   <script>
     (function(){
+      function getOpenState(){
+        try{
+          var raw = localStorage.getItem('logdash-open');
+          return raw ? JSON.parse(raw) : {};
+        }catch(e){ return {}; }
+      }
+      function saveOpenState(state){
+        try{ localStorage.setItem('logdash-open', JSON.stringify(state || {})); }catch(e){}
+      }
+      function restoreOpenState(){
+        try{
+          var state = getOpenState();
+          var els = document.querySelectorAll('details[id]');
+          els.forEach(function(d){
+            var id = d.id;
+            if(Object.prototype.hasOwnProperty.call(state, id)){
+              d.open = !!state[id];
+            }
+            d.addEventListener('toggle', function(){
+              var s = getOpenState();
+              s[id] = d.open;
+              saveOpenState(s);
+            });
+          });
+        }catch(e){ /* noop */ }
+      }
       function ensureLogsOpenIfHash(){
         try{
           var h = window.location.hash || '';
@@ -371,8 +397,25 @@
           }
         }catch(e){ /* noop */ }
       }
+      function attachNavClears(){
+        try{
+          var links = document.querySelectorAll('header nav a[title="Home"], header nav a[title="All Days"]');
+          if(links && links.length){
+            links.forEach(function(a){
+              a.addEventListener('click', function(){
+                try{ localStorage.removeItem('logdash-open'); }catch(e){}
+              });
+            });
+          }
+        }catch(e){ /* noop */ }
+      }
+      // First restore user's previous open/closed state
+      restoreOpenState();
+      // Then apply forced openings based on hash or query
       ensureLogsOpenIfHash();
       ensureSummaryOpenIfPlaying();
+      // Clear persisted state when navigating Home or All Days
+      attachNavClears();
       window.addEventListener('hashchange', ensureLogsOpenIfHash);
       window.addEventListener('popstate', ensureSummaryOpenIfPlaying);
     })();
