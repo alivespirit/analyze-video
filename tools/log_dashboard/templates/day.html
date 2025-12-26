@@ -416,6 +416,19 @@
       ensureSummaryOpenIfPlaying();
       // Clear persisted state when navigating Home or All Days
       attachNavClears();
+      // Ensure scroll-up button works even if hash doesn't change
+      (function(){
+        try{
+          var up = document.querySelector('.fab-top');
+          if(up){
+            up.addEventListener('click', function(ev){
+              ev.preventDefault();
+              try{ window.scrollTo({ top: 0, behavior: 'smooth' }); }
+              catch(e){ window.scrollTo(0, 0); }
+            });
+          }
+        }catch(e){ /* noop */ }
+      })();
       window.addEventListener('hashchange', ensureLogsOpenIfHash);
       window.addEventListener('popstate', ensureSummaryOpenIfPlaying);
     })();
