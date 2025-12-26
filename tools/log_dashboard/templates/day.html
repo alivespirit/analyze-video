@@ -142,21 +142,37 @@
       <h2>Processing Times Chart</h2>
       {% if chart_pairs and chart_pairs|length > 0 %}
         {% set pairs = chart_pairs %}
-        {% set maxv = (pairs|map(attribute=1)|list|max) %}
+        {% set values = pairs|map(attribute=1)|list %}
+        {% set maxv = (values|max) %}
+        {% set minv = (values|min) %}
+        {% set avgv = (values|sum / values|length) %}
         {% set n = pairs|length %}
         <!-- Normalize to a fixed viewBox and space bars across full width -->
         {% set vbw = 1000 %}
         {% set vbh = 240 %}
         {% set left = 60 %}
         {% set right = 20 %}
+        {% set topPad = 2 %}
+        {% set bottomPad = 6 %}
+        {% set yTop = topPad %}
+        {% set yBottom = vbh - bottomPad %}
+        {% set plotH = yBottom - yTop %}
         {% set axisW = vbw - left - right %}
         {% set step = axisW / n %}
         {% set barW = (step * 0.6) if step * 0.6 < 40 else 40 %}
+        {% set denom = maxv if maxv > 0 else 1 %}
+        {% set y_max = yBottom - (maxv / denom) * plotH %}
+        {% set y_avg = yBottom - (avgv / denom) * plotH %}
+        {% set y_min = yBottom - (minv / denom) * plotH %}
         <div class="chart-wrap">
-          <svg class="chart" width="100%" height="240" viewBox="0 0 {{ vbw }} {{ vbh }}">
+          <svg class="chart" width="100%" height="260" viewBox="0 0 {{ vbw }} {{ vbh }}" preserveAspectRatio="xMinYMin meet">
             <!-- Axis -->
-            <line x1="{{ left }}" y1="200" x2="{{ vbw - right }}" y2="200" stroke="#444" />
-            <line x1="{{ left }}" y1="20" x2="{{ left }}" y2="200" stroke="#444" />
+            <line x1="{{ left }}" y1="{{ yBottom }}" x2="{{ vbw - right }}" y2="{{ yBottom }}" stroke="#444" />
+            <line x1="{{ left }}" y1="{{ yTop }}" x2="{{ left }}" y2="{{ yBottom }}" stroke="#444" />
+            <!-- Grid lines for max/avg/min -->
+            <line x1="{{ left }}" y1="{{ y_max }}" x2="{{ vbw - right }}" y2="{{ y_max }}" stroke="#2a2f40" stroke-dasharray="3,3" />
+            <line x1="{{ left }}" y1="{{ y_avg }}" x2="{{ vbw - right }}" y2="{{ y_avg }}" stroke="#2a2f40" stroke-dasharray="3,3" />
+            <line x1="{{ left }}" y1="{{ y_min }}" x2="{{ vbw - right }}" y2="{{ y_min }}" stroke="#2a2f40" stroke-dasharray="3,3" />
             <!-- Bars evenly spaced across full width -->
             {% for i in range(n) %}
               {% set vid = pairs[i][0] %}
@@ -164,18 +180,20 @@
               {% set st = metrics.status_per_video.get(vid, 'unknown') %}
               {% set col = status_colors.get(st, '#3b82f6') %}
               {% set x = left + i * step + (step - barW) / 2 %}
-              {% set h = (val / maxv) * 160 %}
-              {% set y = 200 - h %}
+              {% set h = (val / denom) * plotH %}
+              {% set y = yBottom - h %}
               <a href="#log-{{ vid }}">
                 <rect x="{{ x }}" y="{{ y }}" width="{{ barW }}" height="{{ h }}" fill="{{ col }}">
                   <title>{{ vid }} ({{ '%.2f'|format(val) }}s)</title>
                 </rect>
               </a>
-              <line x1="{{ left + i * step + step / 2 }}" y1="200" x2="{{ left + i * step + step / 2 }}" y2="204" stroke="#444" />
+              <line x1="{{ left + i * step + step / 2 }}" y1="{{ yBottom }}" x2="{{ left + i * step + step / 2 }}" y2="{{ yBottom + 4 }}" stroke="#444" />
             {% endfor %}
-            <!-- Y labels -->
-            <text x="6" y="200" font-size="10" fill="#a8adc0">0</text>
-            <text x="6" y="36" font-size="10" fill="#a8adc0">{{ '%.1f'|format(maxv) }}</text>
+            <!-- Y labels (right-aligned to the Y axis, numeric only) -->
+            <text class="axis-label" x="{{ left - 8 }}" y="{{ yBottom }}" text-anchor="end" fill="#a8adc0">0</text>
+            <text class="axis-label" x="{{ left - 8 }}" y="{{ y_max + 12 }}" text-anchor="end" fill="#a8adc0">{{ '%.1f'|format(maxv) }}</text>
+            <text class="axis-label" x="{{ left - 8 }}" y="{{ y_avg + 4 }}" text-anchor="end" fill="#a8adc0">{{ '%.1f'|format(avgv) }}</text>
+            <text class="axis-label" x="{{ left - 8 }}" y="{{ y_min + 4 }}" text-anchor="end" fill="#a8adc0">{{ '%.1f'|format(minv) }}</text>
           </svg>
         </div>
         {% if statuses_present and statuses_present|length > 0 %}

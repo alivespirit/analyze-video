@@ -47,6 +47,9 @@ nav a{color:#9fb0ff;text-decoration:none}
 
 .chart-wrap{display:block}
 .chart{background:#11151d;border-radius:8px;display:block}
+.chart .axis-label{fill:#a8adc0;font-size:10px}
+/* Extra specificity for SVG text color across browsers */
+.chart text.axis-label{fill:#a8adc0}
 .chart-legend{margin-top:8px}
 .chart-legend ul{list-style:none;padding:0;margin:0;display:flex;flex-wrap:wrap;gap:8px}
 .legend-item{display:flex;align-items:center;gap:6px;padding:4px 8px;background:#161922;border-radius:8px}
@@ -87,7 +90,9 @@ nav a{color:#9fb0ff;text-decoration:none}
   .table th,.table td{word-break:break-word;overflow-wrap:anywhere}
   .table th,.table td{padding:6px}
 
-  /* Chart: slightly shorter height for viewport */
-  .chart{height:200px}
-  .tag{font-size:11px;padding:2px 6px}
+  /* Chart: responsive height; cap to keep compact */
+  .chart{height:auto;max-height:160px}
+    .chart .axis-label{font-size:16px}
+  .chart text.axis-label{fill:#a8adc0 !important}
+  .tag{font-size:12px;padding:2px 6px}
 }
