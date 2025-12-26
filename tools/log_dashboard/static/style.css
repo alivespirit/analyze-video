@@ -10,6 +10,8 @@ main{max-width:1200px;margin:0 auto;padding:20px}
 .card{background:var(--card);padding:16px;border-radius:10px;margin-bottom:16px}
 .card h2{margin:0 0 8px 0;line-height:1.25}
 .grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:16px;margin-bottom:16px}
+/* Avoid double spacing: remove card margins inside the grid */
+.grid > .card{margin-bottom:0}
 .days{list-style:none;padding:0;margin:0;display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:8px}
 .days li a{display:block;padding:10px 12px;border-radius:8px;background:#1c2130;color:var(--text);text-decoration:none}
 .controls{margin-bottom:8px}
