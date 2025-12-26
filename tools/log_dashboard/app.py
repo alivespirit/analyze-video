@@ -1,5 +1,6 @@
 import os
 import re
+import colorsys
 from datetime import datetime, date
 from typing import List, Dict, Optional
 
@@ -227,6 +228,67 @@ STATUS_COLORS = {
 }
 
 
+def _hex_to_rgb01(hex_color: str):
+    h = hex_color.lstrip("#")
+    if len(h) == 3:
+        h = "".join(ch * 2 for ch in h)
+    r = int(h[0:2], 16) / 255.0
+    g = int(h[2:4], 16) / 255.0
+    b = int(h[4:6], 16) / 255.0
+    return r, g, b
+
+
+def _rgb01_to_hex(r: float, g: float, b: float) -> str:
+    r8 = max(0, min(255, int(round(r * 255))))
+    g8 = max(0, min(255, int(round(g * 255))))
+    b8 = max(0, min(255, int(round(b * 255))))
+    return f"#{r8:02x}{g8:02x}{b8:02x}"
+
+
+def _srgb_to_linear(c: float) -> float:
+    return c / 12.92 if c <= 0.04045 else ((c + 0.055) / 1.055) ** 2.4
+
+
+def text_color_on_bg(hex_color: str) -> str:
+    """Return '#ffffff' or a dark text color based on background luminance."""
+    r, g, b = _hex_to_rgb01(hex_color)
+    r_lin = _srgb_to_linear(r)
+    g_lin = _srgb_to_linear(g)
+    b_lin = _srgb_to_linear(b)
+    luminance = 0.2126 * r_lin + 0.7152 * g_lin + 0.0722 * b_lin
+    return "#0f1115" if luminance > 0.5 else "#ffffff"
+
+
+# Precompute text colors for badges
+STATUS_TEXT_COLORS = {k: text_color_on_bg(v) for k, v in STATUS_COLORS.items()}
+
+
+# (moved helper functions above)
+
+
+def shade_color_for_status(status: str, video: str) -> str:
+    """Return a deterministic shade of the base status color for a video.
+
+    Keeps the base hue from STATUS_COLORS, varies lightness (and saturation slightly)
+    using a hash of the video name so videos with the same status get different shades
+    but remain in the same color family.
+    """
+    base_hex = STATUS_COLORS.get(status, "#9fb0ff")
+    r, g, b = _hex_to_rgb01(base_hex)
+    h, l, s = colorsys.rgb_to_hls(r, g, b)
+    # Deterministic factor in [0, 1)
+    f = (abs(hash(video)) % 1000) / 1000.0
+    # Wider lightness band for more shade variety, still readable on dark bg
+    # Lightness between ~0.42 and ~0.85
+    l2 = 0.42 + 0.43 * f
+    # Wider saturation variation around the base value, clamped for usability
+    # Multiplier ~[0.60, 1.10] → clamp to [0.35, 1.0]
+    s_mult = 0.85 + 0.5 * (f - 0.5)
+    s2 = max(0.35, min(1.0, s * s_mult))
+    r2, g2, b2 = colorsys.hls_to_rgb(h, l2, s2)
+    return _rgb01_to_hex(r2, g2, b2)
+
+
 @app.get("/", response_class=HTMLResponse)
 def index():
     days = list_log_files()
@@ -270,9 +332,11 @@ def today_view(
 
     metrics = collect_metrics(entries)
 
+    spv_all = metrics_all.get("status_per_video", {})
+    spv = metrics.get("status_per_video", {})
     def color_for(video: str) -> str:
-        h = (abs(hash(video)) % 360)
-        return f"hsl({h}, 70%, 70%)"
+        st = spv_all.get(video) or spv.get(video) or "unknown"
+        return shade_color_for_status(st, video)
 
     videos_present = {e["video"] for e in entries if e.get("video")}
     video_colors = {v: color_for(v) for v in videos_present}
@@ -294,6 +358,7 @@ def today_view(
         statuses=sorted(metrics_all["status_counts"].keys()),
         video_colors=video_colors,
         status_colors=STATUS_COLORS,
+        status_text_colors=STATUS_TEXT_COLORS,
         statuses_present=sorted(metrics["status_counts"].keys()),
         total_videos_all=metrics_all.get("videos_total", 0),
         log_dir=LOG_DIR,
@@ -324,10 +389,12 @@ def day_view(
 
     metrics = collect_metrics(entries)
 
-    # Build stable colors per video (HSL from hash)
+    # Build colors per video derived from its status base color with shaded variants
+    spv_all = metrics_all.get("status_per_video", {})
+    spv = metrics.get("status_per_video", {})
     def color_for(video: str) -> str:
-        h = (abs(hash(video)) % 360)
-        return f"hsl({h}, 70%, 70%)"
+        st = spv_all.get(video) or spv.get(video) or "unknown"
+        return shade_color_for_status(st, video)
 
     videos_present = {e["video"] for e in entries if e.get("video")}
     video_colors = {v: color_for(v) for v in videos_present}
@@ -348,6 +415,7 @@ def day_view(
         statuses=sorted(metrics_all["status_counts"].keys()),
         video_colors=video_colors,
         status_colors=STATUS_COLORS,
+        status_text_colors=STATUS_TEXT_COLORS,
         statuses_present=sorted(metrics["status_counts"].keys()),
         total_videos_all=metrics_all.get("videos_total", 0),
         log_dir=LOG_DIR,

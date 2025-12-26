@@ -49,7 +49,9 @@
         {% if metrics.status_counts %}
           <ul class="stats">
             {% for k,v in metrics.status_counts.items() %}
-              <li><span class="tag">{{ k }}</span> <strong>{{ v }}</strong></li>
+              {% set col = status_colors.get(k, '#3b82f6') %}
+              {% set tcol = status_text_colors.get(k, '#ffffff') %}
+              <li><span class="tag" style="background: {{ col }}; color: {{ tcol }}">{{ k }}</span> <strong>{{ v }}</strong></li>
             {% endfor %}
           </ul>
         {% else %}
@@ -103,7 +105,7 @@
               <th>Video</th>
               <th>Status</th>
               <th>Raw Events</th>
-              <th>Processing Time (s)</th>
+              <th>Processing Time</th>
             </tr>
           </thead>
           <tbody>
@@ -118,7 +120,9 @@
                 {% endif %}
               </td>
               <td><a href="#log-{{ vid }}" class="link-log">{{ vid }}</a></td>
-              <td><span class="tag">{{ status }}</span></td>
+              {% set col = status_colors.get(status, '#3b82f6') %}
+              {% set tcol = status_text_colors.get(status, '#ffffff') %}
+              <td><span class="tag status-chip" style="background: {{ col }}; color: {{ tcol }}" aria-label="{{ status }}" title="{{ status }}">{{ status }}</span></td>
               <td>{{ metrics.raw_events_per_video.get(vid, 0) }}</td>
               <td>
                 {% set p = metrics.processing_time_per_video.get(vid) %}

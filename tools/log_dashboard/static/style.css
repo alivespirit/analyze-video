@@ -32,7 +32,7 @@ main{max-width:1200px;margin:0 auto;padding:20px}
 .card[open] summary::before{content:"\25BE"; /* ▼ */}
 .card summary::-webkit-details-marker{display:none}
 .logs{list-style:none;padding:0;margin:0}
-.log{display:grid;grid-template-columns:96px 64px 220px 1fr;gap:5px;padding:5px;border-bottom:1px solid #1d2030}
+.log{display:grid;grid-template-columns:80px 80px 200px 1fr;gap:5px;padding:5px;border-bottom:1px solid #1d2030}
 .log .meta{display:none}
 .log .ts{color:var(--muted)}
 .log .lvl{font-weight:700}
@@ -99,4 +99,6 @@ nav a{color:#9fb0ff;text-decoration:none}
     .chart .axis-label{font-size:16px}
   .chart text.axis-label{fill:#a8adc0 !important}
   .tag{font-size:12px;padding:2px 6px}
+  /* Per-Video Summary: show colored chip, hide text */
+  .table .status-chip{display:inline-block;width:20px;height:14px;border-radius:999px;padding:0;vertical-align:middle;font-size:0;}
 }

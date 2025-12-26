@@ -183,8 +183,10 @@ A lightweight web dashboard that reads existing log files and provides per-day i
 - Filters: Severity and Status (`no_motion`, `gate_crossing`, `no_significant_motion`, `error`)
 - Status Counts with totals and filtered counts
 - Collapsible Per-Video Summary: Start time (first “New file detected”), status, raw events, processing time (prefers motion detection; falls back to full processing)
-- Processing Times Chart: bars evenly spaced, colored by status with legend; click a bar to jump to the first log entry for that video
-- Stable per-video colors in the log list for quick visual grouping
+- Processing Times Chart: evenly spaced bars, colored by status, with min/avg/max guide lines and right-aligned axis labels; bars are clickable to jump to logs
+- Status-based colors everywhere: filename colors in logs match the chart’s status families with deterministic shade variations; status badges use the same colors
+- Quick access: `/today` route renders the latest day directly
+- Responsive UX: stacked log entries on mobile and floating up/down buttons (visible on mobile and desktop)
 - “Available Days” page shows today first, then past days in descending order
 
 ### Enable from main.py
@@ -198,6 +200,9 @@ LOG_DASHBOARD_HOST=0.0.0.0     # optional, defaults to 0.0.0.0
 ```
 
 With `ENABLE_LOG_DASHBOARD=true`, the dashboard starts in a background thread and stops automatically on graceful shutdown. It will be reachable at `http://<host>:<port>` on your LAN.
+
+Auto-reload:
+- When the dashboard is enabled from `main.py`, changes in `tools/log_dashboard/` (Python, HTML, CSS) are detected and the dashboard restarts automatically.
 
 ### Standalone run
 

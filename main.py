@@ -301,7 +301,7 @@ try:
     # A dedicated executor for CPU-bound motion detection to ensure it runs one at a time.
     motion_executor = concurrent.futures.ThreadPoolExecutor(max_workers=max_workers)
     logger.info(f"ThreadPoolExecutor for motion detection initialized with a single worker.")
-    
+
     # A general-purpose executor for I/O-bound tasks like Gemini calls.
     io_executor = concurrent.futures.ThreadPoolExecutor(max_workers=max_workers)
     logger.info(f"ThreadPoolExecutor for I/O tasks initialized with a single worker.")
