@@ -189,6 +189,19 @@ A lightweight web dashboard that reads existing log files and provides per-day i
 - Responsive UX: stacked log entries on mobile and floating up/down buttons (visible on mobile and desktop)
 - “Available Days” page shows today first, then past days in descending order
 
+### Video Playback
+
+- Embedded player: Clicking a video name in Per-Video Summary opens an embedded HTML5 player on the page.
+- Timestamp links: Clicking the start time jumps to the first log entry for that video.
+- Preserves filters: Opening a video keeps current filters (severity/status/gate) unchanged.
+- Gate indicator: An arrow (↑/↓/↕) appears in the Status column indicating gate direction (both counts as up and down).
+- Requirements:
+   - Set `VIDEO_FOLDER` in your environment to the root folder where original `.mp4` files reside (monitored recursively).
+   - The dashboard serves files via `GET /video/{basename}`. Only `.mp4` basenames are allowed; the first matching file is returned.
+- Route details:
+   - `play=<basename>` query parameter triggers the embedded player (e.g., `/today?play=YYYYMMDD_HHMMSS.mp4#player`).
+   - The Per-Video Summary remains open when a player is shown and highlights the currently opened video row.
+
 ### Enable from main.py
 
 Set in `.env`:

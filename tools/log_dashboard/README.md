@@ -17,6 +17,19 @@ A lightweight FastAPI server that parses your application logs and serves a simp
 - Readable log list with stable, per-video colors for quick visual grouping
 - “Available Days” page lists today first, then the rest in descending order
 
+### Video Playback
+
+- Click a video name in the Per-Video Summary to open an embedded player.
+- Click the timestamp to jump to the first log entry of that video.
+- Gate direction chip: Up/Down/Both arrows (↑/↓/↕) render next to the status badge.
+- Filters are preserved when opening a video; the current severity/status/gate selections remain active.
+- The summary stays expanded when the player is visible, and the current video row is highlighted.
+
+Requirements:
+- Set `VIDEO_FOLDER` to the root directory containing your original `.mp4` files. The server searches it recursively.
+- Files are served via `GET /video/{basename}`; only `.mp4` basenames are allowed.
+- To open the player directly, use `play=<basename>` in the query string (e.g., `/today?play=clip123.mp4#player`).
+
 ## Run
 
 1) Install dependencies:
@@ -30,6 +43,7 @@ python -m pip install -r requirements.txt
 ```bash
 export LOG_PATH=/path/to/logs        # directory containing video_processor.log and rotations
 export LOG_BASENAME=video_processor.log  # optional; defaults to video_processor.log
+export VIDEO_FOLDER=/path/to/videos  # required for embedded video playback (.mp4)
 ```
 
 3) Start the server (standalone) or enable auto-start from main:
