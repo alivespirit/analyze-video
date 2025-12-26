@@ -8,8 +8,13 @@
 </head>
 <body>
   <header id="page-top">
-    <h1>Logs for {{ day }}</h1>
-    <nav><a href="/">← Back</a></nav>
+    <div class="inner">
+      <h1>{{ day }}</h1>
+      <nav>
+        <a class="nav-btn" href="{% if is_today_route %}/today{% else %}/day/{{ day }}{% endif %}" title="Home">Home</a>
+        <a class="nav-btn" href="/" title="All Days">All Days</a>
+      </nav>
+    </div>
   </header>
 
   <main>
@@ -104,7 +109,7 @@
       </div>
     </section>
 
-    <details class="card">
+    <details class="card" id="summary-card">
       <summary>Per-Video Summary</summary>
       {% if metrics.status_per_video %}
         <div class="table-wrap">
@@ -119,24 +124,26 @@
             </tr>
           </thead>
           <tbody>
-            {% for vid, status in metrics.status_per_video.items() %}
-            <tr>
+            {% set status_filter = status %}
+            {% for vid, st in metrics.status_per_video.items() %}
+            <tr class="{% if play == vid %}playing{% endif %}">
               <td>
                 {% set t = metrics.first_seen_ts_per_video.get(vid) %}
                 {% if t %}
-                  {{ t.strftime('%H:%M:%S') }}
+                  <a href="#log-{{ vid }}" class="link-log">{{ t.strftime('%H:%M:%S') }}</a>
                 {% else %}
                   —
                 {% endif %}
               </td>
               <td>
-                <a href="#log-{{ vid }}" class="link-log">{{ vid }}</a>
+                {% if is_today_route %}{% set base = '/today' %}{% else %}{% set base = '/day/' ~ day %}{% endif %}
+                <a href="{{ base }}?play={{ vid }}{% if severity %}&severity={{ severity }}{% endif %}{% if status_filter %}&status={{ status_filter }}{% endif %}{% if gate %}&gate={{ gate }}{% endif %}#player" class="link-log" title="Open video player">{{ vid }}</a>
               </td>
-              {% set col = status_colors.get(status, '#3b82f6') %}
-              {% set tcol = status_text_colors.get(status, '#ffffff') %}
+              {% set col = status_colors.get(st, '#3b82f6') %}
+              {% set tcol = status_text_colors.get(st, '#ffffff') %}
               <td>
-                <span class="tag status-chip" style="background: {{ col }}; color: {{ tcol }}" aria-label="{{ status }}" title="{{ status }}">
-                  {{ status }}
+                <span class="tag status-chip" style="background: {{ col }}; color: {{ tcol }}" aria-label="{{ st }}" title="{{ st }}">
+                  {{ st }}
                   {% set gdir = metrics.gate_direction_per_video.get(vid) %}
                   {% if gdir %}
                     {% set arrow = '↕' if gdir == 'both' else ('↑' if gdir == 'up' else '↓') %}
@@ -165,6 +172,17 @@
         <p>No video summaries.</p>
       {% endif %}
     </details>
+
+    {% if video_src %}
+    <section class="card" id="player">
+      <h2>Video Player{% if play %} — {{ play }}{% endif %}</h2>
+      <div class="video-wrap">
+        <video class="video-embed" controls preload="metadata" src="{{ video_src }}">
+          Your browser does not support the video tag.
+        </video>
+      </div>
+    </section>
+    {% endif %}
 
     <section class="card">
       <h2>Processing Times Chart</h2>
@@ -286,8 +304,21 @@
           }
         }catch(e){ /* noop */ }
       }
+      function ensureSummaryOpenIfPlaying(){
+        try{
+          var params = new URLSearchParams(window.location.search);
+          var hasPlay = params.has('play');
+          var h = window.location.hash || '';
+          if(hasPlay || h === '#player'){
+            var s = document.getElementById('summary-card');
+            if(s && !s.open){ s.open = true; }
+          }
+        }catch(e){ /* noop */ }
+      }
       ensureLogsOpenIfHash();
+      ensureSummaryOpenIfPlaying();
       window.addEventListener('hashchange', ensureLogsOpenIfHash);
+      window.addEventListener('popstate', ensureSummaryOpenIfPlaying);
     })();
   </script>
 </body>

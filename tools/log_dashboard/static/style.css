@@ -4,7 +4,13 @@
 }
 *{box-sizing:border-box} body{margin:0;font-family:system-ui,-apple-system,Segoe UI,Roboto,Ubuntu,Arial,sans-serif;background:var(--bg);color:var(--text)}
 html{scroll-behavior:smooth}
-header{padding:16px 20px;border-bottom:1px solid #222}
+header{padding:16px 20px;border-bottom:1px solid #222;position:sticky;top:0;z-index:1000;background:var(--bg)}
+/* Center header content to match main width */
+header .inner{max-width:1200px;margin:0 auto;display:flex;gap:12px;align-items:center;justify-content:space-between}
+/* Ensure header title aligns vertically with nav buttons */
+header .inner h1{margin:0;line-height:1}
+header .header-left{display:flex;flex-direction:column}
+header .header-left .muted{margin:4px 0 0}
 h1{margin:0 0 8px 0;font-size:22px}
 main{max-width:1200px;margin:0 auto;padding:20px}
 .card{background:var(--card);padding:16px;border-radius:10px;margin-bottom:16px}
@@ -14,7 +20,7 @@ main{max-width:1200px;margin:0 auto;padding:20px}
 .grid > .card{margin-bottom:0}
 .days{list-style:none;padding:0;margin:0;display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:8px}
 .days li a{display:block;padding:10px 12px;border-radius:8px;background:#1c2130;color:var(--text);text-decoration:none}
-.controls{margin-bottom:8px}
+.controls{margin-bottom:12px}
 .filters{display:flex;gap:12px;align-items:baseline}
 .filters .muted{margin:0;line-height:1}
 .filters select,.filters button{padding:8px 10px;border-radius:8px;border:1px solid #333;background:#1c2130;color:var(--text)}
@@ -28,6 +34,7 @@ main{max-width:1200px;margin:0 auto;padding:20px}
 .table th{color:var(--muted);font-weight:600}
 .table-wrap{overflow-x:auto}
 .table{min-width:540px}
+.table tr.playing{background:#1a2030;outline:2px solid #9fb0ff}
 .link-log{color:#9fb0ff;text-decoration:none}
 .link-log:hover{text-decoration:underline}
 .card summary{cursor:pointer;font-weight:700;margin-bottom:10px;list-style:none;font-size:1.5em;line-height:1.25;margin:0 0 4px 0}
@@ -47,8 +54,24 @@ main{max-width:1200px;margin:0 auto;padding:20px}
 .log .video{color:#9fb0ff;word-break:break-word;overflow-wrap:anywhere}
 .log .video.none{color:#667089}
 .log .msg{white-space:pre-wrap;word-break:break-word;overflow-wrap:anywhere}
-.log:target{background:#1a2030;outline:2px solid #9fb0ff;scroll-margin-top:12px}
+.log:target{background:#1a2030;outline:2px solid #9fb0ff;scroll-margin-top:72px}
+.video-wrap{display:block}
+.video-embed{width:100%;max-height:60vh;background:#000;border-radius:8px}
+#player{scroll-margin-top:72px}
 nav a{color:#9fb0ff;text-decoration:none}
+/* Header navigation buttons */
+header nav{display:flex;gap:8px}
+header nav .nav-btn{display:inline-flex;align-items:center;gap:6px;padding:6px 10px;border-radius:8px;background:#1c2130;color:var(--text);border:1px solid #2a2f40;text-decoration:none}
+header nav .nav-btn:hover{border-color:#3b82f6}
+/* Prevent nav button text wrapping */
+header nav .nav-btn{white-space:nowrap}
+@media (max-width: 720px){
+  header .inner{padding:0}
+  /* Make header buttons narrower to avoid title wrapping */
+  header nav{gap:6px}
+  header nav .nav-btn{padding:6px 8px;font-size:14px;min-width:auto}
+  header .inner h1{line-height:1;margin:0}
+}
 
 .chart-wrap{display:block}
 .chart{background:#11151d;border-radius:8px;display:block}
@@ -71,6 +94,9 @@ nav a{color:#9fb0ff;text-decoration:none}
 /* Gate direction chip next to video name */
 .gate-chip{margin-left:4px;background:#1c2130;color:var(--muted);padding:1px 6px;font-size:15px;font-weight:700;line-height:1}
 .status-chip .arrow-mobile{display:none}
+/* Embedded video player */
+.video-wrap{display:block}
+.video-embed{width:100%;max-height:60vh;background:#000;border-radius:8px}
 /* Clear filter button near selected status badge */
 .clear-filter{display:inline-flex;align-items:center;justify-content:center;width:20px;height:20px;margin-left:6px;border-radius:999px;background:#1c2130;color:var(--text);text-decoration:none;border:1px solid #2a2f40;line-height:1;font-size:14px}
 .clear-filter:active{transform:scale(0.98)}
@@ -113,6 +139,7 @@ nav a{color:#9fb0ff;text-decoration:none}
   .table{min-width:unset;width:100%;table-layout:fixed}
   .table th,.table td{word-break:break-word;overflow-wrap:anywhere}
   .table th,.table td{padding:6px}
+  .table tr.playing{background:#1a2030;outline:2px solid #9fb0ff}
 
   /* Chart: responsive height; cap to keep compact */
   .chart{height:auto;max-height:160px}

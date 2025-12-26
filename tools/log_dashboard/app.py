@@ -5,7 +5,7 @@ from datetime import datetime, date
 from typing import List, Dict, Optional
 
 from fastapi import FastAPI, Query, HTTPException
-from fastapi.responses import HTMLResponse, RedirectResponse
+from fastapi.responses import HTMLResponse, RedirectResponse, FileResponse
 from fastapi.staticfiles import StaticFiles
 from jinja2 import Environment, FileSystemLoader, select_autoescape
 
@@ -14,6 +14,7 @@ from jinja2 import Environment, FileSystemLoader, select_autoescape
 LOG_PATH = os.getenv("LOG_PATH", default="")
 LOG_DIR = LOG_PATH if LOG_PATH else os.getcwd()
 LOG_BASE = os.getenv("LOG_BASENAME", default="video_processor.log")
+VIDEO_FOLDER = os.getenv("VIDEO_FOLDER", default=None)
 
 # Patterns used by CustomTimedRotatingFileHandler in main.py
 ROTATED_PATTERN = re.compile(r"^(?P<base>.+)_((?P<date>\d{4}-\d{2}-\d{2})).log$")
@@ -316,6 +317,31 @@ def shade_color_for_status(status: str, video: str) -> str:
     return _rgb01_to_hex(r2, g2, b2)
 
 
+# --- Video file lookup ---
+VIDEO_INDEX: Dict[str, str] = {}
+
+def find_video_path(basename: str) -> Optional[str]:
+    """Find full path for a given video basename in VIDEO_FOLDER recursively.
+
+    Caches results in VIDEO_INDEX. Only returns .mp4 files and prevents traversal.
+    """
+    try:
+        name = os.path.basename(basename)
+        if not name.lower().endswith(".mp4"):
+            return None
+        if name in VIDEO_INDEX and os.path.isfile(VIDEO_INDEX[name]):
+            return VIDEO_INDEX[name]
+        if VIDEO_FOLDER and os.path.isdir(VIDEO_FOLDER):
+            for root, _dirs, files in os.walk(VIDEO_FOLDER):
+                if name in files:
+                    full = os.path.join(root, name)
+                    VIDEO_INDEX[name] = full
+                    return full
+    except Exception:
+        return None
+    return None
+
+
 @app.get("/", response_class=HTMLResponse)
 def index():
     days = list_log_files()
@@ -335,6 +361,7 @@ def today_view(
     severity: Optional[str] = Query(default=None, description="Filter by severity: INFO/WARNING/ERROR/etc."),
     status: Optional[str] = Query(default=None, description="Filter by final video status: gate_crossing/no_motion/..."),
     gate: Optional[str] = Query(default=None, description="Filter by gate crossing direction: up/down"),
+    play: Optional[str] = Query(default=None, description="Basename of video to embed (.mp4)"),
 ):
     """Render today's log page without redirect.
 
@@ -380,6 +407,13 @@ def today_view(
     ordered_videos = sorted(ptpv.keys(), key=lambda v: (fst.get(v) or datetime.min, v))
     chart_pairs = [(v, ptpv[v]) for v in ordered_videos]
 
+    # Resolve video source if requested
+    video_src = None
+    if play:
+        vp = find_video_path(play)
+        if vp:
+            video_src = f"/video/{os.path.basename(vp)}"
+
     tmpl = env.get_template("day.html")
     return tmpl.render(
         day=day,
@@ -400,6 +434,8 @@ def today_view(
         statuses_present=sorted(metrics["status_counts"].keys()),
         total_videos_all=metrics_all.get("videos_total", 0),
         log_dir=LOG_DIR,
+        play=play,
+        video_src=video_src,
     )
 
 
@@ -409,6 +445,7 @@ def day_view(
     severity: Optional[str] = Query(default=None, description="Filter by severity: INFO/WARNING/ERROR/etc."),
     status: Optional[str] = Query(default=None, description="Filter by final video status: gate_crossing/no_motion/..."),
     gate: Optional[str] = Query(default=None, description="Filter by gate crossing direction: up/down"),
+    play: Optional[str] = Query(default=None, description="Basename of video to embed (.mp4)"),
 ):
     days = list_log_files()
     if day not in days:
@@ -448,6 +485,13 @@ def day_view(
     fst = metrics.get("first_seen_ts_per_video", {})
     ordered_videos = sorted(ptpv.keys(), key=lambda v: (fst.get(v) or datetime.min, v))
     chart_pairs = [(v, ptpv[v]) for v in ordered_videos]
+    # Resolve video source if requested
+    video_src = None
+    if play:
+        vp = find_video_path(play)
+        if vp:
+            video_src = f"/video/{os.path.basename(vp)}"
+
     tmpl = env.get_template("day.html")
     return tmpl.render(
         day=day,
@@ -468,7 +512,18 @@ def day_view(
         statuses_present=sorted(metrics["status_counts"].keys()),
         total_videos_all=metrics_all.get("videos_total", 0),
         log_dir=LOG_DIR,
+        play=play,
+        video_src=video_src,
     )
+
+
+@app.get("/video/{basename}")
+def stream_video(basename: str):
+    """Serve an mp4 video by basename from VIDEO_FOLDER recursively."""
+    path = find_video_path(basename)
+    if not path:
+        raise HTTPException(status_code=404, detail="Video not found")
+    return FileResponse(path, media_type="video/mp4")
 
 
 # Static files (CSS)
