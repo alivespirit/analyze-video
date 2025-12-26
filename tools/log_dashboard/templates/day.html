@@ -35,7 +35,7 @@
     <section class="grid">
       <div class="card">
         <h2>Status Counts</h2>
-        {% if severity or status %}
+        {% if severity or status or gate %}
           <p class="muted">Filtered videos: <strong>{{ metrics.videos_total }}</strong> (Total today: <strong>{{ total_videos_all }}</strong>)</p>
         {% else %}
           <p class="muted">Total videos: <strong>{{ total_videos_all }}</strong></p>
@@ -62,8 +62,18 @@
       <div class="card">
         <h2>Gate Crossings</h2>
         <ul class="stats">
-          <li><span class="tag">up</span> <strong>{{ metrics.gate_counts.up }}</strong></li>
-          <li><span class="tag">down</span> <strong>{{ metrics.gate_counts.down }}</strong></li>
+          <li>
+            <a class="link-log" href="{% if gate == 'up' %}{{ base }}{% if severity or status %}?{% endif %}{% if severity %}severity={{ severity }}{% endif %}{% if status %}{% if severity %}&{% endif %}status={{ status }}{% endif %}{% else %}{{ base }}?gate=up{% if severity %}&severity={{ severity }}{% endif %}{% if status %}&status={{ status }}{% endif %}{% endif %}" title="{% if gate == 'up' %}Clear gate filter{% else %}Filter by gate: up{% endif %}">
+              <span class="tag {% if gate == 'up' %}active{% endif %}">up</span>
+            </a>
+            <strong>{{ metrics.gate_counts.up }}</strong>
+          </li>
+          <li>
+            <a class="link-log" href="{% if gate == 'down' %}{{ base }}{% if severity or status %}?{% endif %}{% if severity %}severity={{ severity }}{% endif %}{% if status %}{% if severity %}&{% endif %}status={{ status }}{% endif %}{% else %}{{ base }}?gate=down{% if severity %}&severity={{ severity }}{% endif %}{% if status %}&status={{ status }}{% endif %}{% endif %}" title="{% if gate == 'down' %}Clear gate filter{% else %}Filter by gate: down{% endif %}">
+              <span class="tag {% if gate == 'down' %}active{% endif %}">down</span>
+            </a>
+            <strong>{{ metrics.gate_counts.down }}</strong>
+          </li>
         </ul>
       </div>
 
@@ -119,10 +129,24 @@
                   —
                 {% endif %}
               </td>
-              <td><a href="#log-{{ vid }}" class="link-log">{{ vid }}</a></td>
+              <td>
+                <a href="#log-{{ vid }}" class="link-log">{{ vid }}</a>
+              </td>
               {% set col = status_colors.get(status, '#3b82f6') %}
               {% set tcol = status_text_colors.get(status, '#ffffff') %}
-              <td><span class="tag status-chip" style="background: {{ col }}; color: {{ tcol }}" aria-label="{{ status }}" title="{{ status }}">{{ status }}</span></td>
+              <td>
+                <span class="tag status-chip" style="background: {{ col }}; color: {{ tcol }}" aria-label="{{ status }}" title="{{ status }}">
+                  {{ status }}
+                  {% set gdir = metrics.gate_direction_per_video.get(vid) %}
+                  {% if gdir %}
+                    {% set arrow = '↕' if gdir == 'both' else ('↑' if gdir == 'up' else '↓') %}
+                    <span class="arrow-mobile" aria-hidden="true">{{ arrow }}</span>
+                  {% endif %}
+                </span>
+                {% if gdir %}
+                  <span class="tag gate-chip" title="Gate: {{ gdir }}" aria-label="Gate: {{ gdir }}">{{ arrow }}</span>
+                {% endif %}
+              </td>
               <td>{{ metrics.raw_events_per_video.get(vid, 0) }}</td>
               <td>
                 {% set p = metrics.processing_time_per_video.get(vid) %}

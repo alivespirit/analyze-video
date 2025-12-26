@@ -65,6 +65,12 @@ nav a{color:#9fb0ff;text-decoration:none}
 .badge-row .tag{line-height:1;vertical-align:baseline}
 .badge-row .tag{opacity:0.65;transition:opacity .2s ease}
 .badge-row .tag.active{opacity:1}
+/* Active highlight for selected gate/status chips inside stats lists */
+.stats .tag.active{outline:2px solid #9fb0ff;outline-offset:1px}
+
+/* Gate direction chip next to video name */
+.gate-chip{margin-left:4px;background:#1c2130;color:var(--muted);padding:1px 6px;font-size:15px;font-weight:700;line-height:1}
+.status-chip .arrow-mobile{display:none}
 /* Clear filter button near selected status badge */
 .clear-filter{display:inline-flex;align-items:center;justify-content:center;width:20px;height:20px;margin-left:6px;border-radius:999px;background:#1c2130;color:var(--text);text-decoration:none;border:1px solid #2a2f40;line-height:1;font-size:14px}
 .clear-filter:active{transform:scale(0.98)}
@@ -83,7 +89,7 @@ nav a{color:#9fb0ff;text-decoration:none}
   main{padding:12px}
   .card{padding:12px}
   .card h2{margin:0 0 6px 0;line-height:1.2;font-size:18px}
-  .card summary{font-size:18px;line-height:1.2;margin:0 0 4px 0;font-weight:700}
+  .card summary{font-size:18px;line-height:1.2;margin:0 0 0 0;font-weight:700}
   .card summary::before{margin-right:6px}
   .grid{grid-template-columns:1fr}
   .filters{flex-wrap:wrap;gap:8px}
@@ -113,7 +119,10 @@ nav a{color:#9fb0ff;text-decoration:none}
     .chart .axis-label{font-size:16px}
   .chart text.axis-label{fill:#a8adc0 !important}
   .tag{font-size:12px;padding:2px 6px}
+  .gate-chip{padding:1px 6px;font-size:13px;line-height:1}
   /* Per-Video Summary: show colored chip, hide text */
-  .table .status-chip{display:inline-block;width:20px;height:14px;border-radius:999px;padding:0;vertical-align:middle;font-size:0;}
+  .table .status-chip{display:inline-flex;align-items:center;justify-content:center;width:24px;height:16px;border-radius:999px;padding:0;vertical-align:middle;font-size:0;}
+  .table .status-chip .arrow-mobile{display:inline;font-size:14px;line-height:1;font-weight:700}
+  .table .gate-chip{display:none}
   .clear-filter{width:18px;height:18px;font-size:12px;margin-left:4px}
 }

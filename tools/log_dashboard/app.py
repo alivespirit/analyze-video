@@ -31,7 +31,7 @@ STATUS_RE = re.compile(r"Motion detection complete\. Status: (?P<status>[a-z_]+)
 FULL_TIME_RE = re.compile(r"Full processing took (?P<seconds>[0-9]+\.[0-9]+|[0-9]+) seconds")
 RAW_EVENTS_RE = re.compile(r"Found (?P<count>\d+) raw motion event\(s\)")
 MD_TIME_RE = re.compile(r"Motion detection took (?P<seconds>[0-9]+\.[0-9]+|[0-9]+) seconds")
-GATE_RE = re.compile(r"Gate crossing detected! Direction: (?P<dir>up|down)")
+GATE_RE = re.compile(r"Gate crossing detected! Direction: (?P<dir>up|down|both)")
 NEW_FILE_RE = re.compile(r"^New file detected:")
 
 
@@ -126,6 +126,7 @@ def collect_metrics(entries: List[Dict]) -> Dict:
     raw_events_per_video: Dict[str, int] = {}
     md_time_seconds: List[float] = []
     gate_counts = {"up": 0, "down": 0}
+    gate_direction_per_video: Dict[str, str] = {}
     first_seen_ts_per_video: Dict[str, datetime] = {}
 
     for e in entries:
@@ -168,7 +169,22 @@ def collect_metrics(entries: List[Dict]) -> Dict:
 
         m = GATE_RE.search(content)
         if m:
-            gate_counts[m.group("dir")] += 1
+            direction = m.group("dir")
+            # Count 'both' as one up and one down
+            if direction == "both":
+                gate_counts["up"] += 1
+                gate_counts["down"] += 1
+            else:
+                gate_counts[direction] += 1
+            # Track direction per video; upgrade to 'both' when needed
+            if vid:
+                current = gate_direction_per_video.get(vid)
+                if direction == "both":
+                    gate_direction_per_video[vid] = "both"
+                elif current is None:
+                    gate_direction_per_video[vid] = direction
+                elif current != direction and current != "both":
+                    gate_direction_per_video[vid] = "both"
 
     # Count videos per status
     status_counts: Dict[str, int] = {}
@@ -210,6 +226,7 @@ def collect_metrics(entries: List[Dict]) -> Dict:
         "status_per_video": status_per_video,
         "motion_detection_stats": md_stats,
         "gate_counts": gate_counts,
+        "gate_direction_per_video": gate_direction_per_video,
         "first_seen_ts_per_video": first_seen_ts_per_video,
         "videos_total": len({v for v in status_per_video.keys()} | {v for v in full_time_per_video.keys()} | {v for v in raw_events_per_video.keys()}),
     }
@@ -317,6 +334,7 @@ def index():
 def today_view(
     severity: Optional[str] = Query(default=None, description="Filter by severity: INFO/WARNING/ERROR/etc."),
     status: Optional[str] = Query(default=None, description="Filter by final video status: gate_crossing/no_motion/..."),
+    gate: Optional[str] = Query(default=None, description="Filter by gate crossing direction: up/down"),
 ):
     """Render today's log page without redirect.
 
@@ -339,6 +357,12 @@ def today_view(
     if status:
         spv = metrics_all["status_per_video"]
         entries = [e for e in entries if e.get("video") and spv.get(e["video"]) == status]
+    if gate in ("up", "down"):
+        gpv = metrics_all.get("gate_direction_per_video", {})
+        entries = [
+            e for e in entries
+            if e.get("video") and (gpv.get(e["video"]) == gate or gpv.get(e["video"]) == "both")
+        ]
 
     metrics = collect_metrics(entries)
 
@@ -362,6 +386,7 @@ def today_view(
         is_today_route=True,
         severity=severity,
         status=status,
+        gate=gate,
         entries=entries,
         metrics=metrics,
         chart_pairs=chart_pairs,
@@ -383,6 +408,7 @@ def day_view(
     day: str,
     severity: Optional[str] = Query(default=None, description="Filter by severity: INFO/WARNING/ERROR/etc."),
     status: Optional[str] = Query(default=None, description="Filter by final video status: gate_crossing/no_motion/..."),
+    gate: Optional[str] = Query(default=None, description="Filter by gate crossing direction: up/down"),
 ):
     days = list_log_files()
     if day not in days:
@@ -399,6 +425,12 @@ def day_view(
     if status:
         spv = metrics_all["status_per_video"]
         entries = [e for e in entries if e.get("video") and spv.get(e["video"]) == status]
+    if gate in ("up", "down"):
+        gpv = metrics_all.get("gate_direction_per_video", {})
+        entries = [
+            e for e in entries
+            if e.get("video") and (gpv.get(e["video"]) == gate or gpv.get(e["video"]) == "both")
+        ]
 
     metrics = collect_metrics(entries)
 
@@ -422,6 +454,7 @@ def day_view(
         is_today_route=False,
         severity=severity,
         status=status,
+        gate=gate,
         entries=entries,
         metrics=metrics,
         chart_pairs=chart_pairs,
