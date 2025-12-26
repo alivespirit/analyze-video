@@ -6,6 +6,7 @@ A lightweight FastAPI server that parses your application logs and serves a simp
 
 - Per-day log viewer with: timestamp, severity, video basename, message
 - Filters: Severity and Status (e.g., `no_motion`, `gate_crossing`, `no_significant_motion`, `error`)
+ - Filters: Severity (single-select), Gate (up/down/both), and Status (multi-select)
 - Status Counts tile shows totals and (when filtered) filtered vs total for the day
 - Per-Video Summary (collapsible):
 	- Start time: first "New file detected" timestamp (HH:MM:SS)
@@ -29,6 +30,13 @@ Requirements:
 - Set `VIDEO_FOLDER` to the root directory containing your original `.mp4` files. The server searches it recursively.
 - Files are served via `GET /video/{basename}`; only `.mp4` basenames are allowed.
 - To open the player directly, use `play=<basename>` in the query string (e.g., `/today?play=clip123.mp4#player`).
+
+### Filtering
+
+- Status is multi-select: toggle badges or click legend items to add/remove statuses. The query uses a single CSV param like `status=no_motion,gate_crossing`.
+- Counts remain full-day while filtering; the Status Counts tile always shows totals for all statuses.
+- Gate filter supports `up` and `down`, with `both` counted in both directions when present.
+- The header shows "Filtered videos" when any filter is active; a small Clear control appears there and resets all filters back to the full day view.
 
 ## Run
 

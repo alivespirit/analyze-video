@@ -181,6 +181,7 @@ A lightweight web dashboard that reads existing log files and provides per-day i
 
 - Per-day views: timestamp, severity, video basename, message
 - Filters: Severity and Status (`no_motion`, `gate_crossing`, `no_significant_motion`, `error`)
+ - Filters: Severity (single), Gate (up/down/both), and Status (multi-select)
 - Status Counts with totals and filtered counts
 - Collapsible Per-Video Summary: Start time (first “New file detected”), status, raw events, processing time (prefers motion detection; falls back to full processing)
 - Processing Times Chart: evenly spaced bars, colored by status, with min/avg/max guide lines and right-aligned axis labels; bars are clickable to jump to logs
@@ -201,6 +202,13 @@ A lightweight web dashboard that reads existing log files and provides per-day i
 - Route details:
    - `play=<basename>` query parameter triggers the embedded player (e.g., `/today?play=YYYYMMDD_HHMMSS.mp4#player`).
    - The Per-Video Summary remains open when a player is shown and highlights the currently opened video row.
+
+### Filtering
+
+- Multi-select Status: Click status badges or legend items to add/remove multiple statuses. The URL uses a single `status` CSV (e.g., `status=no_motion,gate_crossing`).
+- Full counts when filtered: Status Counts always show totals for the day, even when filters are applied.
+- Gate filter: `up`/`down` supported; `both` is included in counts for both directions when detected.
+- Clear control: When any filter is active, a small Clear chip appears next to the "Filtered videos" summary and resets all filters.
 
 ### Enable from main.py
 
