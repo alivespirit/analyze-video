@@ -27,7 +27,9 @@ main{max-width:1200px;margin:0 auto;padding:20px}
 .table{min-width:540px}
 .link-log{color:#9fb0ff;text-decoration:none}
 .link-log:hover{text-decoration:underline}
-.card summary{cursor:pointer;font-weight:600;margin-bottom:10px;list-style:none}
+.card summary{cursor:pointer;font-weight:700;margin-bottom:10px;list-style:none;font-size:1.5em;line-height:1.25;margin:0 0 4px 0}
+.card summary::before{content:"\25B8"; /* ▶ */ display:inline-block; margin-right:8px; color:var(--muted)}
+.card[open] summary::before{content:"\25BE"; /* ▼ */}
 .card summary::-webkit-details-marker{display:none}
 .logs{list-style:none;padding:0;margin:0}
 .log{display:grid;grid-template-columns:96px 64px 220px 1fr;gap:5px;padding:5px;border-bottom:1px solid #1d2030}
@@ -69,6 +71,8 @@ nav a{color:#9fb0ff;text-decoration:none}
   main{padding:12px}
   .card{padding:12px}
   .card h2{margin:0 0 6px 0;line-height:1.2;font-size:18px}
+  .card summary{font-size:18px;line-height:1.2;margin:0 0 4px 0;font-weight:700}
+  .card summary::before{margin-right:6px}
   .grid{grid-template-columns:1fr}
   .filters{flex-wrap:wrap;gap:8px}
   .filters label{flex:1 1 100%}
