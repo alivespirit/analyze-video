@@ -13,7 +13,8 @@ main{max-width:1200px;margin:0 auto;padding:20px}
 .days{list-style:none;padding:0;margin:0;display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:8px}
 .days li a{display:block;padding:10px 12px;border-radius:8px;background:#1c2130;color:var(--text);text-decoration:none}
 .controls{margin-bottom:8px}
-.filters{display:flex;gap:12px;align-items:center}
+.filters{display:flex;gap:12px;align-items:baseline}
+.filters .muted{margin:0;line-height:1}
 .filters select,.filters button{padding:8px 10px;border-radius:8px;border:1px solid #333;background:#1c2130;color:var(--text)}
 .stats{list-style:none;padding:0;margin:0}
 .stats li{display:flex;gap:8px;align-items:center;padding:6px 0;border-bottom:1px dashed #2a2f40}
@@ -56,6 +57,15 @@ nav a{color:#9fb0ff;text-decoration:none}
 .chart-legend ul{list-style:none;padding:0;margin:0;display:flex;flex-wrap:wrap;gap:8px}
 .legend-item{display:flex;align-items:center;gap:6px;padding:4px 8px;background:#161922;border-radius:8px}
 .legend-chip{display:inline-block;width:12px;height:12px;border-radius:2px}
+/* Badge row: single line severity chips */
+.badge-row{display:flex;gap:8px;align-items:baseline;flex-wrap:nowrap;overflow-x:auto;padding:0}
+.badge-row .link-log{display:flex;align-items:center}
+.badge-row .tag{line-height:1;vertical-align:baseline}
+.badge-row .tag{opacity:0.65;transition:opacity .2s ease}
+.badge-row .tag.active{opacity:1}
+/* Clear filter button near selected status badge */
+.clear-filter{display:inline-flex;align-items:center;justify-content:center;width:20px;height:20px;margin-left:6px;border-radius:999px;background:#1c2130;color:var(--text);text-decoration:none;border:1px solid #2a2f40;line-height:1;font-size:14px}
+.clear-filter:active{transform:scale(0.98)}
 
 /* Floating action button (mobile only) */
 .fab{position:fixed;right:16px;bottom:16px;width:44px;height:44px;border-radius:999px;background:#1c2130;color:var(--text);display:flex;align-items:center;justify-content:center;box-shadow:0 6px 16px rgba(0,0,0,0.35);border:1px solid #2a2f40;z-index:9999;text-decoration:none;font-size:22px;line-height:1}
@@ -77,6 +87,8 @@ nav a{color:#9fb0ff;text-decoration:none}
   .filters{flex-wrap:wrap;gap:8px}
   .filters label{flex:1 1 100%}
   .filters select,.filters button{width:100%}
+  .badge-row{gap:6px}
+  .badge-row .tag{opacity:0.6}
 
   /* Logs: stack entries with clearer hierarchy */
   .log{grid-template-columns:1fr;gap:6px;padding:10px}
@@ -101,4 +113,5 @@ nav a{color:#9fb0ff;text-decoration:none}
   .tag{font-size:12px;padding:2px 6px}
   /* Per-Video Summary: show colored chip, hide text */
   .table .status-chip{display:inline-block;width:20px;height:14px;border-radius:999px;padding:0;vertical-align:middle;font-size:0;}
+  .clear-filter{width:18px;height:18px;font-size:12px;margin-left:4px}
 }

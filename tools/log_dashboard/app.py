@@ -227,6 +227,15 @@ STATUS_COLORS = {
     "error": "#ef4444",               # red
 }
 
+# Severity → color mapping for badges
+SEVERITY_COLORS = {
+    "DEBUG": "#9ca3af",   # gray
+    "INFO": "#3b82f6",    # blue
+    "WARNING": "#f59e0b", # amber
+    "ERROR": "#ef4444",   # red
+    "CRITICAL": "#dc2626",# deep red
+}
+
 
 def _hex_to_rgb01(hex_color: str):
     h = hex_color.lstrip("#")
@@ -261,6 +270,7 @@ def text_color_on_bg(hex_color: str) -> str:
 
 # Precompute text colors for badges
 STATUS_TEXT_COLORS = {k: text_color_on_bg(v) for k, v in STATUS_COLORS.items()}
+SEVERITY_TEXT_COLORS = {k: text_color_on_bg(v) for k, v in SEVERITY_COLORS.items()}
 
 
 # (moved helper functions above)
@@ -349,6 +359,7 @@ def today_view(
     tmpl = env.get_template("day.html")
     return tmpl.render(
         day=day,
+        is_today_route=True,
         severity=severity,
         status=status,
         entries=entries,
@@ -358,7 +369,9 @@ def today_view(
         statuses=sorted(metrics_all["status_counts"].keys()),
         video_colors=video_colors,
         status_colors=STATUS_COLORS,
+        severity_colors=SEVERITY_COLORS,
         status_text_colors=STATUS_TEXT_COLORS,
+        severity_text_colors=SEVERITY_TEXT_COLORS,
         statuses_present=sorted(metrics["status_counts"].keys()),
         total_videos_all=metrics_all.get("videos_total", 0),
         log_dir=LOG_DIR,
@@ -406,6 +419,7 @@ def day_view(
     tmpl = env.get_template("day.html")
     return tmpl.render(
         day=day,
+        is_today_route=False,
         severity=severity,
         status=status,
         entries=entries,
@@ -415,7 +429,9 @@ def day_view(
         statuses=sorted(metrics_all["status_counts"].keys()),
         video_colors=video_colors,
         status_colors=STATUS_COLORS,
+        severity_colors=SEVERITY_COLORS,
         status_text_colors=STATUS_TEXT_COLORS,
+        severity_text_colors=SEVERITY_TEXT_COLORS,
         statuses_present=sorted(metrics["status_counts"].keys()),
         total_videos_all=metrics_all.get("videos_total", 0),
         log_dir=LOG_DIR,

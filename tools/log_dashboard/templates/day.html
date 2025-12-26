@@ -16,26 +16,20 @@
     <!-- Floating action buttons (mobile): jump to end / top -->
     <a href="#page-bottom" class="fab" aria-label="Jump to end">↓</a>
     <a href="#page-top" class="fab-top" aria-label="Back to top">↑</a>
+    {% if is_today_route %}{% set base = '/today' %}{% else %}{% set base = '/day/' ~ day %}{% endif %}
     <section class="controls">
-      <form method="get" class="filters">
-        <label>Severity:
-          <select name="severity">
-            <option value="" {% if not severity %}selected{% endif %}>All</option>
-            {% for lvl in levels %}
-            <option value="{{ lvl }}" {% if severity==lvl %}selected{% endif %}>{{ lvl }}</option>
-            {% endfor %}
-          </select>
-        </label>
-        <label>Status:
-          <select name="status">
-            <option value="" {% if not status %}selected{% endif %}>All</option>
-            {% for s in statuses %}
-            <option value="{{ s }}" {% if status==s %}selected{% endif %}>{{ s }}</option>
-            {% endfor %}
-          </select>
-        </label>
-        <button type="submit">Apply</button>
-      </form>
+      <div class="filters">
+        <span class="muted">Severity:</span>
+        <div class="badge-row">
+          {% for lvl in levels %}
+            {% set scol = severity_colors.get(lvl, '#3b82f6') %}
+            {% set stcol = severity_text_colors.get(lvl, '#ffffff') %}
+            <a class="link-log" href="{% if severity == lvl %}{{ base }}{% if status %}?status={{ status }}{% endif %}{% else %}{{ base }}?severity={{ lvl }}{% if status %}&status={{ status }}{% endif %}{% endif %}" title="{% if severity == lvl %}Clear severity filter{% else %}Filter by {{ lvl }}{% endif %}">
+              <span class="tag {% if severity == lvl %}active{% endif %}" style="background: {{ scol }}; color: {{ stcol }}">{{ lvl }}</span>
+            </a>
+          {% endfor %}
+        </div>
+      </div>
     </section>
 
     <section class="grid">
@@ -47,11 +41,17 @@
           <p class="muted">Total videos: <strong>{{ total_videos_all }}</strong></p>
         {% endif %}
         {% if metrics.status_counts %}
-          <ul class="stats">
+          {% if is_today_route %}{% set base = '/today' %}{% else %}{% set base = '/day/' ~ day %}{% endif %}
+          <ul class="stats status-badges">
             {% for k,v in metrics.status_counts.items() %}
               {% set col = status_colors.get(k, '#3b82f6') %}
               {% set tcol = status_text_colors.get(k, '#ffffff') %}
-              <li><span class="tag" style="background: {{ col }}; color: {{ tcol }}">{{ k }}</span> <strong>{{ v }}</strong></li>
+              <li>
+                <a class="link-log" href="{% if status == k %}{{ base }}{% if severity %}?severity={{ severity }}{% endif %}{% else %}{{ base }}?status={{ k }}{% if severity %}&severity={{ severity }}{% endif %}{% endif %}" title="{% if status == k %}Clear status filter{% else %}Filter by {{ k }}{% endif %}">
+                  <span class="tag" style="background: {{ col }}; color: {{ tcol }}">{{ k }}</span>
+                </a>
+                <strong>{{ v }}</strong>
+              </li>
             {% endfor %}
           </ul>
         {% else %}
@@ -215,8 +215,8 @@
       {% endif %}
     </section>
 
-    <section class="card">
-      <h2>Log Entries{% if severity %} ({{ severity }}){% endif %}</h2>
+    <details class="card" id="logs-card">
+      <summary>Log Entries{% if severity %} ({{ severity }}){% endif %}</summary>
       {% if entries %}
         {% set ns = namespace(seen={}) %}
         <ul class="logs">
@@ -247,9 +247,24 @@
       {% else %}
         <p>No entries for this day and filter.</p>
       {% endif %}
-    </section>
+    </details>
   </main>
   <!-- Target anchor for jump-to-end -->
   <div id="page-bottom"></div>
+  <script>
+    (function(){
+      function ensureLogsOpenIfHash(){
+        try{
+          var h = window.location.hash || '';
+          if(h.startsWith('#log-')){
+            var d = document.getElementById('logs-card');
+            if(d && !d.open){ d.open = true; }
+          }
+        }catch(e){ /* noop */ }
+      }
+      ensureLogsOpenIfHash();
+      window.addEventListener('hashchange', ensureLogsOpenIfHash);
+    })();
+  </script>
 </body>
 </html>
