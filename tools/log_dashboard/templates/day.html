@@ -174,7 +174,7 @@
                   {% set qs = qs ~ '&status=' ~ status_csv %}
                 {% endif %}
                 {% if gate %}{% set qs = qs ~ '&gate=' ~ gate %}{% endif %}
-                <a href="{{ base }}?{{ qs }}#player" class="link-log" title="Open video player">{{ vid }}</a>
+                <a href="{{ base }}?{{ qs }}" class="link-log" title="Open video player">{{ vid }}</a>
               </td>
               {% set col = status_colors.get(st, '#3b82f6') %}
               {% set tcol = status_text_colors.get(st, '#ffffff') %}
@@ -402,17 +402,6 @@
           }
         }catch(e){ /* noop */ }
       }
-      function ensureSummaryOpenIfPlaying(){
-        try{
-          var params = new URLSearchParams(window.location.search);
-          var hasPlay = params.has('play');
-          var h = window.location.hash || '';
-          if(hasPlay || h === '#player'){
-            var s = document.getElementById('summary-card');
-            if(s && !s.open){ s.open = true; }
-          }
-        }catch(e){ /* noop */ }
-      }
       function attachNavClears(){
         try{
           var links = document.querySelectorAll('header nav a[title="Home"], header nav a[title="All Days"]');
@@ -425,11 +414,50 @@
           }
         }catch(e){ /* noop */ }
       }
+      function focusInlinePlayerIfPresent(){
+        try{
+          var params = new URLSearchParams(window.location.search);
+          var play = params.get('play');
+          if(!play){ return; }
+          // Ensure summary is open (in case persisted state had it closed)
+          var s = document.getElementById('summary-card');
+          if(s && !s.open){ s.open = true; }
+          // After DOM paints, scroll to inline player or playing row (center aligned)
+          setTimeout(function(){
+            try{
+              var playerRow = document.querySelector('tr.player-row');
+              var header = document.querySelector('header');
+              var headerH = header ? (header.offsetHeight || 0) : 0;
+              var pad = 6; // small breathing room under header
+              if(playerRow){
+                var prev = playerRow.previousElementSibling;
+                var topElem = (prev && prev.tagName && prev.tagName.toLowerCase() === 'tr') ? prev : playerRow;
+                var rect = topElem.getBoundingClientRect();
+                var y = window.scrollY + rect.top - headerH - pad;
+                try{ window.scrollTo({ top: y, behavior: 'smooth' }); }
+                catch(e){ window.scrollTo(0, y); }
+              } else {
+                // Fallback: align playing row similarly
+                var row = document.querySelector('tr.playing');
+                if(row){
+                  var rPrev = row.previousElementSibling;
+                  var rTopElem = (rPrev && rPrev.tagName && rPrev.tagName.toLowerCase() === 'tr') ? rPrev : row;
+                  var rRect = rTopElem.getBoundingClientRect();
+                  var ry = window.scrollY + rRect.top - headerH - pad;
+                  try{ window.scrollTo({ top: ry, behavior: 'smooth' }); }
+                  catch(e){ window.scrollTo(0, ry); }
+                }
+              }
+            }catch(e){ /* noop */ }
+          }, 50);
+        }catch(e){ /* noop */ }
+      }
       // First restore user's previous open/closed state
       restoreOpenState();
       // Then apply forced openings based on hash or query
       ensureLogsOpenIfHash();
-      ensureSummaryOpenIfPlaying();
+      // Finally, focus the inline player (or playing row) if present
+      focusInlinePlayerIfPresent();
       // Clear persisted state when navigating Home or All Days
       attachNavClears();
       // Ensure scroll-up button works even if hash doesn't change
@@ -446,7 +474,6 @@
         }catch(e){ /* noop */ }
       })();
       window.addEventListener('hashchange', ensureLogsOpenIfHash);
-      window.addEventListener('popstate', ensureSummaryOpenIfPlaying);
     })();
   </script>
 </body>
