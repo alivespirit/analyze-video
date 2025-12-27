@@ -192,16 +192,30 @@ A lightweight web dashboard that reads existing log files and provides per-day i
 
 ### Video Playback
 
-- Embedded player: Clicking a video name in Per-Video Summary opens an embedded HTML5 player on the page.
+- Embedded player: Clicking a video name in Per-Video Summary opens an embedded HTML5 player inline beneath the selected row. No full page reload.
 - Timestamp links: Clicking the start time jumps to the first log entry for that video.
-- Preserves filters: Opening a video keeps current filters (severity/status/gate) unchanged.
+- Preserves filters: Opening a video keeps current filters (severity/status/gate) unchanged. The URL is updated with `play=<basename>` via the History API for sharability and back/forward navigation.
 - Gate indicator: An arrow (↑/↓/↕) appears in the Status column indicating gate direction (both counts as up and down).
 - Requirements:
    - Set `VIDEO_FOLDER` in your environment to the root folder where original `.mp4` files reside (monitored recursively).
    - The dashboard serves files via `GET /video/{basename}`. Only `.mp4` basenames are allowed; the first matching file is returned.
 - Route details:
-   - `play=<basename>` query parameter triggers the embedded player (e.g., `/today?play=YYYYMMDD_HHMMSS.mp4#player`).
-   - The Per-Video Summary remains open when a player is shown and highlights the currently opened video row.
+   - `play=<basename>` query parameter triggers the embedded player (e.g., `/today?play=YYYYMMDD_HHMMSS.mp4`).
+   - The Per-Video Summary remains open when a player is shown and highlights the currently opened video row. Scrolling positions the player so one table row is visible above it (accounting for the sticky header).
+
+### Chart Hour Boundaries
+
+- Hour separators are drawn between bars when the next video’s hour differs from the current one.
+- Separators use dashed styling and include small hour labels (e.g., `02h`) for clarity.
+
+### Collapsible State Persistence
+
+- The open/closed state of collapsible sections (Per-Video Summary, Logs) is remembered via localStorage.
+- Navigating via the header (Home/All Days) clears the persisted state to start fresh.
+
+### Scrolling Behavior
+
+- Player focus uses native smooth scrolling and aligns the player with one table row visible above it.
 
 ### Filtering
 

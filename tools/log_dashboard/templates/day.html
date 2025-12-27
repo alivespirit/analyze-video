@@ -174,7 +174,7 @@
                   {% set qs = qs ~ '&status=' ~ status_csv %}
                 {% endif %}
                 {% if gate %}{% set qs = qs ~ '&gate=' ~ gate %}{% endif %}
-                <a href="{{ base }}?{{ qs }}" class="link-log" title="Open video player">{{ vid }}</a>
+                <a href="{{ base }}?{{ qs }}" class="link-log" title="Open video player" data-vid="{{ vid }}" data-stream="/video/{{ vid }}" data-base="{{ base }}" data-query="{{ qs }}">{{ vid }}</a>
               </td>
               {% set col = status_colors.get(st, '#3b82f6') %}
               {% set tcol = status_text_colors.get(st, '#ffffff') %}
@@ -284,7 +284,7 @@
                   {% set x_sep = left + (i + 1) * step %}
                   <line x1="{{ x_sep }}" y1="{{ yTop }}" x2="{{ x_sep }}" y2="{{ yBottom }}" stroke="#2a2f40" stroke-dasharray="4,4" />
                   <!-- Hour label -->
-                  <text class="axis-label" x="{{ x_sep }}" y="{{ yTop + 12 }}" text-anchor="middle" fill="#a8adc0">{{ next_hour }}h</text>
+                  <text class="axis-label" x="{{ x_sep }}" y="{{ yTop + 12 }}" text-anchor="middle" fill="#a8adc0">{{ next_hour|int }}h</text>
                 {% endif %}
               {% endif %}
             {% endfor %}
@@ -414,6 +414,53 @@
           }
         }catch(e){ /* noop */ }
       }
+      function attachInlinePlayerLinks(){
+        try{
+          var table = document.querySelector('#summary-card table');
+          if(!table){ return; }
+          table.addEventListener('click', function(ev){
+            var a = ev.target && ev.target.closest('a.link-log[title="Open video player"]');
+            if(!a){ return; }
+            ev.preventDefault();
+            var vid = a.getAttribute('data-vid');
+            var src = a.getAttribute('data-stream') || ('/video/' + vid);
+            var base = a.getAttribute('data-base') || window.location.pathname;
+            var qs = a.getAttribute('data-query') || ('play=' + encodeURIComponent(vid));
+            // Update URL without reload
+            try{ history.pushState(null, '', base + '?' + qs); }catch(e){}
+            // Ensure summary is open
+            var s = document.getElementById('summary-card');
+            if(s && !s.open){ s.open = true; }
+            // Mark playing row
+            var row = a.closest('tr');
+            document.querySelectorAll('tr.playing').forEach(function(r){ r.classList.remove('playing'); });
+            if(row){ row.classList.add('playing'); }
+            // Remove existing inline player row
+            var existing = document.querySelector('tr.player-row');
+            if(existing){ existing.parentNode.removeChild(existing); }
+            // Insert new inline player row after clicked row
+            if(row){
+              var tr = document.createElement('tr');
+              tr.className = 'player-row';
+              var td = document.createElement('td');
+              td.colSpan = 5;
+              td.innerHTML = '<div id="player" class="inline-player"><div class="video-wrap"><video class="video-embed" controls preload="metadata" src="' + src + '">Your browser does not support the video tag.</video></div></div>';
+              tr.appendChild(td);
+              row.parentNode.insertBefore(tr, row.nextSibling);
+              // Scroll so exactly one row is visible above the player, accounting for header
+              var prev = tr.previousElementSibling;
+              var topElem = (prev && prev.tagName && prev.tagName.toLowerCase() === 'tr') ? prev : tr;
+              var header = document.querySelector('header');
+              var headerH = header ? (header.offsetHeight || 0) : 0;
+              var pad = 6;
+              var rect = topElem.getBoundingClientRect();
+              var y = window.scrollY + rect.top - headerH - pad;
+              try{ window.scrollTo({ top: y, behavior: 'smooth' }); }
+              catch(e){ window.scrollTo(0, y); }
+            }
+          });
+        }catch(e){ /* noop */ }
+      }
       function focusInlinePlayerIfPresent(){
         try{
           var params = new URLSearchParams(window.location.search);
@@ -458,6 +505,8 @@
       ensureLogsOpenIfHash();
       // Finally, focus the inline player (or playing row) if present
       focusInlinePlayerIfPresent();
+      // Enable inline player behavior without full page reload
+      attachInlinePlayerLinks();
       // Clear persisted state when navigating Home or All Days
       attachNavClears();
       // Ensure scroll-up button works even if hash doesn't change

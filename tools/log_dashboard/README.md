@@ -20,16 +20,30 @@ A lightweight FastAPI server that parses your application logs and serves a simp
 
 ### Video Playback
 
-- Click a video name in the Per-Video Summary to open an embedded player.
+- Click a video name in the Per-Video Summary to open an embedded player inline (no page reload). The player appears directly beneath the selected row.
 - Click the timestamp to jump to the first log entry of that video.
 - Gate direction chip: Up/Down/Both arrows (↑/↓/↕) render next to the status badge.
-- Filters are preserved when opening a video; the current severity/status/gate selections remain active.
-- The summary stays expanded when the player is visible, and the current video row is highlighted.
+- Filters are preserved when opening a video; the current severity/status/gate selections remain active. The URL is updated with `play=<basename>` via History API for sharability and back/forward navigation.
+- The summary stays expanded when the player is visible, and the current video row is highlighted. Scrolling positions the player so one table row is visible above it (accounting for the sticky header).
 
 Requirements:
 - Set `VIDEO_FOLDER` to the root directory containing your original `.mp4` files. The server searches it recursively.
 - Files are served via `GET /video/{basename}`; only `.mp4` basenames are allowed.
-- To open the player directly, use `play=<basename>` in the query string (e.g., `/today?play=clip123.mp4#player`).
+- To open the player directly, use `play=<basename>` in the query string (e.g., `/today?play=clip123.mp4`).
+
+### Chart Hour Boundaries
+
+- Hour separators are drawn between bars when the next video’s hour differs from the current one.
+- Separators use dashed styling for clarity and include small hour labels (e.g., `02h`).
+
+### Collapsible State Persistence
+
+- The open/closed state of collapsible sections (like Per-Video Summary and Logs) is remembered via localStorage.
+- Navigating via the header’s Home/All Days clears the persisted state so you start fresh.
+
+### Scrolling Behavior
+
+- Player focus uses native smooth scrolling and aligns the player with one table row visible above it.
 
 ### Filtering
 
