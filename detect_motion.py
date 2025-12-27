@@ -340,7 +340,7 @@ def detect_motion(input_video_path, output_dir):
             roi_frame = cv2.bitwise_and(cropped_frame, cropped_frame, mask=roi_mask)
             fg_mask = temp_backSub.apply(roi_frame)
 
-            if i > 5 and cv2.countNonZero(fg_mask) > (roi_mask.size * 0.1):
+            if i > 5 and cv2.countNonZero(fg_mask) > (roi_mask.size * 0.2):
                 motion_detected_in_segment = True
                 logger.info(f"[{file_basename}] Motion detected in pre-training candidate segment at {start_sec}s. Trying next segment.")
                 break
