@@ -115,7 +115,7 @@
             <ul class="stats">
               {% for it in away_intervals %}
                 <li>
-                  <span class="tag away-chip" style="background: #64748b; color: #ffffff">{{ it.start if it.start else '...' }} → {{ it.end if it.end else '...' }}{% if it.dur %} ({{ it.dur }}){% endif %}</span>
+                  <span class="tag away-chip" style="background: #64748b; color: #ffffff">{{ it.start if it.start else '...' }}-{{ it.end if it.end else '...' }}{% if it.dur %} ({{ it.dur }}){% endif %}</span>
                 </li>
               {% endfor %}
             </ul>
