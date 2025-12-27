@@ -2,7 +2,7 @@ import os
 import re
 import colorsys
 from datetime import datetime, date
-from typing import List, Dict, Optional
+from typing import List, Dict, Optional, Tuple
 
 from fastapi import FastAPI, Query, HTTPException
 from fastapi.responses import HTMLResponse, RedirectResponse, FileResponse
