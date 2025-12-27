@@ -113,19 +113,36 @@ async def reaction_callback(update, context):
         video_path = entry.get("path") if entry else None
         caption = entry.get("caption") if entry else None
     if not video_path:
-        logger.warning(f"[unknown] Thinking reaction received for message {message_id}, but no video mapping found.")
+        try:
+            emojis_str = ",".join([getattr(r, "emoji", "?") for r in new_reactions if getattr(r, "emoji", None)]) or "unknown"
+        except Exception:
+            emojis_str = "unknown"
+        logger.warning(f"[unknown] Reaction(s) {emojis_str} received for message {message_id}, but no video mapping found.")
         return
 
     file_basename = os.path.basename(video_path)
+
+    # Determine parse mode for caption edits
+    parse_mode = None
+    if isinstance(entry, dict):
+        parse_mode = entry.get("mode")
+    if not parse_mode:
+        parse_mode = 'MarkdownV2' if (caption and caption.startswith("Осьо відео ")) else 'Markdown'
 
     # Apply actions based on reactions
     new_caption = caption or ""
     if has_up:
         logger.info(f"[{file_basename}] Reaction detected: object went away")
-        new_caption = (new_caption or "") + "\n*Юху\\!*"  # MarkdownV2: escape '!'
+        if parse_mode == 'MarkdownV2':
+            new_caption = (new_caption or "") + "\n*Юху\\!*"
+        else:
+            new_caption = (new_caption or "") + "\n*Юху!*"
     if has_down:
         logger.info(f"[{file_basename}] Reaction detected: object came back")
-        new_caption = (new_caption or "") + "\n*Ex\\.\\.\\.*"  # MarkdownV2: escape '.'
+        if parse_mode == 'MarkdownV2':
+            new_caption = (new_caption or "") + "\n*Ex\\.\\.\\.*"
+        else:
+            new_caption = (new_caption or "") + "\n*Ex...*"
     if has_thinking:
         logger.info(f"[{file_basename}] Reaction detected: video marked for further analysis (via 🤔 reaction)")
         # Copy to TEMP_DIR/training
@@ -145,12 +162,15 @@ async def reaction_callback(update, context):
         except Exception as e:
             logger.error(f"[{file_basename}] Failed to copy video to training: {e}")
         # Append note
-        new_caption = (new_caption or "") + "\n_Глянем\\.\\.\\._"  # MarkdownV2: escape '.'
+        if parse_mode == 'MarkdownV2':
+            new_caption = (new_caption or "") + "\n_Глянем\\.\\.\\._"
+        else:
+            new_caption = (new_caption or "") + "\n_Глянем..._"
 
     # Edit message caption if changed
     try:
         if new_caption and new_caption != caption:
-            await context.bot.edit_message_caption(chat_id=chat_id, message_id=message_id, caption=new_caption, parse_mode='MarkdownV2')
+            await context.bot.edit_message_caption(chat_id=chat_id, message_id=message_id, caption=new_caption, parse_mode=parse_mode)
             # Persist updated caption
             async with message_map_lock:
                 video_message_map[key] = {"path": video_path, "caption": new_caption}
@@ -160,11 +180,11 @@ async def reaction_callback(update, context):
         try:
             base_only = caption or ""
             suffix_only = new_caption[len(base_only):] if new_caption and base_only and new_caption.startswith(base_only) else (new_caption or "")
-            escaped_base = escape_markdown(base_only, version=2)
+            escaped_base = escape_markdown(base_only, version=(2 if parse_mode == 'MarkdownV2' else 1))
             updated_text2 = escaped_base + suffix_only
-            await context.bot.edit_message_caption(chat_id=chat_id, message_id=message_id, caption=updated_text2, parse_mode='MarkdownV2')
+            await context.bot.edit_message_caption(chat_id=chat_id, message_id=message_id, caption=updated_text2, parse_mode=parse_mode)
             async with message_map_lock:
-                video_message_map[key] = {"path": video_path, "caption": updated_text2}
+                video_message_map[key] = {"path": video_path, "caption": updated_text2, "mode": parse_mode}
                 _save_message_map_to_disk()
         except Exception as e2:
             logger.warning(f"[{file_basename}] Failed to edit caption after escape: {e2}", exc_info=True)
@@ -264,7 +284,7 @@ async def button_callback(update, context):
             key = f"{query.message.chat_id}:{sent_video_msg.message_id}"
             base_caption = f"Осьо відео `{escape_markdown(query.data.replace('\\', '/'), version=2)}`"
             async with message_map_lock:
-                video_message_map[key] = {"path": file_path, "caption": base_caption}
+                video_message_map[key] = {"path": file_path, "caption": base_caption, "mode": "MarkdownV2"}
                 _save_message_map_to_disk()
             logger.info(f"[{file_basename}] Mapped message {sent_video_msg.message_id} to video path (persisted).")
         except Exception as map_e:
@@ -329,6 +349,13 @@ async def send_notifications(app, video_response, insignificant_frames, clip_pat
                         reply_markup=reply_markup, parse_mode='Markdown'
                     )
                     logger.info(f"[{file_basename}] Animation sent successfully.")
+                    try:
+                        async with message_map_lock:
+                            video_message_map[f"{CHAT_ID}:{sent_message.message_id}"] = {"path": file_path, "caption": video_response, "mode": "Markdown"}
+                            _save_message_map_to_disk()
+                        logger.info(f"[{file_basename}] Mapped animation message {sent_message.message_id} to video path (persisted).")
+                    except Exception as map_e:
+                        logger.warning(f"[{file_basename}] Failed to persist animation mapping: {map_e}")
             except telegram.error.BadRequest as bad_request_error:
                 logger.warning(f"[{file_basename}] BadRequest error: {bad_request_error}. Retrying with escaped Markdown.")
                 try:
@@ -341,6 +368,14 @@ async def send_notifications(app, video_response, insignificant_frames, clip_pat
                             parse_mode='Markdown'
                         )
                     logger.info(f"[{file_basename}] Animation sent successfully after escaping Markdown.")
+                    try:
+                        escaped_caption = escape_markdown(video_response, version=1)
+                        async with message_map_lock:
+                            video_message_map[f"{CHAT_ID}:{sent_message.message_id}"] = {"path": file_path, "caption": escaped_caption, "mode": "Markdown"}
+                            _save_message_map_to_disk()
+                        logger.info(f"[{file_basename}] Mapped escaped animation message {sent_message.message_id} to video path (persisted).")
+                    except Exception as map_e:
+                        logger.warning(f"[{file_basename}] Failed to persist escaped animation mapping: {map_e}")
                 except Exception as retry_error:
                     logger.error(f"[{file_basename}] Failed to send animation after escaping Markdown: {retry_error}", exc_info=True)
                     logger.info(f"[{file_basename}] Sending plain message with button to Telegram...")
@@ -352,6 +387,13 @@ async def send_notifications(app, video_response, insignificant_frames, clip_pat
                             parse_mode='Markdown'
                         )
                         logger.info(f"[{file_basename}] Plain message with button sent successfully.")
+                        try:
+                            async with message_map_lock:
+                                video_message_map[f"{CHAT_ID}:{sent_message.message_id}"] = {"path": file_path, "caption": video_response, "mode": "Markdown"}
+                                _save_message_map_to_disk()
+                            logger.info(f"[{file_basename}] Mapped plain message {sent_message.message_id} to video path (persisted).")
+                        except Exception as map_e:
+                            logger.warning(f"[{file_basename}] Failed to persist plain message mapping: {map_e}")
                     except telegram.error.BadRequest as bad_request_error_fallback:
                         logger.warning(f"[{file_basename}] BadRequest error on fallback: {bad_request_error_fallback}. Retrying with escaped Markdown.")
                         try:
@@ -362,6 +404,14 @@ async def send_notifications(app, video_response, insignificant_frames, clip_pat
                                 parse_mode='Markdown'
                             )
                             logger.info(f"[{file_basename}] Message sent successfully after escaping Markdown.")
+                            try:
+                                escaped_text = escape_markdown(video_response, version=1)
+                                async with message_map_lock:
+                                    video_message_map[f"{CHAT_ID}:{sent_message.message_id}"] = {"path": file_path, "caption": escaped_text, "mode": "Markdown"}
+                                    _save_message_map_to_disk()
+                                logger.info(f"[{file_basename}] Mapped escaped plain message {sent_message.message_id} to video path (persisted).")
+                            except Exception as map_e:
+                                logger.warning(f"[{file_basename}] Failed to persist escaped plain message mapping: {map_e}")
                         except Exception as e_final_fallback:
                             logger.error(f"[{file_basename}] Failed to send message after escaping Markdown: {e_final_fallback}", exc_info=True)
             except Exception as e:
@@ -375,6 +425,13 @@ async def send_notifications(app, video_response, insignificant_frames, clip_pat
                         parse_mode='Markdown'
                     )
                     logger.info(f"[{file_basename}] Plain message with button sent successfully.")
+                    try:
+                        async with message_map_lock:
+                            video_message_map[f"{CHAT_ID}:{sent_message.message_id}"] = {"path": file_path, "caption": video_response, "mode": "Markdown"}
+                            _save_message_map_to_disk()
+                        logger.info(f"[{file_basename}] Mapped plain message {sent_message.message_id} to video path (persisted).")
+                    except Exception as map_e:
+                        logger.warning(f"[{file_basename}] Failed to persist plain message mapping: {map_e}")
                 except telegram.error.BadRequest as bad_request_error:
                     logger.warning(f"[{file_basename}] BadRequest error: {bad_request_error}. Retrying with escaped Markdown.")
                     try:
@@ -385,6 +442,14 @@ async def send_notifications(app, video_response, insignificant_frames, clip_pat
                             parse_mode='Markdown'
                         )
                         logger.info(f"[{file_basename}] Message sent successfully after escaping Markdown.")
+                        try:
+                            escaped_text = escape_markdown(video_response, version=1)
+                            async with message_map_lock:
+                                video_message_map[f"{CHAT_ID}:{sent_message.message_id}"] = {"path": file_path, "caption": escaped_text, "mode": "Markdown"}
+                                _save_message_map_to_disk()
+                            logger.info(f"[{file_basename}] Mapped escaped plain message {sent_message.message_id} to video path (persisted).")
+                        except Exception as map_e:
+                            logger.warning(f"[{file_basename}] Failed to persist escaped plain message mapping: {map_e}")
                     except Exception as retry_error:
                         logger.error(f"[{file_basename}] Failed to send message after escaping Markdown: {retry_error}", exc_info=True)
                 except Exception as e_send:
