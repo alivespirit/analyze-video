@@ -275,37 +275,56 @@ def _hhmm_from_video_path(basename: str, fallback_ts: Optional[datetime] = None)
 
 def build_away_intervals(entries: List[Dict]) -> List[Dict[str, Optional[str]]]:
     """Build list of intervals for 'object went away' → 'object came back'.
+    Pair events by chronological video time (HH:MM derived from path, fallback to log TS).
     Returns dicts with keys: start, end, dur (duration string like '1h14m').
-    Missing start/end produce 'dur' as None.
+    Missing start/end produce 'dur' as None and indicate open intervals only when a counterpart
+    does not exist earlier/later in the day's events.
     """
-    events = []
+    # Collect events with derived HH:MM and sortable minute index
+    collected: List[Tuple[int, str, str]] = []  # (minutes, type, hhmm)
     for e in entries:
         vid = e.get("video")
         if not vid:
             continue
         content = e.get("content", "")
-        if AWAY_RE.search(content):
-            events.append(("away", vid, e["ts"]))
-        elif BACK_RE.search(content):
-            events.append(("back", vid, e["ts"]))
-    # Sort by log timestamp
-    events.sort(key=lambda t: t[2])
+        is_away = AWAY_RE.search(content)
+        is_back = BACK_RE.search(content)
+        if not (is_away or is_back):
+            continue
+        ts = e.get("ts")
+        hhmm = _hhmm_from_video_path(vid, fallback_ts=ts)
+        if not hhmm and ts:
+            hhmm = ts.strftime("%H:%M")
+        if not hhmm:
+            continue
+        try:
+            h_str, m_str = hhmm.split(":", 1)
+            minutes = int(h_str) * 60 + int(m_str)
+        except Exception:
+            # Fallback: skip malformed times
+            continue
+        typ = "away" if is_away else "back"
+        collected.append((minutes, typ, hhmm))
+
+    # Sort by derived minute index to ensure chronological pairing
+    collected.sort(key=lambda t: t[0])
+
     intervals: List[Dict[str, Optional[str]]] = []
     current_start: Optional[str] = None
-    for typ, vid, ts in events:
-        hhmm = _hhmm_from_video_path(vid, fallback_ts=ts) or ts.strftime("%H:%M")
+    for _, typ, hhmm in collected:
         if typ == "away":
             if current_start is None:
                 current_start = hhmm
             else:
-                # Another 'away' without 'back' yet; finalize previous as open-ended
-                intervals.append({"start": current_start, "end": None, "dur": None})
-                current_start = hhmm
+                # Already in "away" state; ignore duplicate away without intervening back
+                # Keep the earliest start until a back closes it
+                pass
         else:  # back
             if current_start is None:
+                # Back without prior away in this day → open-start interval
                 intervals.append({"start": None, "end": hhmm, "dur": None})
             else:
-                # Compute duration
+                # Compute duration between current_start and this back
                 try:
                     sh, sm = [int(x) for x in current_start.split(":", 1)]
                     eh, em = [int(x) for x in hhmm.split(":", 1)]
@@ -322,8 +341,11 @@ def build_away_intervals(entries: List[Dict]) -> List[Dict[str, Optional[str]]]:
                     dur = None
                 intervals.append({"start": current_start, "end": hhmm, "dur": dur})
                 current_start = None
+
+    # If we ended with an open "away" without a later back, emit open-ended interval
     if current_start is not None:
         intervals.append({"start": current_start, "end": None, "dur": None})
+
     return intervals
 
 
