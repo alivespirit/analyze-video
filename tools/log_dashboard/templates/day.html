@@ -201,6 +201,19 @@
                 {% endif %}
               </td>
             </tr>
+            {% if play == vid and video_src %}
+            <tr class="player-row">
+              <td colspan="5">
+                <div id="player" class="inline-player">
+                  <div class="video-wrap">
+                    <video class="video-embed" controls preload="metadata" src="{{ video_src }}">
+                      Your browser does not support the video tag.
+                    </video>
+                  </div>
+                </div>
+              </td>
+            </tr>
+            {% endif %}
             {% endfor %}
           </tbody>
         </table>
@@ -209,17 +222,6 @@
         <p>No video summaries.</p>
       {% endif %}
     </details>
-
-    {% if video_src %}
-    <section class="card" id="player">
-      <h2>{% if play %}{{ play }}{% endif %}</h2>
-      <div class="video-wrap">
-        <video class="video-embed" controls preload="metadata" src="{{ video_src }}">
-          Your browser does not support the video tag.
-        </video>
-      </div>
-    </section>
-    {% endif %}
 
     <section class="card">
       <h2>Processing Times Chart</h2>
