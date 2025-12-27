@@ -2,6 +2,8 @@ import os
 import asyncio
 import logging
 import time
+import shutil
+import json
 
 from telegram import InlineKeyboardMarkup, InlineKeyboardButton, InputMediaPhoto
 import telegram.error
@@ -20,6 +22,154 @@ no_motion_grouped_videos = []
 
 # --- NEW: Add a lock for Telegram message grouping ---
 telegram_lock = asyncio.Lock()
+
+# Mapping of sent full video messages to their source file paths
+video_message_map = {}
+message_map_lock = asyncio.Lock()
+
+# Persistent mapping storage
+_SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+_TEMP_DIR = os.path.join(_SCRIPT_DIR, "temp")
+_MAP_FILE_PATH = os.path.join(_TEMP_DIR, "message_map.json")
+
+def _load_message_map_from_disk():
+    try:
+        if os.path.exists(_MAP_FILE_PATH):
+            with open(_MAP_FILE_PATH, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+                if isinstance(data, dict):
+                    return data
+    except Exception as e:
+        logger.warning(f"Failed to load message map: {e}")
+    return {}
+
+def _save_message_map_to_disk():
+    try:
+        os.makedirs(_TEMP_DIR, exist_ok=True)
+        # Prune to keep only the latest 400 entries
+        try:
+            if len(video_message_map) > 400:
+                # preserve insertion order; pop oldest
+                keys = list(video_message_map.keys())
+                for k in keys[: len(video_message_map) - 400]:
+                    video_message_map.pop(k, None)
+        except Exception:
+            pass
+        with open(_MAP_FILE_PATH, 'w', encoding='utf-8') as f:
+            json.dump(video_message_map, f, ensure_ascii=False)
+    except Exception as e:
+        logger.warning(f"Failed to save message map: {e}")
+
+# Initialize mapping from disk on import
+video_message_map.update(_load_message_map_from_disk())
+
+async def reaction_callback(update, context):
+    """
+    Handles message reaction updates. If a user reacts with 🤔 to a full video
+    message sent via the "Глянути" button, copy that video to temp/training for
+    further analysis.
+    """
+    mr = getattr(update, "message_reaction", None)
+    if not mr:
+        return
+
+    try:
+        new_reactions = getattr(mr, "new_reaction", None) or []
+    except Exception:
+        new_reactions = []
+
+    # Determine reaction types present
+    has_thinking = False
+    has_up = False
+    has_down = False
+    for r in new_reactions:
+        emoji = getattr(r, "emoji", None)
+        if emoji == "🤔":
+            has_thinking = True
+        elif emoji == "👍":
+            has_up = True
+        elif emoji == "👎":
+            has_down = True
+
+    message_id = getattr(mr, "message_id", None)
+    chat = getattr(mr, "chat", None)
+    chat_id = getattr(chat, "id", None)
+
+    # Find mapped video path
+    key = f"{chat_id}:{message_id}"
+    entry = video_message_map.get(key)
+    if isinstance(entry, str):
+        # Backward compatibility: only path stored
+        video_path = entry
+        # Reconstruct base caption
+        if video_path.startswith(os.path.join(VIDEO_FOLDER, '')):
+            rel = video_path[len(os.path.join(VIDEO_FOLDER, '')):].replace(os.path.sep, '/')
+        else:
+            rel = os.path.basename(video_path)
+        caption = f"Осьо відео `{escape_markdown(rel, version=2)}`"
+        entry = {"path": video_path, "caption": caption}
+        video_message_map[key] = entry
+    else:
+        video_path = entry.get("path") if entry else None
+        caption = entry.get("caption") if entry else None
+    if not video_path:
+        logger.warning(f"[unknown] Thinking reaction received for message {message_id}, but no video mapping found.")
+        return
+
+    file_basename = os.path.basename(video_path)
+
+    # Apply actions based on reactions
+    new_caption = caption or ""
+    if has_up:
+        logger.info(f"[{file_basename}] Reaction detected: object went away")
+        new_caption = (new_caption or "") + "\n*Юху\\!*"  # MarkdownV2: escape '!'
+    if has_down:
+        logger.info(f"[{file_basename}] Reaction detected: object came back")
+        new_caption = (new_caption or "") + "\n*Ex\\.\\.\\.*"  # MarkdownV2: escape '.'
+    if has_thinking:
+        logger.info(f"[{file_basename}] Reaction detected: video marked for further analysis (via 🤔 reaction)")
+        # Copy to TEMP_DIR/training
+        try:
+            script_dir = os.path.dirname(os.path.abspath(__file__))
+            temp_dir = os.path.join(script_dir, "temp")
+            training_dir = os.path.join(temp_dir, "training")
+            os.makedirs(training_dir, exist_ok=True)
+            dest_path = os.path.join(training_dir, file_basename)
+            base, ext = os.path.splitext(file_basename)
+            counter = 1
+            while os.path.exists(dest_path):
+                dest_path = os.path.join(training_dir, f"{base}_{counter}{ext}")
+                counter += 1
+            shutil.copy2(video_path, dest_path)
+            logger.info(f"[{file_basename}] Copied to training: {dest_path}")
+        except Exception as e:
+            logger.error(f"[{file_basename}] Failed to copy video to training: {e}")
+        # Append note
+        new_caption = (new_caption or "") + "\n_Глянем\\.\\.\\._"  # MarkdownV2: escape '.'
+
+    # Edit message caption if changed
+    try:
+        if new_caption and new_caption != caption:
+            await context.bot.edit_message_caption(chat_id=chat_id, message_id=message_id, caption=new_caption, parse_mode='MarkdownV2')
+            # Persist updated caption
+            async with message_map_lock:
+                video_message_map[key] = {"path": video_path, "caption": new_caption}
+                _save_message_map_to_disk()
+    except telegram.error.BadRequest as e:
+        # Retry with escaped base portion; preserve suffix formatting
+        try:
+            base_only = caption or ""
+            suffix_only = new_caption[len(base_only):] if new_caption and base_only and new_caption.startswith(base_only) else (new_caption or "")
+            escaped_base = escape_markdown(base_only, version=2)
+            updated_text2 = escaped_base + suffix_only
+            await context.bot.edit_message_caption(chat_id=chat_id, message_id=message_id, caption=updated_text2, parse_mode='MarkdownV2')
+            async with message_map_lock:
+                video_message_map[key] = {"path": video_path, "caption": updated_text2}
+                _save_message_map_to_disk()
+        except Exception as e2:
+            logger.warning(f"[{file_basename}] Failed to edit caption after escape: {e2}", exc_info=True)
+    except Exception as e:
+        logger.warning(f"[{file_basename}] Unexpected error editing caption: {e}", exc_info=True)
 
 
 async def wait_for_unlock(media_path: str, max_wait: int = 120, interval: int = 10, logger: logging.Logger = None, file_basename: str = "") -> bool:
@@ -85,8 +235,9 @@ async def button_callback(update, context):
     query = update.callback_query
     await query.answer() # Acknowledge callback quickly
 
-    # Normalize callback data to recreate the correct path
-    callback_file_rel = query.data.replace('/', os.path.sep)
+    # Parse callback data (view only)
+    raw = query.data
+    callback_file_rel = raw.replace('/', os.path.sep)
     file_path = os.path.join(VIDEO_FOLDER, callback_file_rel)
     file_basename = os.path.basename(file_path)
 
@@ -99,14 +250,25 @@ async def button_callback(update, context):
         except Exception as edit_e:
             logger.error(f"[{file_basename}] Error editing message for not found file: {edit_e}", exc_info=True)
         return
+    # Only view action remains
 
+    # "Глянути" view button
     logger.info(f"[{file_basename}] Sending video from callback...")
     try:
         with open(file_path, 'rb') as video_file:
-            await context.bot.send_video(
+            sent_video_msg = await context.bot.send_video(
                 chat_id=query.message.chat_id, video=video_file, parse_mode='MarkdownV2',
                 caption=f"Осьо відео `{escape_markdown(query.data.replace('\\', '/'), version=2)}`", reply_to_message_id=query.message.message_id
             )
+        try:
+            key = f"{query.message.chat_id}:{sent_video_msg.message_id}"
+            base_caption = f"Осьо відео `{escape_markdown(query.data.replace('\\', '/'), version=2)}`"
+            async with message_map_lock:
+                video_message_map[key] = {"path": file_path, "caption": base_caption}
+                _save_message_map_to_disk()
+            logger.info(f"[{file_basename}] Mapped message {sent_video_msg.message_id} to video path (persisted).")
+        except Exception as map_e:
+            logger.warning(f"[{file_basename}] Failed to persist sent video mapping: {map_e}")
         logger.info(f"[{file_basename}] Video sent successfully from callback.")
     except FileNotFoundError:
         logger.error(f"[{file_basename}] Video file disappeared before sending from callback: {file_path}")
@@ -156,15 +318,17 @@ async def send_notifications(app, video_response, insignificant_frames, clip_pat
                 logger.warning(f"[{file_basename}] Highlight clip not found, using original video.")
                 media_path = file_path
             try:
-                # Button for significant motion video is still singular
-                keyboard = [[InlineKeyboardButton("Глянути", callback_data=callback_file)]]
+                # Single button row: only "Глянути" (use reactions for actions)
+                keyboard = [[
+                    InlineKeyboardButton("Глянути", callback_data=callback_file)
+                ]]
                 reply_markup = InlineKeyboardMarkup(keyboard)
                 with open(media_path, 'rb') as animation_file:
                     sent_message = await app.bot.send_animation(
                         chat_id=CHAT_ID, animation=animation_file, caption=video_response,
                         reply_markup=reply_markup, parse_mode='Markdown'
                     )
-                logger.info(f"[{file_basename}] Animation sent successfully.")
+                    logger.info(f"[{file_basename}] Animation sent successfully.")
             except telegram.error.BadRequest as bad_request_error:
                 logger.warning(f"[{file_basename}] BadRequest error: {bad_request_error}. Retrying with escaped Markdown.")
                 try:

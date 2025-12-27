@@ -34,6 +34,8 @@ RAW_EVENTS_RE = re.compile(r"Found (?P<count>\d+) raw motion event\(s\)")
 MD_TIME_RE = re.compile(r"Motion detection took (?P<seconds>[0-9]+\.[0-9]+|[0-9]+) seconds")
 GATE_RE = re.compile(r"Gate crossing detected! Direction: (?P<dir>up|down|both)")
 NEW_FILE_RE = re.compile(r"^New file detected:")
+AWAY_RE = re.compile(r"Reaction detected: object went away")
+BACK_RE = re.compile(r"Reaction detected: object came back")
 
 
 env = Environment(
@@ -129,6 +131,10 @@ def collect_metrics(entries: List[Dict]) -> Dict:
     gate_counts = {"up": 0, "down": 0}
     gate_direction_per_video: Dict[str, str] = {}
     first_seen_ts_per_video: Dict[str, datetime] = {}
+    # Away/back reaction events
+    away_back_events: List[Dict] = []
+    away_videos = set()
+    back_videos = set()
 
     for e in entries:
         content = e["content"]
@@ -155,6 +161,14 @@ def collect_metrics(entries: List[Dict]) -> Dict:
                     raw_events_per_video[vid] = int(m.group("count"))
                 except ValueError:
                     pass
+
+            # Track reaction events for away/back
+            if AWAY_RE.search(content):
+                away_back_events.append({"type": "away", "video": vid, "ts": e["ts"]})
+                away_videos.add(vid)
+            elif BACK_RE.search(content):
+                away_back_events.append({"type": "back", "video": vid, "ts": e["ts"]})
+                back_videos.add(vid)
 
         # Motion detection time (prefer per video if available)
         m = MD_TIME_RE.search(content)
@@ -230,7 +244,87 @@ def collect_metrics(entries: List[Dict]) -> Dict:
         "gate_direction_per_video": gate_direction_per_video,
         "first_seen_ts_per_video": first_seen_ts_per_video,
         "videos_total": len({v for v in status_per_video.keys()} | {v for v in full_time_per_video.keys()} | {v for v in raw_events_per_video.keys()}),
+        "away_back_events": away_back_events,
+        "away_videos": sorted(list(away_videos)),
+        "back_videos": sorted(list(back_videos)),
     }
+
+
+def _hhmm_from_video_path(basename: str, fallback_ts: Optional[datetime] = None) -> Optional[str]:
+    """Derive HH:MM from the video file path: parent folder name is YYYYMMDDHH (take HH),
+    and the first two digits of the filename are minutes. Fallback to provided timestamp if path is unavailable.
+    """
+    try:
+        vp = find_video_path(basename)
+        if vp:
+            parent = os.path.basename(os.path.dirname(vp))
+            # Hour: last two digits from YYYYMMDDHH
+            hour = parent[-2:] if len(parent) >= 2 and parent[-2:].isdigit() else None
+            fname = os.path.basename(vp)
+            mm = re.match(r"^(\d{2})", fname)
+            minute = mm.group(1) if mm else None
+            if hour and minute:
+                return f"{hour}:{minute}"
+        if fallback_ts is not None:
+            return fallback_ts.strftime("%H:%M")
+    except Exception:
+        if fallback_ts is not None:
+            return fallback_ts.strftime("%H:%M")
+    return None
+
+
+def build_away_intervals(entries: List[Dict]) -> List[Dict[str, Optional[str]]]:
+    """Build list of intervals for 'object went away' → 'object came back'.
+    Returns dicts with keys: start, end, dur (duration string like '1h14m').
+    Missing start/end produce 'dur' as None.
+    """
+    events = []
+    for e in entries:
+        vid = e.get("video")
+        if not vid:
+            continue
+        content = e.get("content", "")
+        if AWAY_RE.search(content):
+            events.append(("away", vid, e["ts"]))
+        elif BACK_RE.search(content):
+            events.append(("back", vid, e["ts"]))
+    # Sort by log timestamp
+    events.sort(key=lambda t: t[2])
+    intervals: List[Dict[str, Optional[str]]] = []
+    current_start: Optional[str] = None
+    for typ, vid, ts in events:
+        hhmm = _hhmm_from_video_path(vid, fallback_ts=ts) or ts.strftime("%H:%M")
+        if typ == "away":
+            if current_start is None:
+                current_start = hhmm
+            else:
+                # Another 'away' without 'back' yet; finalize previous as open-ended
+                intervals.append({"start": current_start, "end": None, "dur": None})
+                current_start = hhmm
+        else:  # back
+            if current_start is None:
+                intervals.append({"start": None, "end": hhmm, "dur": None})
+            else:
+                # Compute duration
+                try:
+                    sh, sm = [int(x) for x in current_start.split(":", 1)]
+                    eh, em = [int(x) for x in hhmm.split(":", 1)]
+                    start_min = sh * 60 + sm
+                    end_min = eh * 60 + em
+                    if end_min >= start_min:
+                        total = end_min - start_min
+                        dh = total // 60
+                        dm = total % 60
+                        dur = (f"{dh}h" if dh else "") + (f"{dm}m" if dm or not dh else "")
+                    else:
+                        dur = None
+                except Exception:
+                    dur = None
+                intervals.append({"start": current_start, "end": hhmm, "dur": dur})
+                current_start = None
+    if current_start is not None:
+        intervals.append({"start": current_start, "end": None, "dur": None})
+    return intervals
 
 
 def severity_levels() -> List[str]:
@@ -377,6 +471,7 @@ def today_view(
 
     entries_all = parse_log_lines(path, day)
     metrics_all = collect_metrics(entries_all)
+    away_intervals = build_away_intervals(entries_all)
 
     entries = entries_all
     if severity:
@@ -442,6 +537,7 @@ def today_view(
         play=play,
         video_src=video_src,
             status_counts_all=metrics_all.get("status_counts", {}),
+        away_intervals=away_intervals,
     )
 
 
@@ -460,6 +556,7 @@ def day_view(
     entries_all = parse_log_lines(path, day)
     # Compute metrics first to discover statuses
     metrics_all = collect_metrics(entries_all)
+    away_intervals = build_away_intervals(entries_all)
 
     # Apply filters
     entries = entries_all
@@ -526,6 +623,7 @@ def day_view(
         play=play,
         video_src=video_src,
             status_counts_all=metrics_all.get("status_counts", {}),
+        away_intervals=away_intervals,
     )
 
 

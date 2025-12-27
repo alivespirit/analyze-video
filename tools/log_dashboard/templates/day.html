@@ -109,6 +109,18 @@
             <strong>{{ metrics.gate_counts.down }}</strong>
           </li>
         </ul>
+        {% if away_intervals and away_intervals|length > 0 %}
+          <div class="away-list">
+            <h3 class="subheading">Away</h3>
+            <ul class="stats">
+              {% for it in away_intervals %}
+                <li>
+                  <span class="tag away-chip" style="background: #64748b; color: #ffffff">{{ it.start if it.start else '...' }} → {{ it.end if it.end else '...' }}{% if it.dur %} ({{ it.dur }}){% endif %}</span>
+                </li>
+              {% endfor %}
+            </ul>
+          </div>
+        {% endif %}
       </div>
 
       <div class="card">
@@ -189,6 +201,12 @@
                 </span>
                 {% if gdir %}
                   <span class="tag gate-chip" title="Gate: {{ gdir }}" aria-label="Gate: {{ gdir }}">{{ arrow }}</span>
+                {% endif %}
+                {% if metrics.away_videos and (vid in metrics.away_videos) %}
+                  <span class="tag aux-chip" title="Away reaction">away</span>
+                {% endif %}
+                {% if metrics.back_videos and (vid in metrics.back_videos) %}
+                  <span class="tag aux-chip" title="Back reaction">back</span>
                 {% endif %}
               </td>
               <td>{{ metrics.raw_events_per_video.get(vid, 0) }}</td>

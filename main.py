@@ -8,7 +8,7 @@ import psutil
 import threading
 
 from dotenv import load_dotenv
-from telegram.ext import Application, CallbackQueryHandler
+from telegram.ext import Application, CallbackQueryHandler, MessageReactionHandler
 
 from watchdog.events import FileSystemEventHandler
 from watchdog.observers.polling import PollingObserver as Observer
@@ -273,7 +273,7 @@ if not os.path.exists(OBJECT_DETECTION_MODEL_PATH):
 # Import after .env and logging are configured to ensure modules read env vars
 from analyze_video import analyze_video
 from detect_motion import detect_motion
-from telegram_notification import button_callback, send_notifications
+from telegram_notification import button_callback, send_notifications, reaction_callback
 
 
 # Initialize the Application
@@ -446,6 +446,7 @@ class FileHandler(FileSystemEventHandler):
 
 # Add the callback handler
 application.add_handler(CallbackQueryHandler(button_callback))
+application.add_handler(MessageReactionHandler(reaction_callback))
 
 
 # --- Main Execution and Shutdown Logic ---
@@ -464,7 +465,7 @@ async def run_telegram_bot(stop_event):
         logger.info("Telegram application initialized.")
         await application.start()
         logger.info("Telegram application started.")
-        await application.updater.start_polling(poll_interval=1.0, timeout=20)
+        await application.updater.start_polling(poll_interval=1.0, timeout=20, allowed_updates=["message_reaction", "callback_query"])
         logger.info("Telegram bot polling started.")
         await stop_event.wait() # Wait for the signal to stop
     except asyncio.CancelledError:
