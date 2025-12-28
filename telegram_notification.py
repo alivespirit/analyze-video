@@ -31,6 +31,7 @@ message_map_lock = asyncio.Lock()
 _SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 _TEMP_DIR = os.path.join(_SCRIPT_DIR, "temp")
 _MAP_FILE_PATH = os.path.join(_TEMP_DIR, "message_map.json")
+_GROUP_FILE_PATH = os.path.join(_TEMP_DIR, "no_motion_group.json")
 
 def load_message_map_from_disk():
     try:
@@ -63,6 +64,44 @@ def save_message_map_to_disk():
 # Initialize mapping from disk on import
 video_message_map.update(load_message_map_from_disk())
 
+# --- Persistent state for 'no motion' group ---
+def load_group_state_from_disk():
+    try:
+        if os.path.exists(_GROUP_FILE_PATH):
+            with open(_GROUP_FILE_PATH, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+                if isinstance(data, dict):
+                    mid = data.get("message_id")
+                    vids = data.get("videos")
+                    if isinstance(vids, list):
+                        return {"message_id": mid, "videos": vids}
+    except Exception as e:
+        logger.warning(f"Failed to load no-motion group state: {e}")
+    return {"message_id": None, "videos": []}
+
+def save_group_state_to_disk(message_id, videos):
+    try:
+        os.makedirs(_TEMP_DIR, exist_ok=True)
+        payload = {"message_id": message_id, "videos": videos}
+        with open(_GROUP_FILE_PATH, 'w', encoding='utf-8') as f:
+            json.dump(payload, f, ensure_ascii=False)
+    except Exception as e:
+        logger.warning(f"Failed to save no-motion group state: {e}")
+
+# Initialize no-motion group state from disk on import
+try:
+    _grp = load_group_state_from_disk()
+    no_motion_group_message_id = _grp.get("message_id")
+    no_motion_grouped_videos = _grp.get("videos") or []
+    if no_motion_group_message_id and not isinstance(no_motion_group_message_id, int):
+        # Guard against unexpected types
+        try:
+            no_motion_group_message_id = int(no_motion_group_message_id)
+        except Exception:
+            no_motion_group_message_id = None
+except Exception as e:
+    logger.warning(f"Failed to initialize no-motion group state: {e}")
+
 async def reaction_callback(update, context):
     """
     Handles message reaction updates. If a user reacts with 🤔 to a full video
@@ -77,6 +116,11 @@ async def reaction_callback(update, context):
         new_reactions = getattr(mr, "new_reaction", None) or []
     except Exception:
         new_reactions = []
+    # Also capture removed reactions (old_reaction) to handle suffix append on removal
+    try:
+        old_reactions = getattr(mr, "old_reaction", None) or []
+    except Exception:
+        old_reactions = []
 
     # Determine reaction types present
     has_thinking = False
@@ -90,6 +134,9 @@ async def reaction_callback(update, context):
             has_up = True
         elif emoji == "👎":
             has_down = True
+    # Detect removal of thumbs up/down
+    removed_up = any(getattr(r, "emoji", None) == "👍" for r in old_reactions)
+    removed_down = any(getattr(r, "emoji", None) == "👎" for r in old_reactions)
 
     message_id = getattr(mr, "message_id", None)
     chat = getattr(mr, "chat", None)
@@ -114,7 +161,10 @@ async def reaction_callback(update, context):
         caption = entry.get("caption") if entry else None
     if not video_path:
         try:
-            emojis_str = ",".join([getattr(r, "emoji", "?") for r in new_reactions if getattr(r, "emoji", None)]) or "unknown"
+            all_rs = []
+            all_rs.extend([r for r in new_reactions if getattr(r, "emoji", None)])
+            all_rs.extend([r for r in old_reactions if getattr(r, "emoji", None)])
+            emojis_str = ",".join([getattr(r, "emoji", "?") for r in all_rs]) or "unknown"
         except Exception:
             emojis_str = "unknown"
         logger.warning(f"[unknown] Reaction(s) {emojis_str} received for message {message_id}, but no video mapping found.")
@@ -166,6 +216,14 @@ async def reaction_callback(update, context):
             new_caption = (new_caption or "") + "\n_Глянемо\\.\\.\\._"
         else:
             new_caption = (new_caption or "") + "\n_Глянемо..._"
+
+    # If a thumbs up/down was removed, append the 'Нєа...' suffix and log
+    if removed_up or removed_down:
+        logger.info(f"[{file_basename}] Reaction removed.")
+        if parse_mode == 'MarkdownV2':
+            new_caption = (new_caption or "") + " - _Нєа\\.\\.\\._"
+        else:
+            new_caption = (new_caption or "") + " - _Нєа..._"
 
     # Edit message caption if changed
     try:
@@ -377,7 +435,7 @@ async def send_notifications(app, video_response, insignificant_frames, clip_pat
                     except Exception as map_e:
                         logger.warning(f"[{file_basename}] Failed to persist escaped animation mapping: {map_e}")
                 except Exception as retry_error:
-                    logger.error(f"[{file_basename}] Failed to send animation after escaping Markdown: {retry_error}", exc_info=True)
+                    logger.error(f"[{file_basename}] Failed to send animation after escaping Markdown: {retry_error}. Status: error", exc_info=True)
                     logger.info(f"[{file_basename}] Sending plain message with button to Telegram...")
                     try:
                         sent_message = await app.bot.send_message(
@@ -415,7 +473,7 @@ async def send_notifications(app, video_response, insignificant_frames, clip_pat
                         except Exception as e_final_fallback:
                             logger.error(f"[{file_basename}] Failed to send message after escaping Markdown: {e_final_fallback}", exc_info=True)
             except Exception as e:
-                logger.error(f"[{file_basename}] Error sending animation: {e}", exc_info=True)
+                logger.error(f"[{file_basename}] Error sending animation: {e}. Status: error", exc_info=True)
                 logger.info(f"[{file_basename}] Sending plain message with button to Telegram...")
                 try:
                     sent_message = await app.bot.send_message(
@@ -451,9 +509,9 @@ async def send_notifications(app, video_response, insignificant_frames, clip_pat
                         except Exception as map_e:
                             logger.warning(f"[{file_basename}] Failed to persist escaped plain message mapping: {map_e}")
                     except Exception as retry_error:
-                        logger.error(f"[{file_basename}] Failed to send message after escaping Markdown: {retry_error}", exc_info=True)
+                        logger.error(f"[{file_basename}] Failed to send message after escaping Markdown: {retry_error}. Status: error", exc_info=True)
                 except Exception as e_send:
-                    logger.error(f"[{file_basename}] Failed to send plain message: {e_send}", exc_info=True)
+                    logger.error(f"[{file_basename}] Failed to send plain message: {e_send}. Status: error", exc_info=True)
             finally:
                 await cleanup_temp_media(media_path, file_path, logger, file_basename)
 
@@ -463,6 +521,11 @@ async def send_notifications(app, video_response, insignificant_frames, clip_pat
             if no_motion_group_message_id and len(no_motion_grouped_videos) < 4:
                 logger.info(f"[{file_basename}] Adding to existing insignificant message group.")
                 no_motion_grouped_videos.append(video_info)
+                # Persist state immediately so we can recover after restart
+                try:
+                    save_group_state_to_disk(no_motion_group_message_id, no_motion_grouped_videos)
+                except Exception as e:
+                    logger.warning(f"[{file_basename}] Failed to persist group state after append: {e}")
 
                 # Build the updated message
                 full_text = "\n".join([v['text'] for v in no_motion_grouped_videos])
@@ -480,6 +543,10 @@ async def send_notifications(app, video_response, insignificant_frames, clip_pat
                         parse_mode='Markdown'
                     )
                     logger.info(f"[{file_basename}] Successfully edited message to extend group.")
+                    try:
+                        save_group_state_to_disk(no_motion_group_message_id, no_motion_grouped_videos)
+                    except Exception as e:
+                        logger.warning(f"[{file_basename}] Failed to persist group state after edit: {e}")
                 except telegram.error.BadRequest as e:
                     if "message is not modified" in str(e).lower():
                         logger.info(f"[{file_basename}] Message was not modified, skipping edit.")
@@ -494,10 +561,18 @@ async def send_notifications(app, video_response, insignificant_frames, clip_pat
                                 parse_mode='Markdown'
                             )
                             logger.info(f"[{file_basename}] Message edited successfully after escaping Markdown.")
+                            try:
+                                save_group_state_to_disk(no_motion_group_message_id, no_motion_grouped_videos)
+                            except Exception as e2:
+                                logger.warning(f"[{file_basename}] Failed to persist group state after escaped edit: {e2}")
                         except Exception as retry_error:
-                            logger.error(f"[{file_basename}] Failed to edit message after escaping Markdown: {retry_error}", exc_info=True)
+                            logger.error(f"[{file_basename}] Failed to edit message after escaping Markdown: {retry_error}. Status: error", exc_info=True)
                             no_motion_group_message_id = None
                             no_motion_grouped_videos.clear()
+                            try:
+                                save_group_state_to_disk(no_motion_group_message_id, no_motion_grouped_videos)
+                            except Exception as e3:
+                                logger.warning(f"[{file_basename}] Failed to persist group state after clearing: {e3}")
 
             elif no_motion_group_message_id is None or len(no_motion_grouped_videos) >= 4:
                 logger.info(f"[{file_basename}] Starting a new insignificant message group.")
@@ -516,6 +591,10 @@ async def send_notifications(app, video_response, insignificant_frames, clip_pat
                     )
                     no_motion_group_message_id = sent_message.message_id
                     logger.info(f"[{file_basename}] New group message sent. Message ID: {no_motion_group_message_id}")
+                    try:
+                        save_group_state_to_disk(no_motion_group_message_id, no_motion_grouped_videos)
+                    except Exception as e:
+                        logger.warning(f"[{file_basename}] Failed to persist group state after new group send: {e}")
                 except telegram.error.BadRequest as e:
                     logger.warning(f"[{file_basename}] Could not send new group message: {e}. Retrying with escaped Markdown.")
                     try:
@@ -527,14 +606,26 @@ async def send_notifications(app, video_response, insignificant_frames, clip_pat
                         )
                         no_motion_group_message_id = sent_message.message_id
                         logger.info(f"[{file_basename}] New group message sent successfully after escaping Markdown. Message ID: {no_motion_group_message_id}")
+                        try:
+                            save_group_state_to_disk(no_motion_group_message_id, no_motion_grouped_videos)
+                        except Exception as e2:
+                            logger.warning(f"[{file_basename}] Failed to persist group state after escaped new group send: {e2}")
                     except Exception as retry_error:
-                        logger.error(f"[{file_basename}] Failed to send new group message after escaping Markdown: {retry_error}", exc_info=True)
+                        logger.error(f"[{file_basename}] Failed to send new group message after escaping Markdown: {retry_error}. Status: error", exc_info=True)
                         no_motion_group_message_id = None
                         no_motion_grouped_videos.clear()
+                        try:
+                            save_group_state_to_disk(no_motion_group_message_id, no_motion_grouped_videos)
+                        except Exception as e3:
+                            logger.warning(f"[{file_basename}] Failed to persist group state after clearing: {e3}")
                 except Exception as e_send:
-                    logger.error(f"[{file_basename}] Failed to send new group message: {e_send}", exc_info=True)
+                    logger.error(f"[{file_basename}] Failed to send new group message: {e_send}. Status: error", exc_info=True)
                     no_motion_group_message_id = None
                     no_motion_grouped_videos.clear()
+                    try:
+                        save_group_state_to_disk(no_motion_group_message_id, no_motion_grouped_videos)
+                    except Exception as e4:
+                        logger.warning(f"[{file_basename}] Failed to persist group state after clearing: {e4}")
 
         if insignificant_frames:
             logger.info(f"[{file_basename}] Found {len(insignificant_frames)} insignificant motion frames to send.")

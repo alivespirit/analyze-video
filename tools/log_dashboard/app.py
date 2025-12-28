@@ -5,7 +5,7 @@ from datetime import datetime, date
 from typing import List, Dict, Optional, Tuple
 
 from fastapi import FastAPI, Query, HTTPException
-from fastapi.responses import HTMLResponse, RedirectResponse, FileResponse
+from fastapi.responses import HTMLResponse, FileResponse
 from fastapi.staticfiles import StaticFiles
 from jinja2 import Environment, FileSystemLoader, select_autoescape
 
@@ -29,6 +29,8 @@ MSG_VIDEO_RE = re.compile(r"^\[(?P<video>[^\]]+)\]\s*(?P<content>.*)$")
 
 # Metrics message patterns
 STATUS_RE = re.compile(r"Motion detection complete\. Status: (?P<status>[a-z_]+)")
+# Generic status line matcher (covers non-MD contexts like telegram failures)
+STATUS_ANY_RE = re.compile(r"Status:\s*(?P<status>[a-z_]+)")
 FULL_TIME_RE = re.compile(r"Full processing took (?P<seconds>[0-9]+\.[0-9]+|[0-9]+) seconds")
 RAW_EVENTS_RE = re.compile(r"Found (?P<count>\d+) raw motion event\(s\)")
 MD_TIME_RE = re.compile(r"Motion detection took (?P<seconds>[0-9]+\.[0-9]+|[0-9]+) seconds")
@@ -36,6 +38,7 @@ GATE_RE = re.compile(r"Gate crossing detected! Direction: (?P<dir>up|down|both)"
 NEW_FILE_RE = re.compile(r"^New file detected:")
 AWAY_RE = re.compile(r"Reaction detected: object went away")
 BACK_RE = re.compile(r"Reaction detected: object came back")
+REACTION_REMOVED_RE = re.compile(r"Reaction removed\.")
 
 
 env = Environment(
@@ -131,16 +134,16 @@ def collect_metrics(entries: List[Dict]) -> Dict:
     gate_counts = {"up": 0, "down": 0}
     gate_direction_per_video: Dict[str, str] = {}
     first_seen_ts_per_video: Dict[str, datetime] = {}
-    # Away/back reaction events
+    # Away/back reaction events and latest reaction state per video
     away_back_events: List[Dict] = []
-    away_videos = set()
-    back_videos = set()
+    reaction_state_per_video: Dict[str, Optional[str]] = {}
 
     for e in entries:
         content = e["content"]
         vid = e.get("video")
         if vid:
-            m = STATUS_RE.search(content)
+            # Prefer any explicit Status: ... update; fall back to MD-specific pattern
+            m = STATUS_ANY_RE.search(content) or STATUS_RE.search(content)
             if m:
                 status_per_video[vid] = m.group("status")
 
@@ -162,13 +165,21 @@ def collect_metrics(entries: List[Dict]) -> Dict:
                 except ValueError:
                     pass
 
-            # Track reaction events for away/back
+            # Track reaction events for away/back and reset on removal
             if AWAY_RE.search(content):
                 away_back_events.append({"type": "away", "video": vid, "ts": e["ts"]})
-                away_videos.add(vid)
+                reaction_state_per_video[vid] = "away"
             elif BACK_RE.search(content):
                 away_back_events.append({"type": "back", "video": vid, "ts": e["ts"]})
-                back_videos.add(vid)
+                reaction_state_per_video[vid] = "back"
+            elif REACTION_REMOVED_RE.search(content):
+                # Remove current reaction state for this video
+                reaction_state_per_video[vid] = None
+
+            # If a later error-level line appears for this video, treat it as status=error
+            level = e.get("level")
+            if level in ("ERROR", "CRITICAL"):
+                status_per_video[vid] = "error"
 
         # Motion detection time (prefer per video if available)
         m = MD_TIME_RE.search(content)
@@ -245,8 +256,9 @@ def collect_metrics(entries: List[Dict]) -> Dict:
         "first_seen_ts_per_video": first_seen_ts_per_video,
         "videos_total": len({v for v in status_per_video.keys()} | {v for v in full_time_per_video.keys()} | {v for v in raw_events_per_video.keys()}),
         "away_back_events": away_back_events,
-        "away_videos": sorted(list(away_videos)),
-        "back_videos": sorted(list(back_videos)),
+        # Latest reaction state after processing entire day
+        "away_videos": sorted([v for v, st in reaction_state_per_video.items() if st == "away"]),
+        "back_videos": sorted([v for v, st in reaction_state_per_video.items() if st == "back"]),
     }
 
 

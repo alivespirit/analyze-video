@@ -32,6 +32,7 @@ WARMUP_FRAMES = 15
 MAX_EVENT_GAP_SECONDS = 3.0
 MIN_EVENT_DURATION_SECONDS = 0.8
 MIN_INSIGNIFICANT_EVENT_DURATION_SECONDS = 0.2
+LONG_MOTION_DURATION_SECONDS = 6.0
 SEND_INSIGNIFICANT_FRAMES = True
 CROP_PADDING = 30
 MAX_BOX_AREA_PERCENT = 0.80
@@ -495,7 +496,7 @@ def detect_motion(input_video_path, output_dir):
     # Process each event separately and include only those with person inside ROI for >= PERSON_MIN_FRAMES
     for clip_index, (start_frame, end_frame) in enumerate(significant_sub_clips):
         duration_seconds = (end_frame - start_frame) / fps
-        is_long_motion = duration_seconds > 4.0
+        is_long_motion = duration_seconds > LONG_MOTION_DURATION_SECONDS
         padding_seconds_adjusted = 1 if is_long_motion else PADDING_SECONDS
         padded_start = max(0, start_frame - int(padding_seconds_adjusted * fps))
         padded_end = min(total_frames, end_frame + int(padding_seconds_adjusted * fps))

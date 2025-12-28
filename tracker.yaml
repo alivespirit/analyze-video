@@ -1,7 +1,7 @@
 tracker_type: bytetrack  # tracker type, ['bytetrack', 'botsort']
 track_high_thresh: 0.4   # threshold for the first association (Match your Python conf)
 track_low_thresh: 0.1    # threshold for the second association (Keep this low to catch shadows!)
-new_track_thresh: 0.55   # threshold for init a new track (Slightly higher to avoid noise starting IDs)
+new_track_thresh: 0.5    # threshold for init a new track (Slightly higher to avoid noise starting IDs)
 track_buffer: 60         # <--- INCREASED: The number of frames to keep lost tracks alive
 match_thresh: 0.8        # threshold for matching tracks (0.8 is good for cars/people)
 fuse_score: True         # (bool) Fuse detection score with motion/IoU for matching; stabilizes weak detections
