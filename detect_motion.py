@@ -41,7 +41,7 @@ PERSON_MIN_FRAMES = 8
 # --- Tesla config ---
 TESLA_EMAIL = os.getenv("TESLA_EMAIL")
 TESLA_REFRESH_TOKEN = os.getenv("TESLA_REFRESH_TOKEN")
-TESLA_SOC_FILE = os.path.join(SCRIPT_DIR, "tesla_soc.txt")
+TESLA_SOC_FILE = os.path.join(SCRIPT_DIR, "temp", "tesla_soc.txt")
 TESLA_LAST_CHECK = 0
 TESLA_SOC_CHECK_ENABLED = bool(teslapy and TESLA_REFRESH_TOKEN and TESLA_EMAIL)
 
@@ -102,7 +102,7 @@ def check_tesla_soc(file_basename):
 
     logger.info(f"[{file_basename}] Fetching fresh Tesla SoC from API...")
     try:
-        with teslapy.Tesla(email=TESLA_EMAIL) as tesla:
+        with teslapy.Tesla(email=TESLA_EMAIL, cache_file=os.path.join(SCRIPT_DIR, "temp", "tesla_token_cache.json")) as tesla:
             if not tesla.authorized:
                 tesla.refresh_token(refresh_token=TESLA_REFRESH_TOKEN)
             vehicles = tesla.vehicle_list()
