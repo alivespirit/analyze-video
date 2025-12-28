@@ -313,7 +313,7 @@ def detect_motion(input_video_path, output_dir):
     roi_mask = np.zeros((crop_h, crop_w), dtype=np.uint8)
     cv2.fillPoly(roi_mask, [analysis_roi_points], 255)
 
-    logger.info(f"[{file_basename}] Starting smart background model pre-training...")
+    logger.debug(f"[{file_basename}] Starting smart background model pre-training...")
     pre_trained = False
     training_candidate_times = [30, 40, 50, 20]
 
@@ -480,7 +480,7 @@ def detect_motion(input_video_path, output_dir):
     if hasattr(object_detection_model, 'predictor') and object_detection_model.predictor is not None:
         if hasattr(object_detection_model.predictor, 'trackers') and object_detection_model.predictor.trackers:
             object_detection_model.predictor.trackers[0].reset()
-            logger.info(f"[{file_basename}] Object tracker state reset.")
+            logger.debug(f"[{file_basename}] Object tracker state reset.")
 
     # Prepare ROI polygon for point-in-polygon checks
     roi_polygon_cv = roi_poly_points.reshape((-1, 1, 2))

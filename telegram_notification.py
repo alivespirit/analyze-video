@@ -52,7 +52,7 @@ def save_message_map_to_disk():
             if len(video_message_map) > 400:
                 # preserve insertion order; pop oldest
                 keys = list(video_message_map.keys())
-                for k in keys[: len(video_message_map) - 400]:
+                for k in keys[: len(video_message_map) - 200]:
                     video_message_map.pop(k, None)
         except Exception:
             pass
