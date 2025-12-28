@@ -293,7 +293,8 @@ def build_away_intervals(entries: List[Dict]) -> List[Dict[str, Optional[str]]]:
     does not exist earlier/later in the day's events.
     """
     # Collect events with derived HH:MM and sortable minute index
-    collected: List[Tuple[int, str, str]] = []  # (minutes, type, hhmm)
+    # Store minute index and original timestamp for stable ordering when multiple events share HH:MM
+    collected: List[Tuple[int, datetime, str, str]] = []  # (minutes, ts, type, hhmm)
     for e in entries:
         vid = e.get("video")
         if not vid:
@@ -316,14 +317,14 @@ def build_away_intervals(entries: List[Dict]) -> List[Dict[str, Optional[str]]]:
             # Fallback: skip malformed times
             continue
         typ = "away" if is_away else "back"
-        collected.append((minutes, typ, hhmm))
+        collected.append((minutes, ts or datetime.min, typ, hhmm))
 
     # Sort by derived minute index to ensure chronological pairing
-    collected.sort(key=lambda t: t[0])
+    collected.sort(key=lambda t: (t[0], t[1]))
 
     intervals: List[Dict[str, Optional[str]]] = []
     current_start: Optional[str] = None
-    for _, typ, hhmm in collected:
+    for _, _ts, typ, hhmm in collected:
         if typ == "away":
             if current_start is None:
                 current_start = hhmm
