@@ -32,7 +32,12 @@ WARMUP_FRAMES = 15
 MAX_EVENT_GAP_SECONDS = 3.0
 MIN_EVENT_DURATION_SECONDS = 0.8
 MIN_INSIGNIFICANT_EVENT_DURATION_SECONDS = 0.2
-LONG_MOTION_DURATION_SECONDS = 6.0
+# Tracking/render speed-up thresholds
+# <= TRACK_FULL_UNTIL_SECONDS: track all frames, render all frames
+# > TRACK_FULL_UNTIL_SECONDS and <= TRACK_SKIP_FROM_SECONDS: track all frames, render every 2nd frame
+# > TRACK_SKIP_FROM_SECONDS: track every 2nd frame, render every 2nd frame (legacy behavior)
+TRACK_FULL_UNTIL_SECONDS = 6.0
+TRACK_SKIP_FROM_SECONDS = 12.0
 SEND_INSIGNIFICANT_FRAMES = True
 CROP_PADDING = 30
 MAX_BOX_AREA_PERCENT = 0.80
@@ -47,7 +52,7 @@ TESLA_SOC_CHECK_ENABLED = bool(teslapy and TESLA_REFRESH_TOKEN and TESLA_EMAIL)
 
 # --- Object Detection Configuration ---
 OBJECT_DETECTION_MODEL_PATH = os.getenv("OBJECT_DETECTION_MODEL_PATH", default="best_openvino_model")
-CONF_THRESHOLD = 0.4
+CONF_THRESHOLD = 0.5
 LINE_Y = 860
 LINE_CROSSING_COOLDOWN_SECONDS = 3.0
 COLOR_PERSON = (100, 200, 0)
@@ -496,7 +501,7 @@ def detect_motion(input_video_path, output_dir):
     # Process each event separately and include only those with person inside ROI for >= PERSON_MIN_FRAMES
     for clip_index, (start_frame, end_frame) in enumerate(significant_sub_clips):
         duration_seconds = (end_frame - start_frame) / fps
-        is_long_motion = duration_seconds > LONG_MOTION_DURATION_SECONDS
+        is_long_motion = duration_seconds > TRACK_FULL_UNTIL_SECONDS
         padding_seconds_adjusted = 1 if is_long_motion else PADDING_SECONDS
         padded_start = max(0, start_frame - int(padding_seconds_adjusted * fps))
         padded_end = min(total_frames, end_frame + int(padding_seconds_adjusted * fps))
@@ -505,8 +510,19 @@ def detect_motion(input_video_path, output_dir):
             logger.info(f"[{file_basename}] Motion starts at the beginning. Including video from frame 0.")
             padded_start = 0
 
+        # Decide per-event tracking and rendering stride
+        if duration_seconds <= TRACK_FULL_UNTIL_SECONDS:
+            tracker_stride = 1
+            output_stride = 1
+        elif duration_seconds <= TRACK_SKIP_FROM_SECONDS:
+            tracker_stride = 1
+            output_stride = 2
+        else:
+            tracker_stride = 2
+            output_stride = 2
+
         if is_long_motion:
-            logger.info(f"[{file_basename}] Long motion event ({duration_seconds:.2f}s) detected. Speeding up clip segment.")
+            logger.info(f"[{file_basename}] Long motion event ({duration_seconds:.2f}s). tracker_stride={tracker_stride}, output_stride={output_stride}.")
 
         # Event-scoped accumulators
         event_frames_rgb = []
@@ -526,8 +542,8 @@ def detect_motion(input_video_path, output_dir):
                 frame_idx += 1
                 continue
 
-            skip_frame = is_long_motion and (frame_idx - padded_start) % 2 != 0
-            if skip_frame:
+            # Skip frames for tracking based on tracker_stride
+            if (frame_idx - padded_start) % tracker_stride != 0:
                 frame_idx += 1
                 continue
 
@@ -599,8 +615,12 @@ def detect_motion(input_video_path, output_dir):
             current_seconds = int((frame_idx - 1) / fps)
             draw_event_overlay(frame, clip_index + 1, len(significant_sub_clips), current_seconds)
 
-            rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-            event_frames_rgb.append(rgb_frame)
+            # Append frames to output based on output_stride to speed up render without
+            # sacrificing tracking continuity (for moderate-length events)
+            processed_offset = (frame_idx - 1) - padded_start
+            if processed_offset % output_stride == 0:
+                rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                event_frames_rgb.append(rgb_frame)
 
         # Decide whether to include this event based on person frames within ROI
         if person_frames_in_roi >= PERSON_MIN_FRAMES:

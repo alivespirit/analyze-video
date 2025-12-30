@@ -184,13 +184,13 @@ async def reaction_callback(update, context):
     if has_up:
         logger.info(f"[{file_basename}] Reaction detected: object went away.")
         if parse_mode == 'MarkdownV2':
-            new_caption = (new_caption or "") + " - *Юху\\!*"
+            new_caption = (new_caption or "") + " \\- *Юху\\!*"
         else:
             new_caption = (new_caption or "") + " - *Юху!*"
     if has_down:
         logger.info(f"[{file_basename}] Reaction detected: object came back.")
         if parse_mode == 'MarkdownV2':
-            new_caption = (new_caption or "") + " - *Ex\\.\\.\\.*"
+            new_caption = (new_caption or "") + " \\- *Ex\\.\\.\\.*"
         else:
             new_caption = (new_caption or "") + " - *Ex...*"
     if has_thinking:
@@ -221,7 +221,7 @@ async def reaction_callback(update, context):
     if removed_up or removed_down:
         logger.info(f"[{file_basename}] Reaction removed.")
         if parse_mode == 'MarkdownV2':
-            new_caption = (new_caption or "") + " - _Нєа\\.\\.\\._"
+            new_caption = (new_caption or "") + " \\- _Нєа\\.\\.\\._"
         else:
             new_caption = (new_caption or "") + " - _Нєа..._"
 
@@ -316,6 +316,9 @@ async def button_callback(update, context):
     # Parse callback data (view only)
     raw = query.data
     callback_file_rel = raw.replace('/', os.path.sep)
+    # Precompute safe caption path to avoid backslashes in f-string expressions
+    safe_rel = raw.replace('\\', '/')
+    escaped_rel_v2 = escape_markdown(safe_rel, version=2)
     file_path = os.path.join(VIDEO_FOLDER, callback_file_rel)
     file_basename = os.path.basename(file_path)
 
@@ -324,7 +327,7 @@ async def button_callback(update, context):
     if not os.path.exists(file_path):
         logger.error(f"[{file_basename}] Video file not found for callback: {file_path}")
         try:
-            await query.edit_message_text(text=f"{query.message.text}\n\n_{escape_markdown(query.data.replace('\\', '/'), version=2)}: Відео файл не знайдено._", parse_mode='MarkdownV2')
+            await query.edit_message_text(text=f"{query.message.text}\n\n_{escaped_rel_v2}: Відео файл не знайдено._", parse_mode='MarkdownV2')
         except Exception as edit_e:
             logger.error(f"[{file_basename}] Error editing message for not found file: {edit_e}", exc_info=True)
         return
@@ -336,11 +339,11 @@ async def button_callback(update, context):
         with open(file_path, 'rb') as video_file:
             sent_video_msg = await context.bot.send_video(
                 chat_id=query.message.chat_id, video=video_file, parse_mode='MarkdownV2',
-                caption=f"Осьо відео `{escape_markdown(query.data.replace('\\', '/'), version=2)}`", reply_to_message_id=query.message.message_id
+                caption=f"Осьо відео `{escaped_rel_v2}`", reply_to_message_id=query.message.message_id
             )
         try:
             key = f"{query.message.chat_id}:{sent_video_msg.message_id}"
-            base_caption = f"Осьо відео `{escape_markdown(query.data.replace('\\', '/'), version=2)}`"
+            base_caption = f"Осьо відео `{escaped_rel_v2}`"
             async with message_map_lock:
                 video_message_map[key] = {"path": file_path, "caption": base_caption, "mode": "MarkdownV2"}
                 save_message_map_to_disk()
@@ -351,7 +354,7 @@ async def button_callback(update, context):
     except FileNotFoundError:
         logger.error(f"[{file_basename}] Video file disappeared before sending from callback: {file_path}")
         try:
-            await query.edit_message_text(text=f"{query.message.text}\n\n_{escape_markdown(query.data.replace('\\', '/'), version=2)} Помилка: Відео файл зник._", parse_mode='MarkdownV2')
+            await query.edit_message_text(text=f"{query.message.text}\n\n_{escaped_rel_v2} Помилка: Відео файл зник._", parse_mode='MarkdownV2')
         except Exception as edit_e:
             logger.warning(f"[{file_basename}] Failed to edit message after video disappeared: {edit_e}", exc_info=True)
     except Exception as e:
