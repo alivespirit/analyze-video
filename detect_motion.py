@@ -529,8 +529,11 @@ def detect_motion(input_video_path, output_dir):
         event_unique_objects = {'person': set(), 'car': set()}
         event_persons_up = 0
         event_persons_down = 0
-        event_previous_positions = {}
-        event_line_crossing_cooldown = {}
+        # Track per-person crossing state within the event to compute net result
+        event_first_side = {}
+        event_last_side = {}
+        event_prev_y = {}
+        event_cross_dirs = {}
         person_frames_in_roi = 0
 
         # Seek once to the start of the event, then advance sequentially to avoid decoder seek artifacts
@@ -576,24 +579,23 @@ def detect_motion(input_video_path, output_dir):
                     if label_name in event_unique_objects:
                         event_unique_objects[label_name].add(global_id)
 
-                    # Line crossing detection (per event)
-                    y_center = int((box[1] + box[3]) / 2)
-                    if global_id in event_previous_positions:
-                        prev_y = event_previous_positions[global_id]
-                        if label_name == 'person':
-                            if frame_idx >= event_line_crossing_cooldown.get(global_id, 0):
-                                crossed = False
-                                if prev_y < LINE_Y <= y_center:
-                                    event_persons_down += 1
-                                    crossed = True
-                                elif prev_y > LINE_Y >= y_center:
-                                    event_persons_up += 1
-                                    crossed = True
-
-                                if crossed:
-                                    cooldown_frames = int(LINE_CROSSING_COOLDOWN_SECONDS * fps)
-                                    event_line_crossing_cooldown[global_id] = frame_idx + cooldown_frames
-                    event_previous_positions[global_id] = y_center
+                    # Line crossing tracking per person (compute net outcome per event)
+                    if label_name == 'person':
+                        y_center = int((box[1] + box[3]) / 2)
+                        current_side = 'above' if y_center < LINE_Y else 'below'
+                        if global_id not in event_prev_y:
+                            event_prev_y[global_id] = y_center
+                            event_first_side[global_id] = current_side
+                            event_last_side[global_id] = current_side
+                            event_cross_dirs[global_id] = set()
+                        else:
+                            prev_y = event_prev_y[global_id]
+                            if prev_y < LINE_Y <= y_center:
+                                event_cross_dirs[global_id].add('down')
+                            elif prev_y > LINE_Y >= y_center:
+                                event_cross_dirs[global_id].add('up')
+                            event_prev_y[global_id] = y_center
+                            event_last_side[global_id] = current_side
 
                     # Person-in-ROI check using center point inside ROI polygon
                     if label_name == 'person':
@@ -621,6 +623,28 @@ def detect_motion(input_video_path, output_dir):
             if processed_offset % output_stride == 0:
                 rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
                 event_frames_rgb.append(rgb_frame)
+
+        # Reduce per-person crossings to net counts for the event, following rules:
+        # - If final side != start side: count 1 in that direction only
+        # - If final side == start side and both directions occurred: count 1 up and 1 down
+        event_up_final = 0
+        event_down_final = 0
+        for pid in event_prev_y.keys():
+            start_side = event_first_side.get(pid)
+            end_side = event_last_side.get(pid, start_side)
+            dirs = event_cross_dirs.get(pid, set())
+            if start_side and end_side and start_side != end_side:
+                if start_side == 'below' and end_side == 'above':
+                    event_up_final += 1
+                elif start_side == 'above' and end_side == 'below':
+                    event_down_final += 1
+            else:
+                if 'up' in dirs and 'down' in dirs:
+                    event_up_final += 1
+                    event_down_final += 1
+
+        event_persons_up = event_up_final
+        event_persons_down = event_down_final
 
         # Decide whether to include this event based on person frames within ROI
         if person_frames_in_roi >= PERSON_MIN_FRAMES:
