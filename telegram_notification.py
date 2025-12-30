@@ -179,6 +179,19 @@ async def reaction_callback(update, context):
     if not parse_mode:
         parse_mode = 'MarkdownV2' if (caption and caption.startswith("Осьо відео ")) else 'Markdown'
 
+    # Preserve inline button if present (significant-motion messages use Markdown + "Глянути")
+    reply_markup = None
+    try:
+        if parse_mode == 'Markdown' and video_path:
+            safe_video_folder = os.path.join(VIDEO_FOLDER, '') if VIDEO_FOLDER else None
+            if safe_video_folder and video_path.startswith(safe_video_folder):
+                callback_file = video_path[len(safe_video_folder):].replace(os.path.sep, '/')
+            else:
+                callback_file = os.path.basename(video_path)
+            reply_markup = InlineKeyboardMarkup([[InlineKeyboardButton("Глянути", callback_data=callback_file)]])
+    except Exception:
+        reply_markup = None
+
     # Apply actions based on reactions
     new_caption = caption or ""
     if has_up:
@@ -228,10 +241,10 @@ async def reaction_callback(update, context):
     # Edit message caption if changed
     try:
         if new_caption and new_caption != caption:
-            await context.bot.edit_message_caption(chat_id=chat_id, message_id=message_id, caption=new_caption, parse_mode=parse_mode)
+            await context.bot.edit_message_caption(chat_id=chat_id, message_id=message_id, caption=new_caption, parse_mode=parse_mode, reply_markup=reply_markup)
             # Persist updated caption
             async with message_map_lock:
-                video_message_map[key] = {"path": video_path, "caption": new_caption}
+                video_message_map[key] = {"path": video_path, "caption": new_caption, "mode": parse_mode}
                 save_message_map_to_disk()
     except telegram.error.BadRequest as e:
         # Retry with escaped base portion; preserve suffix formatting
@@ -240,7 +253,7 @@ async def reaction_callback(update, context):
             suffix_only = new_caption[len(base_only):] if new_caption and base_only and new_caption.startswith(base_only) else (new_caption or "")
             escaped_base = escape_markdown(base_only, version=(2 if parse_mode == 'MarkdownV2' else 1))
             updated_text2 = escaped_base + suffix_only
-            await context.bot.edit_message_caption(chat_id=chat_id, message_id=message_id, caption=updated_text2, parse_mode=parse_mode)
+            await context.bot.edit_message_caption(chat_id=chat_id, message_id=message_id, caption=updated_text2, parse_mode=parse_mode, reply_markup=reply_markup)
             async with message_map_lock:
                 video_message_map[key] = {"path": video_path, "caption": updated_text2, "mode": parse_mode}
                 save_message_map_to_disk()

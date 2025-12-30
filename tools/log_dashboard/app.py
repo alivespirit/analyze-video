@@ -293,8 +293,8 @@ def build_away_intervals(entries: List[Dict]) -> List[Dict[str, Optional[str]]]:
     does not exist earlier/later in the day's events.
     """
     # Collect events with derived HH:MM and sortable minute index
-    # Store minute index and original timestamp for stable ordering when multiple events share HH:MM
-    collected: List[Tuple[int, datetime, str, str]] = []  # (minutes, ts, type, hhmm)
+    # Store minute index, original timestamp, type, hhmm, and video for stable ordering and cancellations
+    collected: List[Tuple[int, datetime, str, str, str]] = []  # (minutes, ts, type, hhmm, video)
     for e in entries:
         vid = e.get("video")
         if not vid:
@@ -302,7 +302,8 @@ def build_away_intervals(entries: List[Dict]) -> List[Dict[str, Optional[str]]]:
         content = e.get("content", "")
         is_away = AWAY_RE.search(content)
         is_back = BACK_RE.search(content)
-        if not (is_away or is_back):
+        is_removed = REACTION_REMOVED_RE.search(content)
+        if not (is_away or is_back or is_removed):
             continue
         ts = e.get("ts")
         hhmm = _hhmm_from_video_path(vid, fallback_ts=ts)
@@ -316,15 +317,19 @@ def build_away_intervals(entries: List[Dict]) -> List[Dict[str, Optional[str]]]:
         except Exception:
             # Fallback: skip malformed times
             continue
-        typ = "away" if is_away else "back"
-        collected.append((minutes, ts or datetime.min, typ, hhmm))
+        if is_removed:
+            typ = "remove"
+        else:
+            typ = "away" if is_away else "back"
+        collected.append((minutes, ts or datetime.min, typ, hhmm, vid))
 
     # Sort by derived minute index to ensure chronological pairing
     collected.sort(key=lambda t: (t[0], t[1]))
 
     intervals: List[Dict[str, Optional[str]]] = []
     current_start: Optional[str] = None
-    for _, _ts, typ, hhmm in collected:
+    pending_back_only: Dict[str, str] = {}
+    for _, _ts, typ, hhmm, vid in collected:
         if typ == "away":
             if current_start is None:
                 current_start = hhmm
@@ -332,10 +337,10 @@ def build_away_intervals(entries: List[Dict]) -> List[Dict[str, Optional[str]]]:
                 # Already in "away" state; ignore duplicate away without intervening back
                 # Keep the earliest start until a back closes it
                 pass
-        else:  # back
+        elif typ == "back":
             if current_start is None:
-                # Back without prior away in this day → open-start interval
-                intervals.append({"start": None, "end": hhmm, "dur": None})
+                # Back without prior away in this day → track open-start pending for this video
+                pending_back_only[vid] = hhmm
             else:
                 # Compute duration between current_start and this back
                 try:
@@ -354,6 +359,17 @@ def build_away_intervals(entries: List[Dict]) -> List[Dict[str, Optional[str]]]:
                     dur = None
                 intervals.append({"start": current_start, "end": hhmm, "dur": dur})
                 current_start = None
+        else:  # remove
+            # Cancel any pending back-only interval for this video
+            if vid in pending_back_only:
+                try:
+                    del pending_back_only[vid]
+                except Exception:
+                    pass
+
+    # Emit any remaining pending back-only intervals as open-start intervals
+    for _vid, end_hhmm in pending_back_only.items():
+        intervals.append({"start": None, "end": end_hhmm, "dur": None})
 
     # If we ended with an open "away" without a later back, emit open-ended interval
     if current_start is not None:
