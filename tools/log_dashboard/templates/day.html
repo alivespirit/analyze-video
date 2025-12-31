@@ -144,18 +144,18 @@
             <tbody>
               <tr>
                 <td>min</td>
-                <td>{% if metrics.motion_detection_stats %}{{ '%.2f'|format(metrics.motion_detection_stats.min) }}s{% else %}—{% endif %}</td>
-                <td>{% if metrics.full_processing_stats %}{{ '%.2f'|format(metrics.full_processing_stats.min) }}s{% else %}—{% endif %}</td>
+                <td>{% if metrics.motion_detection_stats %}<span class="sec">{{ '%.2f'|format(metrics.motion_detection_stats.min) }}s</span>{% else %}—{% endif %}</td>
+                <td>{% if metrics.full_processing_stats %}<span class="sec">{{ '%.2f'|format(metrics.full_processing_stats.min) }}s</span>{% else %}—{% endif %}</td>
               </tr>
               <tr>
                 <td>avg</td>
-                <td>{% if metrics.motion_detection_stats %}{{ '%.2f'|format(metrics.motion_detection_stats.avg) }}s{% else %}—{% endif %}</td>
-                <td>{% if metrics.full_processing_stats %}{{ '%.2f'|format(metrics.full_processing_stats.avg) }}s{% else %}—{% endif %}</td>
+                <td>{% if metrics.motion_detection_stats %}<span class="sec">{{ '%.2f'|format(metrics.motion_detection_stats.avg) }}s</span>{% else %}—{% endif %}</td>
+                <td>{% if metrics.full_processing_stats %}<span class="sec">{{ '%.2f'|format(metrics.full_processing_stats.avg) }}s</span>{% else %}—{% endif %}</td>
               </tr>
               <tr>
                 <td>max</td>
-                <td>{% if metrics.motion_detection_stats %}{{ '%.2f'|format(metrics.motion_detection_stats.max) }}s{% else %}—{% endif %}</td>
-                <td>{% if metrics.full_processing_stats %}{{ '%.2f'|format(metrics.full_processing_stats.max) }}s{% else %}—{% endif %}</td>
+                <td>{% if metrics.motion_detection_stats %}<span class="sec">{{ '%.2f'|format(metrics.motion_detection_stats.max) }}s</span>{% else %}—{% endif %}</td>
+                <td>{% if metrics.full_processing_stats %}<span class="sec">{{ '%.2f'|format(metrics.full_processing_stats.max) }}s</span>{% else %}—{% endif %}</td>
               </tr>
             </tbody>
           </table>

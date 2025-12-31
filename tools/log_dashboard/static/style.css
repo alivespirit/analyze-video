@@ -54,6 +54,7 @@ main{max-width:1200px;margin:0 auto;padding:20px}
 .table{width:100%;border-collapse:collapse}
 .table{table-layout:fixed}
 .table th,.table td{padding:8px;border-bottom:1px solid #222;text-align:left;word-break:break-word;overflow-wrap:anywhere}
+.times-table td .sec{font-style:italic}
 .table.times-table th,.table.times-table td{border-bottom:1px dashed #2a2f40}
 .times-table thead th + th,.times-table tbody td + td{border-left:1px dashed #2a2f40}
 .times-table tbody tr:last-child td{border-bottom:none}
@@ -189,6 +190,7 @@ header nav .nav-btn{white-space:nowrap}
   .table{min-width:unset;width:100%;table-layout:fixed}
   .table th,.table td{word-break:break-word;overflow-wrap:anywhere}
   .table th,.table td{padding:6px}
+  .times-table td .sec{font-style:italic}
   /* Ensure dashed lines persist on mobile for Times table */
   .table.times-table th,.table.times-table td{border-bottom:1px dashed #2a2f40}
   .times-table thead th + th,.times-table tbody td + td{border-left:1px dashed #2a2f40}
