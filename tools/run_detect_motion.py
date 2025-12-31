@@ -3,7 +3,6 @@ import os
 import sys
 import json
 import argparse
-from datetime import datetime
 
 # Ensure we can import detect_motion from the repo root
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))

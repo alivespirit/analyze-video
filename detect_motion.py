@@ -58,6 +58,7 @@ LINE_CROSSING_COOLDOWN_SECONDS = 3.0
 COLOR_PERSON = (100, 200, 0)
 COLOR_CAR = (200, 120, 0)
 COLOR_DEFAULT = (255, 255, 255)
+COLOR_HIGHLIGHT = (80, 90, 245)
 COLOR_LINE = (0, 255, 255)
 LINE_Y_TOLERANCE = 6
 HIGHLIGHT_WINDOW_FRAMES = 5
@@ -184,7 +185,7 @@ def draw_tracked_box(frame, box, local_id, label_name, conf, soc, highlight=Fals
     x1, y1, x2, y2 = int(box[0]), int(box[1]), int(box[2]), int(box[3])
 
     if highlight:
-        color = (0, 0, 255)
+        color = COLOR_HIGHLIGHT
     else:
         if label_name == 'person':
             color = COLOR_PERSON
