@@ -204,8 +204,7 @@ def draw_tracked_box(frame, box, local_id, label_name, conf, soc, highlight=Fals
                 else:
                     label_text = f"Tesla {conf:.0%}"
 
-    thickness = 4 if highlight else 2
-    cv2.rectangle(frame, (x1, y1), (x2, y2), color, thickness)
+    cv2.rectangle(frame, (x1, y1), (x2, y2), color, 2)
 
     (w, h), _ = cv2.getTextSize(label_text, cv2.FONT_HERSHEY_DUPLEX, 1, 1)
 
@@ -262,6 +261,42 @@ def draw_event_overlay(frame, event_idx, total_events, seconds_from_start):
     text_x = x1 + pad_x
     text_y = y1 + pad_y + text_h - 2
     cv2.putText(frame, text, (text_x, text_y), font, font_scale, (255, 255, 255), thickness, cv2.LINE_AA)
+
+
+# --- Lightweight geometry helpers for entity matching ---
+def _box_area(b):
+    return max(1.0, float(max(0.0, b[2] - b[0]) * max(0.0, b[3] - b[1])))
+
+
+def _iou(a, b):
+    xA = max(a[0], b[0])
+    yA = max(a[1], b[1])
+    xB = min(a[2], b[2])
+    yB = min(a[3], b[3])
+    inter_w = max(0.0, xB - xA)
+    inter_h = max(0.0, yB - yA)
+    inter = inter_w * inter_h
+    if inter <= 0:
+        return 0.0
+    areaA = _box_area(a)
+    areaB = _box_area(b)
+    return inter / (areaA + areaB - inter)
+
+
+def _center_distance(a, b):
+    ax = (a[0] + a[2]) * 0.5
+    ay = (a[1] + a[3]) * 0.5
+    bx = (b[0] + b[2]) * 0.5
+    by = (b[1] + b[3]) * 0.5
+    dx = ax - bx
+    dy = ay - by
+    return (dx * dx + dy * dy) ** 0.5
+
+
+def _bbox_diag(b):
+    w = max(0.0, b[2] - b[0])
+    h = max(0.0, b[3] - b[1])
+    return (w * w + h * h) ** 0.5
 
 
 def detect_motion(input_video_path, output_dir):
@@ -541,6 +576,17 @@ def detect_motion(input_video_path, output_dir):
         event_prev_y = {}
         event_cross_dirs = {}
         event_highlight_until = {}
+        # Event-local entity matcher (stable IDs across tracker flips)
+        event_entities = []  # list of dicts: {id, last_box, last_frame}
+        event_entities_map = {}
+        event_global_to_entity = {}
+        event_next_entity_id = 1
+        # Matcher thresholds
+        IOU_STRONG = 0.5
+        IOU_WEAK = 0.3
+        CENTER_DIST_RATIO = 0.35
+        SIZE_RATIO_LIMIT = 1.6
+        MAX_GAP_FRAMES = int(6 * tracker_stride)
         person_frames_in_roi = 0
 
         # Seek once to the start of the event, then advance sequentially to avoid decoder seek artifacts
@@ -574,6 +620,8 @@ def detect_motion(input_video_path, output_dir):
                 global_ids = results[0].boxes.id.int().cpu().tolist()
                 clss = results[0].boxes.cls.int().cpu().tolist()
                 confs = results[0].boxes.conf.float().cpu().tolist()
+                # Prevent multiple detections mapping to same entity within a single frame
+                frame_assigned_entities = set()
 
                 for box, global_id, cls, conf in zip(boxes, global_ids, clss, confs):
                     label_name = class_names[cls]
@@ -590,32 +638,72 @@ def detect_motion(input_video_path, output_dir):
 
                     # Line crossing tracking per person (compute net outcome per event)
                     if label_name == 'person':
+                        # Assign stable entity_id
+                        best_id = None
+                        best_ent = None
+                        best_iou = 0.0
+                        for ent in event_entities:
+                            if (frame_idx - ent['last_frame']) > MAX_GAP_FRAMES:
+                                continue
+                            iou = _iou(box, ent['last_box'])
+                            if iou > best_iou:
+                                best_iou = iou
+                                best_id = ent['id']
+                                best_ent = ent
+                        accept = False
+                        if best_ent is not None:
+                            diag = _bbox_diag(best_ent['last_box'])
+                            dist = _center_distance(box, best_ent['last_box'])
+                            area_now = _box_area(box)
+                            area_prev = _box_area(best_ent['last_box'])
+                            size_ratio = area_now / max(1e-6, area_prev)
+                            if size_ratio < 1.0:
+                                size_ratio = 1.0 / size_ratio
+                            if (best_iou >= IOU_STRONG) or (
+                                best_iou >= IOU_WEAK and dist <= CENTER_DIST_RATIO * max(1.0, diag) and size_ratio <= SIZE_RATIO_LIMIT
+                            ):
+                                if best_id not in frame_assigned_entities:
+                                    entity_id = best_id
+                                    accept = True
+                        if not accept:
+                            entity_id = event_next_entity_id
+                            event_next_entity_id += 1
+                            new_ent = {'id': entity_id, 'last_box': box[:], 'last_frame': frame_idx}
+                            event_entities.append(new_ent)
+                            event_entities_map[entity_id] = new_ent
+                        else:
+                            ent = event_entities_map[entity_id]
+                            ent['last_box'] = box[:]
+                            ent['last_frame'] = frame_idx
+                        frame_assigned_entities.add(entity_id)
+                        event_global_to_entity[global_id] = entity_id
+
                         y_center = int((box[1] + box[3]) / 2)
                         current_side = 'above' if y_center < LINE_Y else 'below'
-                        if global_id not in event_prev_y:
-                            event_prev_y[global_id] = y_center
-                            event_first_side[global_id] = current_side
-                            event_last_side[global_id] = current_side
-                            event_cross_dirs[global_id] = set()
+                        if entity_id not in event_prev_y:
+                            event_prev_y[entity_id] = y_center
+                            event_first_side[entity_id] = current_side
+                            event_last_side[entity_id] = current_side
+                            event_cross_dirs[entity_id] = set()
                         else:
-                            prev_y = event_prev_y[global_id]
+                            prev_y = event_prev_y[entity_id]
                             just_crossed = False
                             visual_crossed = False
                             # Apply tolerance band to reduce jitter-based flips
                             if prev_y <= LINE_Y - LINE_Y_TOLERANCE and y_center >= LINE_Y + LINE_Y_TOLERANCE:
-                                event_cross_dirs[global_id].add('down')
+                                event_cross_dirs[entity_id].add('down')
                                 just_crossed = True
                             elif prev_y >= LINE_Y + LINE_Y_TOLERANCE and y_center <= LINE_Y - LINE_Y_TOLERANCE:
-                                event_cross_dirs[global_id].add('up')
+                                event_cross_dirs[entity_id].add('up')
                                 just_crossed = True
                             # Visual crossing detection without tolerance (for highlight only)
                             if (prev_y < LINE_Y <= y_center) or (prev_y > LINE_Y >= y_center):
                                 visual_crossed = True
-                            event_prev_y[global_id] = y_center
-                            event_last_side[global_id] = current_side
+                            event_prev_y[entity_id] = y_center
+                            event_last_side[entity_id] = current_side
                             if visual_crossed:
                                 frame_has_crossing = True
-                                event_highlight_until[global_id] = max(event_highlight_until.get(global_id, 0), frame_idx + HIGHLIGHT_WINDOW_FRAMES)
+                                event_highlight_until[entity_id] = max(event_highlight_until.get(entity_id, 0), frame_idx + HIGHLIGHT_WINDOW_FRAMES)
                                 # Person-in-ROI check for this detection (so crossing frames still count toward ROI presence)
                                 cx = int((box[0] + box[2]) / 2)
                                 cy = int((box[1] + box[3]) / 2)
@@ -635,9 +723,11 @@ def detect_motion(input_video_path, output_dir):
 
                     # Apply forward highlight window for persons who recently crossed
                     highlight_active = False
-                    if label_name == 'person' and event_highlight_until.get(global_id, 0) >= frame_idx:
-                        highlight_active = True
-                        frame_has_highlight = True
+                    if label_name == 'person':
+                        eid = event_global_to_entity.get(global_id)
+                        if eid is not None and event_highlight_until.get(eid, 0) >= frame_idx:
+                            highlight_active = True
+                            frame_has_highlight = True
                     draw_tracked_box(frame, box, local_id, label_name, conf, soc, highlight=highlight_active)
 
             if frame_has_person_in_roi:
