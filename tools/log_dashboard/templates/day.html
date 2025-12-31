@@ -40,206 +40,127 @@
 
     <section class="grid">
       <div class="card">
-        <h2>Status Counts</h2>
-        {# Ensure we have a list from backend-provided status_list #}
-        {% set status_list = status_list or [] %}
-        {% set has_status = status_list and (status_list|length > 0) %}
-        {% if severity or has_status or gate %}
-          <p class="muted">
-            Filtered videos: <strong>{{ metrics.videos_total }}</strong>
-            (Total today: <strong>{{ total_videos_all }}</strong>)
-            {# Clear all filters when any filter is selected #}
-            {% if is_today_route %}{% set base = '/today' %}{% else %}{% set base = '/day/' ~ day %}{% endif %}
-            <a class="link-log" href="{{ base }}" title="Clear all filters">
-              <span class="tag">Clear</span>
-            </a>
-          </p>
-        {% else %}
-          <p class="muted">Total videos: <strong>{{ total_videos_all }}</strong></p>
-        {% endif %}
-        {% if statuses and statuses|length > 0 %}
-          {% if is_today_route %}{% set base = '/today' %}{% else %}{% set base = '/day/' ~ day %}{% endif %}
-          <ul class="stats status-badges">
-            {% for k in statuses %}
-              {% set v = status_counts_all.get(k, 0) %}
-              {% set col = status_colors.get(k, '#3b82f6') %}
-              {% set tcol = status_text_colors.get(k, '#ffffff') %}
-              <li>
-                {% set active = has_status and (k in status_list) %}
-                {% set qs = '' %}
-                {% if severity %}{% set qs = qs ~ 'severity=' ~ severity %}{% endif %}
-                {% if gate %}{% if qs %}{% set qs = qs ~ '&' %}{% endif %}{% set qs = qs ~ 'gate=' ~ gate %}{% endif %}
-                {% set new_list = [] %}
-                {% if active %}
-                  {% for s in status_list %}{% if s != k %}{% set _ = new_list.append(s) %}{% endif %}{% endfor %}
-                {% else %}
-                  {% for s in status_list %}{% set _ = new_list.append(s) %}{% endfor %}
-                  {% set _ = new_list.append(k) %}
-                {% endif %}
-                {% if new_list and (new_list|length > 0) %}
-                  {% set status_csv = new_list|join(',') %}
-                  {% if qs %}{% set qs = qs ~ '&' %}{% endif %}{% set qs = qs ~ 'status=' ~ status_csv %}
-                {% endif %}
-                <a class="link-log" href="{{ base }}{% if qs %}?{{ qs }}{% endif %}" title="{% if active %}Remove {{ k }}{% else %}Add {{ k }} filter{% endif %}">
-                  <span class="tag {% if active %}active{% endif %}" style="background: {{ col }}; color: {{ tcol }}">{{ k }}</span>
+        <div class="split-card">
+          <div class="left">
+            <h2>Status Counts</h2>
+            {% set status_list = status_list or [] %}
+            {% set has_status = status_list and (status_list|length > 0) %}
+            {% if severity or has_status or gate %}
+              <p class="muted">
+                Filtered videos: <strong>{{ metrics.videos_total }}</strong>
+                (Total today: <strong>{{ total_videos_all }}</strong>)
+                {% if is_today_route %}{% set base = '/today' %}{% else %}{% set base = '/day/' ~ day %}{% endif %}
+                <a class="link-log" href="{{ base }}" title="Clear all filters">
+                  <span class="tag">Clear</span>
                 </a>
-                <strong>{{ v }}</strong>
-              </li>
-            {% endfor %}
-          </ul>
-        {% else %}
-          <p>No status entries.</p>
-        {% endif %}
-      </div>
-
-      <div class="card">
-        <h2>Gate Crossings</h2>
-        {% set status_csv = status_list|join(',') if status_list and (status_list|length > 0) else '' %}
-        <ul class="stats">
-          <li>
-            <a class="link-log" href="{% if gate == 'up' %}{{ base }}{% if severity or status_csv %}?{% endif %}{% if severity %}severity={{ severity }}{% endif %}{% if status_csv %}{% if severity %}&{% endif %}status={{ status_csv }}{% endif %}{% else %}{{ base }}?gate=up{% if severity %}&severity={{ severity }}{% endif %}{% if status_csv %}&status={{ status_csv }}{% endif %}{% endif %}" title="{% if gate == 'up' %}Clear gate filter{% else %}Filter by gate: up{% endif %}">
-              <span class="tag {% if gate == 'up' %}active{% endif %}">up</span>
-            </a>
-            <strong>{{ metrics.gate_counts.up }}</strong>
-          </li>
-          <li>
-            <a class="link-log" href="{% if gate == 'down' %}{{ base }}{% if severity or status_csv %}?{% endif %}{% if severity %}severity={{ severity }}{% endif %}{% if status_csv %}{% if severity %}&{% endif %}status={{ status_csv }}{% endif %}{% else %}{{ base }}?gate=down{% if severity %}&severity={{ severity }}{% endif %}{% if status_csv %}&status={{ status_csv }}{% endif %}{% endif %}" title="{% if gate == 'down' %}Clear gate filter{% else %}Filter by gate: down{% endif %}">
-              <span class="tag {% if gate == 'down' %}active{% endif %}">down</span>
-            </a>
-            <strong>{{ metrics.gate_counts.down }}</strong>
-          </li>
-        </ul>
-        {% if away_intervals and away_intervals|length > 0 %}
-          <div class="away-list">
-            <h3 class="subheading">Events</h3>
-            <ul class="stats">
-              {% for it in away_intervals %}
-                <li>
-                  <span class="tag away-chip" style="background: #64748b; color: #ffffff">{{ it.start if it.start else '...' }}-{{ it.end if it.end else '...' }}{% if it.dur %} ({{ it.dur }}){% endif %}</span>
-                </li>
-              {% endfor %}
-            </ul>
+              </p>
+            {% else %}
+              <p class="muted">Total videos: <strong>{{ total_videos_all }}</strong></p>
+            {% endif %}
+            {% if statuses and statuses|length > 0 %}
+              {% if is_today_route %}{% set base = '/today' %}{% else %}{% set base = '/day/' ~ day %}{% endif %}
+              <ul class="stats status-badges">
+                {% for k in statuses %}
+                  {% set v = status_counts_all.get(k, 0) %}
+                  {% set col = status_colors.get(k, '#3b82f6') %}
+                  {% set tcol = status_text_colors.get(k, '#ffffff') %}
+                  <li>
+                    {% set active = has_status and (k in status_list) %}
+                    {% set qs = '' %}
+                    {% if severity %}{% set qs = qs ~ 'severity=' ~ severity %}{% endif %}
+                    {% if gate %}{% if qs %}{% set qs = qs ~ '&' %}{% endif %}{% set qs = qs ~ 'gate=' ~ gate %}{% endif %}
+                    {% set new_list = [] %}
+                    {% if active %}
+                      {% for s in status_list %}{% if s != k %}{% set _ = new_list.append(s) %}{% endif %}{% endfor %}
+                    {% else %}
+                      {% for s in status_list %}{% set _ = new_list.append(s) %}{% endfor %}
+                      {% set _ = new_list.append(k) %}
+                    {% endif %}
+                    {% if new_list and (new_list|length > 0) %}
+                      {% set status_csv = new_list|join(',') %}
+                      {% if qs %}{% set qs = qs ~ '&' %}{% endif %}{% set qs = qs ~ 'status=' ~ status_csv %}
+                    {% endif %}
+                    <a class="link-log" href="{{ base }}{% if qs %}?{{ qs }}{% endif %}" title="{% if active %}Remove {{ k }}{% else %}Add {{ k }} filter{% endif %}">
+                      <span class="tag {% if active %}active{% endif %}" style="background: {{ col }}; color: {{ tcol }}">{{ k }}</span>
+                    </a>
+                    <strong>{{ v }}</strong>
+                  </li>
+                {% endfor %}
+              </ul>
+            {% else %}
+              <p>No status entries.</p>
+            {% endif %}
           </div>
-        {% endif %}
+          <div class="right">
+            <h2>Gate Crossings</h2>
+            {% set status_csv = status_list|join(',') if status_list and (status_list|length > 0) else '' %}
+            <ul class="stats">
+              <li>
+                <a class="link-log" href="{% if gate == 'up' %}{{ base }}{% if severity or status_csv %}?{% endif %}{% if severity %}severity={{ severity }}{% endif %}{% if status_csv %}{% if severity %}&{% endif %}status={{ status_csv }}{% endif %}{% else %}{{ base }}?gate=up{% if severity %}&severity={{ severity }}{% endif %}{% if status_csv %}&status={{ status_csv }}{% endif %}{% endif %}" title="{% if gate == 'up' %}Clear gate filter{% else %}Filter by gate: up{% endif %}">
+                  <span class="tag {% if gate == 'up' %}active{% endif %}">up</span>
+                </a>
+                <strong>{{ metrics.gate_counts.up }}</strong>
+              </li>
+              <li>
+                <a class="link-log" href="{% if gate == 'down' %}{{ base }}{% if severity or status_csv %}?{% endif %}{% if severity %}severity={{ severity }}{% endif %}{% if status_csv %}{% if severity %}&{% endif %}status={{ status_csv }}{% endif %}{% else %}{{ base }}?gate=down{% if severity %}&severity={{ severity }}{% endif %}{% if status_csv %}&status={{ status_csv }}{% endif %}{% endif %}" title="{% if gate == 'down' %}Clear gate filter{% else %}Filter by gate: down{% endif %}">
+                  <span class="tag {% if gate == 'down' %}active{% endif %}">down</span>
+                </a>
+                <strong>{{ metrics.gate_counts.down }}</strong>
+              </li>
+            </ul>
+            {% if away_intervals and away_intervals|length > 0 %}
+              <div class="away-list">
+                <h3 class="subheading">Events</h3>
+                <ul class="stats">
+                  {% for it in away_intervals %}
+                    <li>
+                      <span class="tag away-chip" style="background: #64748b; color: #ffffff">{{ it.start if it.start else '...' }}-{{ it.end if it.end else '...' }}{% if it.dur %} ({{ it.dur }}){% endif %}</span>
+                    </li>
+                  {% endfor %}
+                </ul>
+              </div>
+            {% endif %}
+          </div>
+        </div>
       </div>
 
       <div class="card">
-        <h2>Full Processing Time</h2>
-        {% if metrics.full_processing_stats %}
-          <ul class="stats">
-            <li>min: <strong>{{ '%.2f'|format(metrics.full_processing_stats.min) }}s</strong></li>
-            <li>avg: <strong>{{ '%.2f'|format(metrics.full_processing_stats.avg) }}s</strong></li>
-            <li>max: <strong>{{ '%.2f'|format(metrics.full_processing_stats.max) }}s</strong></li>
-          </ul>
-        {% else %}
-          <p>No full processing timings.</p>
-        {% endif %}
-      </div>
-
-      <div class="card">
-        <h2>Motion Detection Time</h2>
-        {% if metrics.motion_detection_stats %}
-          <ul class="stats">
-            <li>min: <strong>{{ '%.2f'|format(metrics.motion_detection_stats.min) }}s</strong></li>
-            <li>avg: <strong>{{ '%.2f'|format(metrics.motion_detection_stats.avg) }}s</strong></li>
-            <li>max: <strong>{{ '%.2f'|format(metrics.motion_detection_stats.max) }}s</strong></li>
-          </ul>
-        {% else %}
-          <p>No motion detection timing entries.</p>
-        {% endif %}
+        <div class="table-wrap">
+          <table class="table times-table">
+            <thead>
+              <tr>
+                <th></th>
+                <th>
+                  <span class="column-title label-desktop">Motion Detection</span>
+                  <span class="column-title label-mobile">MD Time</span>
+                </th>
+                <th>
+                  <span class="column-title label-desktop">Full Processing</span>
+                  <span class="column-title label-mobile">FP Time</span>
+                </th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td>min</td>
+                <td>{% if metrics.motion_detection_stats %}{{ '%.2f'|format(metrics.motion_detection_stats.min) }}s{% else %}—{% endif %}</td>
+                <td>{% if metrics.full_processing_stats %}{{ '%.2f'|format(metrics.full_processing_stats.min) }}s{% else %}—{% endif %}</td>
+              </tr>
+              <tr>
+                <td>avg</td>
+                <td>{% if metrics.motion_detection_stats %}{{ '%.2f'|format(metrics.motion_detection_stats.avg) }}s{% else %}—{% endif %}</td>
+                <td>{% if metrics.full_processing_stats %}{{ '%.2f'|format(metrics.full_processing_stats.avg) }}s{% else %}—{% endif %}</td>
+              </tr>
+              <tr>
+                <td>max</td>
+                <td>{% if metrics.motion_detection_stats %}{{ '%.2f'|format(metrics.motion_detection_stats.max) }}s{% else %}—{% endif %}</td>
+                <td>{% if metrics.full_processing_stats %}{{ '%.2f'|format(metrics.full_processing_stats.max) }}s{% else %}—{% endif %}</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
       </div>
     </section>
-
-    <details class="card" id="summary-card">
-      <summary>Per-Video Summary</summary>
-      {% if metrics.status_per_video %}
-        <div class="table-wrap">
-        <table class="table">
-          <thead>
-            <tr>
-              <th>Start</th>
-              <th>Video</th>
-              <th>Status</th>
-              <th>Raw Events</th>
-              <th>Processing Time</th>
-            </tr>
-          </thead>
-          <tbody>
-            {% set status_filter = status %}
-            {% for vid, st in metrics.status_per_video.items() %}
-            <tr class="{% if play == vid %}playing{% endif %}">
-              <td>
-                {% set t = metrics.first_seen_ts_per_video.get(vid) %}
-                {% if t %}
-                  <a href="#log-{{ vid }}" class="link-log">{{ t.strftime('%H:%M:%S') }}</a>
-                {% else %}
-                  —
-                {% endif %}
-              </td>
-              <td>
-                {% if is_today_route %}{% set base = '/today' %}{% else %}{% set base = '/day/' ~ day %}{% endif %}
-                {# Build query with existing filters, keeping multi-status selections #}
-                {% set qs = 'play=' ~ vid %}
-                {% if severity %}{% set qs = qs ~ '&severity=' ~ severity %}{% endif %}
-                {% if status_list and (status_list|length > 0) %}
-                  {% set status_csv = status_list|join(',') %}
-                  {% set qs = qs ~ '&status=' ~ status_csv %}
-                {% endif %}
-                {% if gate %}{% set qs = qs ~ '&gate=' ~ gate %}{% endif %}
-                <a href="{{ base }}?{{ qs }}" class="link-log" title="Open video player" data-vid="{{ vid }}" data-stream="/video/{{ vid }}" data-base="{{ base }}" data-query="{{ qs }}">{{ vid }}</a>
-              </td>
-              {% set col = status_colors.get(st, '#3b82f6') %}
-              {% set tcol = status_text_colors.get(st, '#ffffff') %}
-              <td>
-                <span class="tag status-chip" style="background: {{ col }}; color: {{ tcol }}" aria-label="{{ st }}" title="{{ st }}">
-                  {{ st }}
-                  {% set gdir = metrics.gate_direction_per_video.get(vid) %}
-                  {% if gdir %}
-                    {% set arrow = '↕' if gdir == 'both' else ('↑' if gdir == 'up' else '↓') %}
-                    <span class="arrow-mobile" aria-hidden="true">{{ arrow }}</span>
-                  {% endif %}
-                </span>
-                {% if gdir %}
-                  <span class="tag gate-chip" title="Gate: {{ gdir }}" aria-label="Gate: {{ gdir }}">{{ arrow }}</span>
-                {% endif %}
-                {% if metrics.away_videos and (vid in metrics.away_videos) %}
-                  <span class="tag aux-chip" title="Away reaction">away</span>
-                {% endif %}
-                {% if metrics.back_videos and (vid in metrics.back_videos) %}
-                  <span class="tag aux-chip" title="Back reaction">back</span>
-                {% endif %}
-              </td>
-              <td>{{ metrics.raw_events_per_video.get(vid, 0) }}</td>
-              <td>
-                {% set p = metrics.processing_time_per_video.get(vid) %}
-                {% if p %}
-                  {{ '%.2f'|format(p) }}
-                {% else %}
-                  —
-                {% endif %}
-              </td>
-            </tr>
-            {% if play == vid and video_src %}
-            <tr class="player-row">
-              <td colspan="5">
-                <div id="player" class="inline-player">
-                  <div class="video-wrap">
-                    <video class="video-embed" controls preload="metadata" src="{{ video_src }}">
-                      Your browser does not support the video tag.
-                    </video>
-                  </div>
-                </div>
-              </td>
-            </tr>
-            {% endif %}
-            {% endfor %}
-          </tbody>
-        </table>
-        </div>
-      {% else %}
-        <p>No video summaries.</p>
-      {% endif %}
-    </details>
 
     <section class="card">
       <h2>Processing Times Chart</h2>
@@ -346,6 +267,97 @@
         <p>No processing time data.</p>
       {% endif %}
     </section>
+
+    <details class="card" id="summary-card">
+      <summary>Per-Video Summary</summary>
+      {% if metrics.status_per_video %}
+        <div class="table-wrap">
+        <table class="table">
+          <thead>
+            <tr>
+              <th>Start</th>
+              <th>Video</th>
+              <th>Status</th>
+              <th>Raw Events</th>
+              <th>Processing Time</th>
+            </tr>
+          </thead>
+          <tbody>
+            {% set status_filter = status %}
+            {% for vid, st in metrics.status_per_video.items() %}
+            <tr class="{% if play == vid %}playing{% endif %}">
+              <td>
+                {% set t = metrics.first_seen_ts_per_video.get(vid) %}
+                {% if t %}
+                  <a href="#log-{{ vid }}" class="link-log">{{ t.strftime('%H:%M:%S') }}</a>
+                {% else %}
+                  —
+                {% endif %}
+              </td>
+              <td>
+                {% if is_today_route %}{% set base = '/today' %}{% else %}{% set base = '/day/' ~ day %}{% endif %}
+                {# Build query with existing filters, keeping multi-status selections #}
+                {% set qs = 'play=' ~ vid %}
+                {% if severity %}{% set qs = qs ~ '&severity=' ~ severity %}{% endif %}
+                {% if status_list and (status_list|length > 0) %}
+                  {% set status_csv = status_list|join(',') %}
+                  {% set qs = qs ~ '&status=' ~ status_csv %}
+                {% endif %}
+                {% if gate %}{% set qs = qs ~ '&gate=' ~ gate %}{% endif %}
+                <a href="{{ base }}?{{ qs }}" class="link-log" title="Open video player" data-vid="{{ vid }}" data-stream="/video/{{ vid }}" data-base="{{ base }}" data-query="{{ qs }}">{{ vid }}</a>
+              </td>
+              {% set col = status_colors.get(st, '#3b82f6') %}
+              {% set tcol = status_text_colors.get(st, '#ffffff') %}
+              <td>
+                <span class="tag status-chip" style="background: {{ col }}; color: {{ tcol }}" aria-label="{{ st }}" title="{{ st }}">
+                  {{ st }}
+                  {% set gdir = metrics.gate_direction_per_video.get(vid) %}
+                  {% if gdir %}
+                    {% set arrow = '↕' if gdir == 'both' else ('↑' if gdir == 'up' else '↓') %}
+                    <span class="arrow-mobile" aria-hidden="true">{{ arrow }}</span>
+                  {% endif %}
+                </span>
+                {% if gdir %}
+                  <span class="tag gate-chip" title="Gate: {{ gdir }}" aria-label="Gate: {{ gdir }}">{{ arrow }}</span>
+                {% endif %}
+                {% if metrics.away_videos and (vid in metrics.away_videos) %}
+                  <span class="tag aux-chip" title="Away reaction">away</span>
+                {% endif %}
+                {% if metrics.back_videos and (vid in metrics.back_videos) %}
+                  <span class="tag aux-chip" title="Back reaction">back</span>
+                {% endif %}
+              </td>
+              <td>{{ metrics.raw_events_per_video.get(vid, 0) }}</td>
+              <td>
+                {% set p = metrics.processing_time_per_video.get(vid) %}
+                {% if p %}
+                  {{ '%.2f'|format(p) }}
+                {% else %}
+                  —
+                {% endif %}
+              </td>
+            </tr>
+            {% if play == vid and video_src %}
+            <tr class="player-row">
+              <td colspan="5">
+                <div id="player" class="inline-player">
+                  <div class="video-wrap">
+                    <video class="video-embed" controls preload="metadata" src="{{ video_src }}">
+                      Your browser does not support the video tag.
+                    </video>
+                  </div>
+                </div>
+              </td>
+            </tr>
+            {% endif %}
+            {% endfor %}
+          </tbody>
+        </table>
+        </div>
+      {% else %}
+        <p>No video summaries.</p>
+      {% endif %}
+    </details>
 
     <details class="card" id="logs-card">
       <summary>Log Entries{% if severity %} ({{ severity }}){% endif %}</summary>

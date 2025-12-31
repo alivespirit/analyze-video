@@ -20,6 +20,23 @@ main{max-width:1200px;margin:0 auto;padding:20px}
 .grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:16px;margin-bottom:16px}
 /* Avoid double spacing: remove card margins inside the grid */
 .grid > .card{margin-bottom:0}
+/* Split card: left/right columns inside a single card */
+.split-card{display:flex;gap:16px;align-items:flex-start;justify-content:space-between;position:relative}
+/* Desktop divider between split-card halves: dashed line matching status separators */
+.split-card::after{content:"";position:absolute;left:50%;top:0;bottom:0;width:0;border-left:1px dashed #2a2f40}
+.split-card .left{flex:1}
+.split-card .right{flex:1;text-align:left}
+/* Times table: compact first column */
+.times-table th:first-child,.times-table td:first-child{width:64px;white-space:nowrap}
+.times-table th,.times-table td{vertical-align:middle}
+/* Make times table column titles match section headers on desktop */
+.times-table th .column-title{display:block;font-size:20px;font-weight:700;line-height:1.25;color:var(--text);margin:0}
+.times-table th,.times-table td{vertical-align:middle}
+/* Make times table column titles match section headers on desktop */
+.times-table th .column-title{display:block;font-size:24px;font-weight:700;line-height:1.25;color:var(--text);margin:0;white-space:normal}
+/* Responsive labels: desktop vs mobile */
+.label-mobile{display:none !important}
+.label-desktop{display:inline}
 .days{list-style:none;padding:0;margin:0;display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:8px}
 .days li a{display:block;padding:10px 12px;border-radius:8px;background:#1c2130;color:var(--text);text-decoration:none}
 .controls{margin-bottom:12px}
@@ -37,9 +54,13 @@ main{max-width:1200px;margin:0 auto;padding:20px}
 .table{width:100%;border-collapse:collapse}
 .table{table-layout:fixed}
 .table th,.table td{padding:8px;border-bottom:1px solid #222;text-align:left;word-break:break-word;overflow-wrap:anywhere}
+.table.times-table th,.table.times-table td{border-bottom:1px dashed #2a2f40}
+.times-table thead th + th,.times-table tbody td + td{border-left:1px dashed #2a2f40}
+.times-table tbody tr:last-child td{border-bottom:none}
 .table th{color:var(--muted);font-weight:600}
 .table-wrap{overflow-x:auto}
 .table{min-width:540px}
+.table.times-table{min-width:unset;width:100%}
 .table tr.playing{background:#1a2030;outline:2px solid #9fb0ff}
 .link-log{color:#9fb0ff;text-decoration:none}
 .link-log:hover{text-decoration:underline}
@@ -131,6 +152,22 @@ header nav .nav-btn{white-space:nowrap}
   .card summary{font-size:18px;line-height:1.2;margin:0 0 0 0;font-weight:700}
   .card summary::before{margin-right:6px}
   .grid{grid-template-columns:1fr}
+  /* Keep split-card columns side by side on mobile, allow wrap */
+  .split-card{flex-direction:row;flex-wrap:nowrap}
+  .split-card .left,.split-card .right{flex:0 0 50%;max-width:50%;min-width:0}
+  /* Align Gate Crossings & Events to the left on mobile */
+  .split-card .right{text-align:left}
+  .split-card .right h2,.split-card .right h3{text-align:left}
+  .split-card .right .stats{justify-content:flex-start}
+  .split-card .right .away-list .stats{justify-content:flex-start}
+  /* Hide desktop divider on mobile */
+  .split-card::after{content:none}
+  /* Toggle labels for mobile */
+  .label-desktop{display:none !important}
+  .label-mobile{display:inline !important}
+  /* Column title style inside times table */
+  .times-table th .column-title{display:block;font-size:18px;font-weight:700;line-height:1.2;color:var(--text);margin:0}
+  /* Remove compact status badges on mobile; use default list styling */
   .filters{flex-wrap:wrap;gap:8px}
   .filters label{flex:1 1 100%}
   .filters select,.filters button{width:100%}
@@ -152,6 +189,10 @@ header nav .nav-btn{white-space:nowrap}
   .table{min-width:unset;width:100%;table-layout:fixed}
   .table th,.table td{word-break:break-word;overflow-wrap:anywhere}
   .table th,.table td{padding:6px}
+  /* Ensure dashed lines persist on mobile for Times table */
+  .table.times-table th,.table.times-table td{border-bottom:1px dashed #2a2f40}
+  .times-table thead th + th,.times-table tbody td + td{border-left:1px dashed #2a2f40}
+  .times-table tbody tr:last-child td{border-bottom:none}
   .table tr.playing{background:#1a2030;outline:2px solid #9fb0ff}
 
   /* Chart: responsive height; cap to keep compact */
