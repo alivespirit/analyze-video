@@ -30,7 +30,7 @@
             {% set scol = severity_colors.get(lvl, '#3b82f6') %}
             {% set stcol = severity_text_colors.get(lvl, '#ffffff') %}
             {% set status_csv = status_list|join(',') if status_list and (status_list|length > 0) else '' %}
-            <a class="link-log" href="{% if severity == lvl %}{{ base }}{% if status_csv %}?status={{ status_csv }}{% endif %}{% else %}{{ base }}?severity={{ lvl }}{% if status_csv %}&status={{ status_csv }}{% endif %}{% endif %}" title="{% if severity == lvl %}Clear severity filter{% else %}Filter by {{ lvl }}{% endif %}">
+            <a class="link-log" href="{% if severity == lvl %}{{ base }}{% if status_csv or video %}?{% endif %}{% if status_csv %}status={{ status_csv }}{% endif %}{% if video %}{% if status_csv %}&{% endif %}video={{ video }}{% endif %}{% else %}{{ base }}?severity={{ lvl }}{% if status_csv %}&status={{ status_csv }}{% endif %}{% if video %}&video={{ video }}{% endif %}{% endif %}" title="{% if severity == lvl %}Clear severity filter{% else %}Filter by {{ lvl }}{% endif %}">
               <span class="tag {% if severity == lvl %}active{% endif %}" style="background: {{ scol }}; color: {{ stcol }}">{{ lvl }}</span>
             </a>
           {% endfor %}
@@ -45,7 +45,7 @@
             <h2>Status Counts</h2>
             {% set status_list = status_list or [] %}
             {% set has_status = status_list and (status_list|length > 0) %}
-            {% if severity or has_status or gate %}
+            {% if severity or has_status or gate or video %}
               <p class="muted">
                 Filtered videos: <strong>{{ metrics.videos_total }}</strong>
                 (Total today: <strong>{{ total_videos_all }}</strong>)
@@ -69,6 +69,7 @@
                     {% set qs = '' %}
                     {% if severity %}{% set qs = qs ~ 'severity=' ~ severity %}{% endif %}
                     {% if gate %}{% if qs %}{% set qs = qs ~ '&' %}{% endif %}{% set qs = qs ~ 'gate=' ~ gate %}{% endif %}
+                    {% if video %}{% if qs %}{% set qs = qs ~ '&' %}{% endif %}{% set qs = qs ~ 'video=' ~ video %}{% endif %}
                     {% set new_list = [] %}
                     {% if active %}
                       {% for s in status_list %}{% if s != k %}{% set _ = new_list.append(s) %}{% endif %}{% endfor %}
@@ -96,13 +97,13 @@
             {% set status_csv = status_list|join(',') if status_list and (status_list|length > 0) else '' %}
             <ul class="stats">
               <li>
-                <a class="link-log" href="{% if gate == 'up' %}{{ base }}{% if severity or status_csv %}?{% endif %}{% if severity %}severity={{ severity }}{% endif %}{% if status_csv %}{% if severity %}&{% endif %}status={{ status_csv }}{% endif %}{% else %}{{ base }}?gate=up{% if severity %}&severity={{ severity }}{% endif %}{% if status_csv %}&status={{ status_csv }}{% endif %}{% endif %}" title="{% if gate == 'up' %}Clear gate filter{% else %}Filter by gate: up{% endif %}">
+                <a class="link-log" href="{% if gate == 'up' %}{{ base }}{% if severity or status_csv or video %}?{% endif %}{% if severity %}severity={{ severity }}{% endif %}{% if status_csv %}{% if severity %}&{% endif %}status={{ status_csv }}{% endif %}{% if video %}{% if severity or status_csv %}&{% endif %}video={{ video }}{% endif %}{% else %}{{ base }}?gate=up{% if severity %}&severity={{ severity }}{% endif %}{% if status_csv %}&status={{ status_csv }}{% endif %}{% if video %}&video={{ video }}{% endif %}{% endif %}" title="{% if gate == 'up' %}Clear gate filter{% else %}Filter by gate: up{% endif %}">
                   <span class="tag {% if gate == 'up' %}active{% endif %}">up</span>
                 </a>
                 <strong>{{ metrics.gate_counts.up }}</strong>
               </li>
               <li>
-                <a class="link-log" href="{% if gate == 'down' %}{{ base }}{% if severity or status_csv %}?{% endif %}{% if severity %}severity={{ severity }}{% endif %}{% if status_csv %}{% if severity %}&{% endif %}status={{ status_csv }}{% endif %}{% else %}{{ base }}?gate=down{% if severity %}&severity={{ severity }}{% endif %}{% if status_csv %}&status={{ status_csv }}{% endif %}{% endif %}" title="{% if gate == 'down' %}Clear gate filter{% else %}Filter by gate: down{% endif %}">
+                <a class="link-log" href="{% if gate == 'down' %}{{ base }}{% if severity or status_csv or video %}?{% endif %}{% if severity %}severity={{ severity }}{% endif %}{% if status_csv %}{% if severity %}&{% endif %}status={{ status_csv }}{% endif %}{% if video %}{% if severity or status_csv %}&{% endif %}video={{ video }}{% endif %}{% else %}{{ base }}?gate=down{% if severity %}&severity={{ severity }}{% endif %}{% if status_csv %}&status={{ status_csv }}{% endif %}{% if video %}&video={{ video }}{% endif %}{% endif %}" title="{% if gate == 'down' %}Clear gate filter{% else %}Filter by gate: down{% endif %}">
                   <span class="tag {% if gate == 'down' %}active{% endif %}">down</span>
                 </a>
                 <strong>{{ metrics.gate_counts.down }}</strong>
@@ -243,6 +244,7 @@
               {% set qs = '' %}
               {% if severity %}{% set qs = qs ~ 'severity=' ~ severity %}{% endif %}
               {% if gate %}{% if qs %}{% set qs = qs ~ '&' %}{% endif %}{% set qs = qs ~ 'gate=' ~ gate %}{% endif %}
+              {% if video %}{% if qs %}{% set qs = qs ~ '&' %}{% endif %}{% set qs = qs ~ 'video=' ~ video %}{% endif %}
               {% set new_list = [] %}
               {% if active %}
                 {% for t in status_list %}{% if t != s %}{% set _ = new_list.append(t) %}{% endif %}{% endfor %}
@@ -372,15 +374,23 @@
               {% if e.video %}
                 {% set vc = video_colors.get(e.video, '#9fb0ff') %}
                 {% set parts = e.video.split('.') %}
-                {% set base = parts[:-1] | join('.') %}
-                <span class="video video-inline" style="color: {{ vc }}">{{ base }}</span>
+                {% set vbase = parts[:-1] | join('.') %}
+                {% set qs = '' %}
+                {% if severity %}{% set qs = qs ~ 'severity=' ~ severity %}{% endif %}
+                {% if status_list and (status_list|length > 0) %}{% set status_csv = status_list|join(',') %}{% if qs %}{% set qs = qs ~ '&' %}{% endif %}{% set qs = qs ~ 'status=' ~ status_csv %}{% endif %}
+                {% if gate %}{% if qs %}{% set qs = qs ~ '&' %}{% endif %}{% set qs = qs ~ 'gate=' ~ gate %}{% endif %}
+                <a class="video video-inline link-log" style="color: {{ vc }}" href="{{ base }}?video={{ e.video }}{% if qs %}&{{ qs }}{% endif %}" title="Filter by this video">{{ vbase }}</a>
               {% endif %}
             </div>
             <span class="ts">{{ e.ts.strftime('%H:%M:%S') }}</span>
             <span class="lvl">{{ e.level }}</span>
             {% if e.video %}
               {% set vc = video_colors.get(e.video, '#9fb0ff') %}
-              <div class="video" style="color: {{ vc }}">{{ e.video }}</div>
+              {% set qs = '' %}
+              {% if severity %}{% set qs = qs ~ 'severity=' ~ severity %}{% endif %}
+              {% if status_list and (status_list|length > 0) %}{% set status_csv = status_list|join(',') %}{% if qs %}{% set qs = qs ~ '&' %}{% endif %}{% set qs = qs ~ 'status=' ~ status_csv %}{% endif %}
+              {% if gate %}{% if qs %}{% set qs = qs ~ '&' %}{% endif %}{% set qs = qs ~ 'gate=' ~ gate %}{% endif %}
+              <div class="video"><a class="link-log" style="color: {{ vc }}" href="{{ base }}?video={{ e.video }}{% if qs %}&{{ qs }}{% endif %}" title="Filter by this video">{{ e.video }}</a></div>
             {% else %}
               <div class="video none">—</div>
             {% endif %}
@@ -427,6 +437,16 @@
         try{
           var h = window.location.hash || '';
           if(h.startsWith('#log-')){
+            var d = document.getElementById('logs-card');
+            if(d && !d.open){ d.open = true; }
+          }
+        }catch(e){ /* noop */ }
+      }
+      function ensureLogsOpenIfVideo(){
+        try{
+          var params = new URLSearchParams(window.location.search);
+          var video = params.get('video');
+          if(video){
             var d = document.getElementById('logs-card');
             if(d && !d.open){ d.open = true; }
           }
@@ -529,12 +549,36 @@
           }, 50);
         }catch(e){ /* noop */ }
       }
+      function focusVideoLogsIfSelected(){
+        try{
+          var params = new URLSearchParams(window.location.search);
+          var video = params.get('video');
+          if(!video){ return; }
+          setTimeout(function(){
+            try{
+              var target = document.getElementById('log-' + video);
+              var header = document.querySelector('header');
+              var headerH = header ? (header.offsetHeight || 0) : 0;
+              var pad = 6;
+              if(target){
+                var rect = target.getBoundingClientRect();
+                var y = window.scrollY + rect.top - headerH - pad;
+                try{ window.scrollTo({ top: y, behavior: 'smooth' }); }
+                catch(e){ window.scrollTo(0, y); }
+              }
+            }catch(e){ /* noop */ }
+          }, 50);
+        }catch(e){ /* noop */ }
+      }
       // First restore user's previous open/closed state
       restoreOpenState();
       // Then apply forced openings based on hash or query
       ensureLogsOpenIfHash();
+      ensureLogsOpenIfVideo();
       // Finally, focus the inline player (or playing row) if present
       focusInlinePlayerIfPresent();
+      // If filtering by video, scroll to its first log entry
+      focusVideoLogsIfSelected();
       // Enable inline player behavior without full page reload
       attachInlinePlayerLinks();
       // Clear persisted state when navigating Home or All Days

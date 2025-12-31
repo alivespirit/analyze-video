@@ -506,6 +506,7 @@ def today_view(
     severity: Optional[str] = Query(default=None, description="Filter by severity: INFO/WARNING/ERROR/etc."),
     status: Optional[str] = Query(default=None, description="Comma-separated final video statuses (e.g., gate_crossing,significant_motion)"),
     gate: Optional[str] = Query(default=None, description="Filter by gate crossing direction: up/down"),
+    video: Optional[str] = Query(default=None, description="Filter logs by a specific video basename (.mp4)"),
     play: Optional[str] = Query(default=None, description="Basename of video to embed (.mp4)"),
 ):
     """Render today's log page without redirect.
@@ -540,6 +541,8 @@ def today_view(
             e for e in entries
             if e.get("video") and (gpv.get(e["video"]) == gate or gpv.get(e["video"]) == "both")
         ]
+    if video:
+        entries = [e for e in entries if e.get("video") == video]
 
     metrics = collect_metrics(entries)
 
@@ -571,6 +574,7 @@ def today_view(
         severity=severity,
         status=status,
         gate=gate,
+        video=video,
         status_list=status_list_ctx,
         entries=entries,
         metrics=metrics,
@@ -598,6 +602,7 @@ def day_view(
     severity: Optional[str] = Query(default=None, description="Filter by severity: INFO/WARNING/ERROR/etc."),
     status: Optional[str] = Query(default=None, description="Comma-separated final video statuses (e.g., gate_crossing,significant_motion)"),
     gate: Optional[str] = Query(default=None, description="Filter by gate crossing direction: up/down"),
+    video: Optional[str] = Query(default=None, description="Filter logs by a specific video basename (.mp4)"),
     play: Optional[str] = Query(default=None, description="Basename of video to embed (.mp4)"),
 ):
     days = list_log_files()
@@ -626,6 +631,8 @@ def day_view(
             e for e in entries
             if e.get("video") and (gpv.get(e["video"]) == gate or gpv.get(e["video"]) == "both")
         ]
+    if video:
+        entries = [e for e in entries if e.get("video") == video]
 
     metrics = collect_metrics(entries)
 
@@ -657,6 +664,7 @@ def day_view(
         severity=severity,
         status=status,
         gate=gate,
+        video=video,
         status_list=status_list_ctx,
         entries=entries,
         metrics=metrics,
