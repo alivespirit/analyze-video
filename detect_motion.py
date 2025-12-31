@@ -59,6 +59,8 @@ COLOR_PERSON = (100, 200, 0)
 COLOR_CAR = (200, 120, 0)
 COLOR_DEFAULT = (255, 255, 255)
 COLOR_LINE = (0, 255, 255)
+LINE_Y_TOLERANCE = 6
+HIGHLIGHT_WINDOW_FRAMES = 5
 
 # --- Load Object Detection Model ---
 try:
@@ -166,7 +168,7 @@ def load_roi(file_path):
     return None
 
 
-def draw_tracked_box(frame, box, local_id, label_name, conf, soc):
+def draw_tracked_box(frame, box, local_id, label_name, conf, soc, highlight=False):
     """
     Draws a bounding box with a label for a tracked object on a video frame.
     If the object is a car in a specific location, it may display Tesla SoC.
@@ -181,12 +183,15 @@ def draw_tracked_box(frame, box, local_id, label_name, conf, soc):
     """
     x1, y1, x2, y2 = int(box[0]), int(box[1]), int(box[2]), int(box[3])
 
-    if label_name == 'person':
-        color = COLOR_PERSON
-    elif label_name == 'car':
-        color = COLOR_CAR
+    if highlight:
+        color = (0, 0, 255)
     else:
-        color = COLOR_DEFAULT
+        if label_name == 'person':
+            color = COLOR_PERSON
+        elif label_name == 'car':
+            color = COLOR_CAR
+        else:
+            color = COLOR_DEFAULT
 
     label_text = f"{label_name} {local_id} {conf:.0%}"
 
@@ -199,7 +204,8 @@ def draw_tracked_box(frame, box, local_id, label_name, conf, soc):
                 else:
                     label_text = f"Tesla {conf:.0%}"
 
-    cv2.rectangle(frame, (x1, y1), (x2, y2), color, 2)
+    thickness = 4 if highlight else 2
+    cv2.rectangle(frame, (x1, y1), (x2, y2), color, thickness)
 
     (w, h), _ = cv2.getTextSize(label_text, cv2.FONT_HERSHEY_DUPLEX, 1, 1)
 
@@ -534,6 +540,7 @@ def detect_motion(input_video_path, output_dir):
         event_last_side = {}
         event_prev_y = {}
         event_cross_dirs = {}
+        event_highlight_until = {}
         person_frames_in_roi = 0
 
         # Seek once to the start of the event, then advance sequentially to avoid decoder seek artifacts
@@ -557,8 +564,10 @@ def detect_motion(input_video_path, output_dir):
 
             results = object_detection_model.track(frame, imgsz=640, conf=CONF_THRESHOLD, persist=True, verbose=False, tracker="tracker.yaml")
 
-            # Count whether this frame contains a person within ROI
+            # Count whether this frame contains a person within ROI and whether any crossing/highlight happens
             frame_has_person_in_roi = False
+            frame_has_crossing = False
+            frame_has_highlight = False
 
             if results[0].boxes.id is not None:
                 boxes = results[0].boxes.xyxy.cpu().tolist()
@@ -590,12 +599,32 @@ def detect_motion(input_video_path, output_dir):
                             event_cross_dirs[global_id] = set()
                         else:
                             prev_y = event_prev_y[global_id]
-                            if prev_y < LINE_Y <= y_center:
+                            just_crossed = False
+                            visual_crossed = False
+                            # Apply tolerance band to reduce jitter-based flips
+                            if prev_y <= LINE_Y - LINE_Y_TOLERANCE and y_center >= LINE_Y + LINE_Y_TOLERANCE:
                                 event_cross_dirs[global_id].add('down')
-                            elif prev_y > LINE_Y >= y_center:
+                                just_crossed = True
+                            elif prev_y >= LINE_Y + LINE_Y_TOLERANCE and y_center <= LINE_Y - LINE_Y_TOLERANCE:
                                 event_cross_dirs[global_id].add('up')
+                                just_crossed = True
+                            # Visual crossing detection without tolerance (for highlight only)
+                            if (prev_y < LINE_Y <= y_center) or (prev_y > LINE_Y >= y_center):
+                                visual_crossed = True
                             event_prev_y[global_id] = y_center
                             event_last_side[global_id] = current_side
+                            if visual_crossed:
+                                frame_has_crossing = True
+                                event_highlight_until[global_id] = max(event_highlight_until.get(global_id, 0), frame_idx + HIGHLIGHT_WINDOW_FRAMES)
+                                # Person-in-ROI check for this detection (so crossing frames still count toward ROI presence)
+                                cx = int((box[0] + box[2]) / 2)
+                                cy = int((box[1] + box[3]) / 2)
+                                if cv2.pointPolygonTest(roi_polygon_cv, (cx, cy), False) >= 0:
+                                    frame_has_person_in_roi = True
+                                # Draw highlight if crossing detected on this frame
+                                draw_tracked_box(frame, box, local_id, label_name, conf, soc, highlight=True)
+                                # Skip normal draw below for this object to avoid double drawing
+                                continue
 
                     # Person-in-ROI check using center point inside ROI polygon
                     if label_name == 'person':
@@ -604,7 +633,12 @@ def detect_motion(input_video_path, output_dir):
                         if cv2.pointPolygonTest(roi_polygon_cv, (cx, cy), False) >= 0:
                             frame_has_person_in_roi = True
 
-                    draw_tracked_box(frame, box, local_id, label_name, conf, soc)
+                    # Apply forward highlight window for persons who recently crossed
+                    highlight_active = False
+                    if label_name == 'person' and event_highlight_until.get(global_id, 0) >= frame_idx:
+                        highlight_active = True
+                        frame_has_highlight = True
+                    draw_tracked_box(frame, box, local_id, label_name, conf, soc, highlight=highlight_active)
 
             if frame_has_person_in_roi:
                 person_frames_in_roi += 1
@@ -620,7 +654,8 @@ def detect_motion(input_video_path, output_dir):
             # Append frames to output based on output_stride to speed up render without
             # sacrificing tracking continuity (for moderate-length events)
             processed_offset = (frame_idx - 1) - padded_start
-            if processed_offset % output_stride == 0:
+            append_current_frame = (processed_offset % output_stride == 0) or frame_has_crossing or frame_has_highlight
+            if append_current_frame:
                 rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
                 event_frames_rgb.append(rgb_frame)
 
