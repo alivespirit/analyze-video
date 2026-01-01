@@ -169,7 +169,7 @@ def load_roi(file_path):
     return None
 
 
-def draw_tracked_box(frame, box, local_id, label_name, conf, soc, highlight=False):
+def draw_tracked_box(frame, box, local_id, label_name, conf, soc, highlight=False, display_id=None):
     """
     Draws a bounding box with a label for a tracked object on a video frame.
     If the object is a car in a specific location, it may display Tesla SoC.
@@ -194,7 +194,13 @@ def draw_tracked_box(frame, box, local_id, label_name, conf, soc, highlight=Fals
         else:
             color = COLOR_DEFAULT
 
-    label_text = f"{label_name} {local_id} {conf:.0%}"
+    if label_name == 'person' and display_id is not None:
+        if display_id == local_id:
+            label_text = f"p {display_id} {conf:.0%}"
+        else:
+            label_text = f"p {display_id}/T{local_id} {conf:.0%}"
+    else:
+        label_text = f"{label_name} {local_id} {conf:.0%}"
 
     if TESLA_SOC_CHECK_ENABLED:
         tx, ty = 1150, 450
@@ -487,7 +493,7 @@ def detect_motion(input_video_path, output_dir):
                         local_id_counter = 1
                         for box, cls, conf in zip(boxes, clss, confs):
                             label_name = class_names[cls]
-                            draw_tracked_box(frame, box, local_id_counter, label_name, conf, soc)
+                            draw_tracked_box(frame, box, local_id_counter, label_name, conf, soc, highlight=False, display_id=None)
                             local_id_counter += 1
 
                     # Save to daily folder inside output dir (YYYYMMDD)
@@ -577,6 +583,9 @@ def detect_motion(input_video_path, output_dir):
         event_prev_y = {}
         event_cross_dirs = {}
         event_highlight_until = {}
+        # Stable display IDs per entity (for persons)
+        event_entity_display_ids = {}
+        event_display_id_counter = 1
         # Track last known side per tracker id to bridge gaps
         event_last_side_global = {}
         # Event-local entity matcher (stable IDs across tracker flips)
@@ -644,18 +653,28 @@ def detect_motion(input_video_path, output_dir):
                         # Assign stable entity_id
                         y_center = int((box[1] + box[3]) / 2)
                         current_side = 'above' if y_center < LINE_Y else 'below'
+                        # 0) Prefer direct continuity by tracker id when available
+                        accept = False
+                        prev_eid = event_global_to_entity.get(global_id)
+                        if prev_eid is not None and prev_eid in event_entities_map:
+                            ent_prev = event_entities_map[prev_eid]
+                            if (frame_idx - ent_prev['last_frame']) <= MAX_GAP_FRAMES and prev_eid not in frame_assigned_entities:
+                                entity_id = prev_eid
+                                accept = True
+
+                        # 1) IoU-based matching if no direct continuity
                         best_id = None
                         best_ent = None
                         best_iou = 0.0
-                        for ent in event_entities:
-                            if (frame_idx - ent['last_frame']) > MAX_GAP_FRAMES:
-                                continue
-                            iou = _iou(box, ent['last_box'])
-                            if iou > best_iou:
-                                best_iou = iou
-                                best_id = ent['id']
-                                best_ent = ent
-                        accept = False
+                        if not accept:
+                            for ent in event_entities:
+                                if (frame_idx - ent['last_frame']) > MAX_GAP_FRAMES:
+                                    continue
+                                iou = _iou(box, ent['last_box'])
+                                if iou > best_iou:
+                                    best_iou = iou
+                                    best_id = ent['id']
+                                    best_ent = ent
                         if best_ent is not None:
                             diag = _bbox_diag(best_ent['last_box'])
                             dist = _center_distance(box, best_ent['last_box'])
@@ -684,13 +703,19 @@ def detect_motion(input_video_path, output_dir):
                                     continue
                                 last_y = int((ent['last_box'][1] + ent['last_box'][3]) / 2)
                                 last_side = 'above' if last_y < LINE_Y else 'below'
+                                gap2 = frame_idx - ent['last_frame']
+                                gap2_ratio = min(1.0, max(0.0, gap2 / max(1.0, MAX_GAP_FRAMES)))
+                                dist2 = _center_distance(box, ent['last_box'])
+                                diag2 = _bbox_diag(ent['last_box'])
+                                # Allow tighter center distance as gap grows
+                                allow_ratio = 0.6 * (1.0 - 0.5 * gap2_ratio)
+                                # Prefer opposite side handoff, but for short gaps also allow same-side if very close
                                 if last_side != current_side:
-                                    dist2 = _center_distance(box, ent['last_box'])
-                                    diag2 = _bbox_diag(ent['last_box'])
-                                    gap2 = frame_idx - ent['last_frame']
-                                    gap2_ratio = min(1.0, max(0.0, gap2 / max(1.0, MAX_GAP_FRAMES)))
-                                    allow_ratio = 0.6 * (1.0 - 0.5 * gap2_ratio)
                                     if dist2 <= allow_ratio * max(1.0, diag2):
+                                        fallback_id = ent['id']
+                                        break
+                                else:
+                                    if gap2_ratio <= 0.3 and dist2 <= 0.4 * max(1.0, diag2):
                                         fallback_id = ent['id']
                                         break
                             if fallback_id is not None and fallback_id not in frame_assigned_entities:
@@ -727,7 +752,15 @@ def detect_motion(input_video_path, output_dir):
                                 # Visual highlight and force frame inclusion
                                 frame_has_crossing = True
                                 event_highlight_until[entity_id] = max(event_highlight_until.get(entity_id, 0), frame_idx + HIGHLIGHT_WINDOW_FRAMES)
-                                draw_tracked_box(frame, box, local_id, label_name, conf, soc, highlight=True)
+                                # Ensure display id exists for this entity
+                                if label_name == 'person':
+                                    if entity_id not in event_entity_display_ids:
+                                        event_entity_display_ids[entity_id] = event_display_id_counter
+                                        event_display_id_counter += 1
+                                    disp_id = event_entity_display_ids[entity_id]
+                                else:
+                                    disp_id = None
+                                draw_tracked_box(frame, box, local_id, label_name, conf, soc, highlight=True, display_id=disp_id)
                                 # Skip normal draw below for this object to avoid double drawing
                                 event_last_side_global[global_id] = current_side
                                 continue
@@ -759,7 +792,15 @@ def detect_motion(input_video_path, output_dir):
                                 if cv2.pointPolygonTest(roi_polygon_cv, (cx, cy), False) >= 0:
                                     frame_has_person_in_roi = True
                                 # Draw highlight if crossing detected on this frame
-                                draw_tracked_box(frame, box, local_id, label_name, conf, soc, highlight=True)
+                                # Ensure display id exists for this entity
+                                if label_name == 'person':
+                                    if entity_id not in event_entity_display_ids:
+                                        event_entity_display_ids[entity_id] = event_display_id_counter
+                                        event_display_id_counter += 1
+                                    disp_id = event_entity_display_ids[entity_id]
+                                else:
+                                    disp_id = None
+                                draw_tracked_box(frame, box, local_id, label_name, conf, soc, highlight=True, display_id=disp_id)
                                 # Skip normal draw below for this object to avoid double drawing
                                 continue
 
@@ -780,7 +821,16 @@ def detect_motion(input_video_path, output_dir):
                         if eid is not None and event_highlight_until.get(eid, 0) >= frame_idx:
                             highlight_active = True
                             frame_has_highlight = True
-                    draw_tracked_box(frame, box, local_id, label_name, conf, soc, highlight=highlight_active)
+                    # Determine display id for person labels
+                    disp_id = None
+                    if label_name == 'person':
+                        eid = event_global_to_entity.get(global_id)
+                        if eid is not None:
+                            if eid not in event_entity_display_ids:
+                                event_entity_display_ids[eid] = event_display_id_counter
+                                event_display_id_counter += 1
+                            disp_id = event_entity_display_ids[eid]
+                    draw_tracked_box(frame, box, local_id, label_name, conf, soc, highlight=highlight_active, display_id=disp_id)
 
             if frame_has_person_in_roi:
                 person_frames_in_roi += 1
@@ -851,7 +901,7 @@ def detect_motion(input_video_path, output_dir):
                             local_id_counter = 1
                             for box, cls, conf in zip(boxes, clss, confs):
                                 label_name = class_names[cls]
-                                draw_tracked_box(frame, box, local_id_counter, label_name, conf, soc)
+                                draw_tracked_box(frame, box, local_id_counter, label_name, conf, soc, highlight=False, display_id=None)
                                 local_id_counter += 1
 
                         # Save to daily folder inside output dir (YYYYMMDD)
