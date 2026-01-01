@@ -577,6 +577,8 @@ def detect_motion(input_video_path, output_dir):
         event_prev_y = {}
         event_cross_dirs = {}
         event_highlight_until = {}
+        # Track last known side per tracker id to bridge gaps
+        event_last_side_global = {}
         # Event-local entity matcher (stable IDs across tracker flips)
         event_entities = []  # list of dicts: {id, last_box, last_frame}
         event_entities_map = {}
@@ -587,7 +589,7 @@ def detect_motion(input_video_path, output_dir):
         IOU_WEAK = 0.3
         CENTER_DIST_RATIO = 0.35
         SIZE_RATIO_LIMIT = 1.6
-        MAX_GAP_FRAMES = int(6 * tracker_stride)
+        MAX_GAP_FRAMES = int(2 * fps * tracker_stride)
         person_frames_in_roi = 0
 
         # Seek once to the start of the event, then advance sequentially to avoid decoder seek artifacts
@@ -640,6 +642,8 @@ def detect_motion(input_video_path, output_dir):
                     # Line crossing tracking per person (compute net outcome per event)
                     if label_name == 'person':
                         # Assign stable entity_id
+                        y_center = int((box[1] + box[3]) / 2)
+                        current_side = 'above' if y_center < LINE_Y else 'below'
                         best_id = None
                         best_ent = None
                         best_iou = 0.0
@@ -660,18 +664,44 @@ def detect_motion(input_video_path, output_dir):
                             size_ratio = area_now / max(1e-6, area_prev)
                             if size_ratio < 1.0:
                                 size_ratio = 1.0 / size_ratio
-                            if (best_iou >= IOU_STRONG) or (
-                                best_iou >= IOU_WEAK and dist <= CENTER_DIST_RATIO * max(1.0, diag) and size_ratio <= SIZE_RATIO_LIMIT
+                            gap_frames = frame_idx - best_ent['last_frame']
+                            gap_ratio = min(1.0, max(0.0, gap_frames / max(1.0, MAX_GAP_FRAMES)))
+                            iou_strong_req = min(0.9, IOU_STRONG + 0.2 * gap_ratio)
+                            iou_weak_req = min(0.8, IOU_WEAK + 0.2 * gap_ratio)
+                            center_ratio_allowed = max(0.15, CENTER_DIST_RATIO * (1.0 - 0.5 * gap_ratio))
+                            size_ratio_limit_eff = max(1.3, SIZE_RATIO_LIMIT - 0.3 * gap_ratio)
+                            if (best_iou >= iou_strong_req) or (
+                                best_iou >= iou_weak_req and dist <= center_ratio_allowed * max(1.0, diag) and size_ratio <= size_ratio_limit_eff
                             ):
                                 if best_id not in frame_assigned_entities:
                                     entity_id = best_id
                                     accept = True
                         if not accept:
-                            entity_id = event_next_entity_id
-                            event_next_entity_id += 1
-                            new_ent = {'id': entity_id, 'last_box': box[:], 'last_frame': frame_idx}
-                            event_entities.append(new_ent)
-                            event_entities_map[entity_id] = new_ent
+                            # Second-chance bridge: if recent entity is on opposite side, merge even with low IoU
+                            fallback_id = None
+                            for ent in event_entities:
+                                if (frame_idx - ent['last_frame']) > MAX_GAP_FRAMES:
+                                    continue
+                                last_y = int((ent['last_box'][1] + ent['last_box'][3]) / 2)
+                                last_side = 'above' if last_y < LINE_Y else 'below'
+                                if last_side != current_side:
+                                    dist2 = _center_distance(box, ent['last_box'])
+                                    diag2 = _bbox_diag(ent['last_box'])
+                                    gap2 = frame_idx - ent['last_frame']
+                                    gap2_ratio = min(1.0, max(0.0, gap2 / max(1.0, MAX_GAP_FRAMES)))
+                                    allow_ratio = 0.6 * (1.0 - 0.5 * gap2_ratio)
+                                    if dist2 <= allow_ratio * max(1.0, diag2):
+                                        fallback_id = ent['id']
+                                        break
+                            if fallback_id is not None and fallback_id not in frame_assigned_entities:
+                                entity_id = fallback_id
+                                accept = True
+                            else:
+                                entity_id = event_next_entity_id
+                                event_next_entity_id += 1
+                                new_ent = {'id': entity_id, 'last_box': box[:], 'last_frame': frame_idx}
+                                event_entities.append(new_ent)
+                                event_entities_map[entity_id] = new_ent
                         else:
                             ent = event_entities_map[entity_id]
                             ent['last_box'] = box[:]
@@ -679,13 +709,31 @@ def detect_motion(input_video_path, output_dir):
                         frame_assigned_entities.add(entity_id)
                         event_global_to_entity[global_id] = entity_id
 
-                        y_center = int((box[1] + box[3]) / 2)
-                        current_side = 'above' if y_center < LINE_Y else 'below'
+                        # Previous side seen for this tracker id (global)
+                        prev_global_side = event_last_side_global.get(global_id)
                         if entity_id not in event_prev_y:
                             event_prev_y[entity_id] = y_center
-                            event_first_side[entity_id] = current_side
-                            event_last_side[entity_id] = current_side
                             event_cross_dirs[entity_id] = set()
+                            # If re-acquired and side differs, infer crossing and set start side accordingly
+                            if prev_global_side is not None and prev_global_side != current_side:
+                                # Set start side to previous side to ensure net count registers
+                                event_first_side[entity_id] = prev_global_side
+                                event_last_side[entity_id] = current_side
+                                # Record direction for completeness
+                                if prev_global_side == 'below' and current_side == 'above':
+                                    event_cross_dirs[entity_id].add('up')
+                                elif prev_global_side == 'above' and current_side == 'below':
+                                    event_cross_dirs[entity_id].add('down')
+                                # Visual highlight and force frame inclusion
+                                frame_has_crossing = True
+                                event_highlight_until[entity_id] = max(event_highlight_until.get(entity_id, 0), frame_idx + HIGHLIGHT_WINDOW_FRAMES)
+                                draw_tracked_box(frame, box, local_id, label_name, conf, soc, highlight=True)
+                                # Skip normal draw below for this object to avoid double drawing
+                                event_last_side_global[global_id] = current_side
+                                continue
+                            else:
+                                event_first_side[entity_id] = current_side
+                                event_last_side[entity_id] = current_side
                         else:
                             prev_y = event_prev_y[entity_id]
                             just_crossed = False
@@ -714,6 +762,9 @@ def detect_motion(input_video_path, output_dir):
                                 draw_tracked_box(frame, box, local_id, label_name, conf, soc, highlight=True)
                                 # Skip normal draw below for this object to avoid double drawing
                                 continue
+
+                        # Update last known side for this tracker id (used to bridge gaps)
+                        event_last_side_global[global_id] = current_side
 
                     # Person-in-ROI check using center point inside ROI polygon
                     if label_name == 'person':
