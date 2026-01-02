@@ -53,6 +53,9 @@ This project is a Python-based application that monitors a folder for new video 
   - `ultralytics`
   - `openvino`
   - `teslapy` (optional, for Tesla integration)
+  - `fastapi` (optional, for Log Dashboard)
+  - `uvicorn` (optional, for Log Dashboard)
+  - `jinja2` (optional, for Log Dashboard)
 
 Install dependencies with:
 ```bash
