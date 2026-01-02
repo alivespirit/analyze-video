@@ -40,7 +40,6 @@ TRACK_FULL_UNTIL_SECONDS = 6.0
 TRACK_SKIP_FROM_SECONDS = 12.0
 SEND_INSIGNIFICANT_FRAMES = True
 CROP_PADDING = 30
-MAX_BOX_AREA_PERCENT = 0.80
 PERSON_MIN_FRAMES = 10
 
 # --- Tesla config ---
@@ -54,7 +53,6 @@ TESLA_SOC_CHECK_ENABLED = bool(teslapy and TESLA_REFRESH_TOKEN and TESLA_EMAIL)
 OBJECT_DETECTION_MODEL_PATH = os.getenv("OBJECT_DETECTION_MODEL_PATH", default="best_openvino_model")
 CONF_THRESHOLD = 0.5
 LINE_Y = 860
-LINE_CROSSING_COOLDOWN_SECONDS = 3.0
 COLOR_PERSON = (100, 200, 0)
 COLOR_CAR = (200, 120, 0)
 COLOR_DEFAULT = (255, 255, 255)
@@ -62,6 +60,8 @@ COLOR_HIGHLIGHT = (80, 90, 245)
 COLOR_LINE = (0, 255, 255)
 LINE_Y_TOLERANCE = 6
 HIGHLIGHT_WINDOW_FRAMES = 5
+STABLE_MIN_FRAMES = 2  # frames outside tolerance required to confirm stable side
+DWELL_SECONDS = 2.0    # seconds to stay on the other side to confirm a crossing
 
 # --- Load Object Detection Model ---
 try:
@@ -583,6 +583,11 @@ def detect_motion(input_video_path, output_dir):
         event_prev_y = {}
         event_cross_dirs = {}
         event_highlight_until = {}
+        # Stable-side tracking and dwell confirmation per entity
+        event_stable_side = {}
+        event_stable_since = {}
+        event_stable_frames = {}
+        event_pending_cross = {}  # entity_id -> {'dir': 'up'|'down', 'since_frame': int}
         # Stable display IDs per entity (for persons)
         event_entity_display_ids = {}
         event_display_id_counter = 1
@@ -769,15 +774,51 @@ def detect_motion(input_video_path, output_dir):
                                 event_last_side[entity_id] = current_side
                         else:
                             prev_y = event_prev_y[entity_id]
-                            just_crossed = False
                             visual_crossed = False
                             # Apply tolerance band to reduce jitter-based flips
                             if prev_y <= LINE_Y - LINE_Y_TOLERANCE and y_center >= LINE_Y + LINE_Y_TOLERANCE:
                                 event_cross_dirs[entity_id].add('down')
-                                just_crossed = True
                             elif prev_y >= LINE_Y + LINE_Y_TOLERANCE and y_center <= LINE_Y - LINE_Y_TOLERANCE:
                                 event_cross_dirs[entity_id].add('up')
-                                just_crossed = True
+                            # Hysteresis-based crossing + dwell gating: use stable side outside tolerance band
+                            current_stable_side = None
+                            if y_center <= LINE_Y - LINE_Y_TOLERANCE:
+                                current_stable_side = 'above'
+                            elif y_center >= LINE_Y + LINE_Y_TOLERANCE:
+                                current_stable_side = 'below'
+                            # Update stability counters
+                            if current_stable_side is not None:
+                                event_stable_frames[entity_id] = event_stable_frames.get(entity_id, 0) + 1
+                            else:
+                                event_stable_frames[entity_id] = 0
+                            prev_stable = event_stable_side.get(entity_id)
+                            if current_stable_side is not None and event_stable_frames.get(entity_id, 0) >= STABLE_MIN_FRAMES:
+                                if prev_stable is None:
+                                    # First time reaching stability
+                                    event_stable_side[entity_id] = current_stable_side
+                                    event_stable_since[entity_id] = frame_idx
+                                    # Clear any stale pending
+                                    if entity_id in event_pending_cross:
+                                        del event_pending_cross[entity_id]
+                                elif current_stable_side != prev_stable:
+                                    # Stable side changed → start pending crossing that must pass dwell
+                                    new_dir = None
+                                    if prev_stable == 'below' and current_stable_side == 'above':
+                                        new_dir = 'up'
+                                    elif prev_stable == 'above' and current_stable_side == 'below':
+                                        new_dir = 'down'
+                                    event_stable_side[entity_id] = current_stable_side
+                                    event_stable_since[entity_id] = frame_idx
+                                    if new_dir is not None:
+                                        event_pending_cross[entity_id] = {'dir': new_dir, 'since_frame': frame_idx}
+                                else:
+                                    # Staying on same stable side → if pending for this side, confirm after dwell time
+                                    pend = event_pending_cross.get(entity_id)
+                                    if pend is not None:
+                                        dwell_frames = frame_idx - event_stable_since.get(entity_id, frame_idx)
+                                        if dwell_frames >= int(DWELL_SECONDS * fps):
+                                            event_cross_dirs[entity_id].add(pend['dir'])
+                                            del event_pending_cross[entity_id]
                             # Visual crossing detection without tolerance (for highlight only)
                             if (prev_y < LINE_Y <= y_center) or (prev_y > LINE_Y >= y_center):
                                 visual_crossed = True
@@ -851,9 +892,18 @@ def detect_motion(input_video_path, output_dir):
                 rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
                 event_frames_rgb.append(rgb_frame)
 
-        # Reduce per-person crossings to net counts for the event, following rules:
+        # Confirm any last pending crossing if it matches the final side
+        for pid, pend in list(event_pending_cross.items()):
+            end_side = event_last_side.get(pid, event_first_side.get(pid))
+            target_side = 'above' if pend['dir'] == 'up' else 'below'
+            if end_side == target_side:
+                if pid not in event_cross_dirs:
+                    event_cross_dirs[pid] = set()
+                event_cross_dirs[pid].add(pend['dir'])
+
+        # Reduce per-person crossings to net counts (final-side first, otherwise both directions)
         # - If final side != start side: count 1 in that direction only
-        # - If final side == start side and both directions occurred: count 1 up and 1 down
+        # - If final side == start side: count 1 up and 1 down only if both directions occurred
         event_up_final = 0
         event_down_final = 0
         for pid in event_prev_y.keys():
