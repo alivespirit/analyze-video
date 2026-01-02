@@ -1,14 +1,14 @@
 # Analyze Video Bot
 
-This project is a Python-based application that monitors a folder for new video files, analyzes them for motion and objects, generates descriptions with the Gemini AI platform, and sends results to a Telegram chat. It's optimized for surveillance footage, featuring intelligent object detection with YOLOv11, gate crossing alerts, optional Tesla integration, dynamic AI model selection, and robust performance management.
+This project is a Python-based application that monitors a folder for new video files, analyzes them for motion and objects, generates descriptions with the Gemini AI platform, and sends results to a Telegram chat. It's optimized for surveillance footage, featuring intelligent object detection with YOLOv12, gate crossing alerts, optional Tesla integration, dynamic AI model selection, and robust performance management.
 
 ---
 
 ## Features
 
 - **Folder Monitoring**: Automatically processes new `.mp4` files in a specified folder using `watchdog`.
-- **Intelligent Video Analysis (OpenCV & YOLOv11)**:
-  - **Object Detection & Tracking**: Uses a YOLOv11 model (optimized with OpenVINO) to detect and track objects like people and cars, assigning them stable IDs. The model has been pre-trained on footage from a wide-angle camera located on a second floor, enabling it to accurately identify distorted objects.
+- **Intelligent Video Analysis (OpenCV & YOLOv12)**:
+  - **Object Detection & Tracking**: Uses a YOLOv12 model (optimized with OpenVINO) to detect and track objects like people and cars, assigning them stable IDs. The model has been pre-trained on footage from a wide-angle camera located on a second floor, enabling it to accurately identify distorted objects.
   - **Gate Crossing Detection**: Identifies and sends a special notification when a person crosses a predefined horizontal line in the frame, indicating entry or exit.
   - **Cropped ROI Analysis**: Performs analysis on a smaller, padded region around the ROI for better performance.
   - **Smart Event Filtering**: Differentiates between significant, insignificant, and noisy motion events based on duration.
@@ -21,6 +21,18 @@ This project is a Python-based application that monitors a folder for new video 
   - **Time-Based Model Selection**: Automatically switches between different Gemini models (e.g., Pro vs. Flash) based on the time of day for cost optimization.
   - **Fallback Models**: Includes logic to fall back to secondary and final models if the primary one fails.
   - **Custom Prompts**: Uses a `prompt.txt` file for tailored analysis.
+- **Robust Telegram Integration**:
+  - **Grouped Notifications**: Combines multiple insignificant/no-motion events into a single, editable Telegram message to reduce clutter.
+  - **Interactive Callbacks**: Allows users to request the full original video via inline buttons.
+  - **Media Handling**: Sends highlight clips as animations and insignificant motion as photos.
+- **Performance & Stability**:
+  - **Dual-Executor Design**: Uses separate, single-worker thread pools for CPU-bound (video analysis) and I/O-bound (API calls) tasks to prevent system overload.
+  - **Graceful Shutdown & Auto-Restart**: Automatically restarts the script if any of the Python files is modified, with robust shutdown logic.
+  - **Battery Monitoring**: Appends battery status to notifications if the device is on battery power (requires `psutil`).
+  - **Low Hardware Requirements**: Optimized to be efficient without losing accuracy, tested on Intel Core m5 CPU with 8Gb of RAM.
+- **Enhanced Logging**:
+  - **Custom Log Rotation**: Creates daily rotating log files with a clear `YYYY-MM-DD` naming convention.
+  - **Network Error Filtering**: Suppresses noisy network-related stack traces to keep logs clean.
 - **Robust Telegram Integration**:
   - **Grouped Notifications**: Combines multiple insignificant/no-motion events into a single, editable Telegram message to reduce clutter.
   - **Interactive Callbacks**: Allows users to request the full original video via inline buttons.
@@ -112,10 +124,10 @@ pip install -r requirements.txt
        MODEL_FALLBACK=gemini-2.5-flash-lite
        MODEL_FINAL_FALLBACK=
        ```
-       - If `MODEL_PRO` is set and the current hour is between 09 and 13, `MODEL_PRO` is used as the main model and `MODEL_MAIN` becomes the fallback.
-       - If `MODEL_PRO` is empty or outside 09–13, `MODEL_MAIN` is used as main and `MODEL_FALLBACK` as fallback.
-       - If `MODEL_FINAL_FALLBACK` is set, it will be used as a last resort.
-       - Known codenames are displayed with responses: `gemini-3-flash-preview → 3FP`, `gemini-2.5-flash → 2.5F`, `gemini-2.5-flash-lite → 2.5FL`, `gemini-2.5-pro → 2.5P` (unknown models display `FF` for final fallback).
+      - If `MODEL_PRO` is set and the current hour is between 09 and 13, `MODEL_PRO` is used as the main model and `MODEL_MAIN` becomes the fallback.
+      - If `MODEL_PRO` is empty or outside 09–13, `MODEL_MAIN` is used as main and `MODEL_FALLBACK` as fallback.
+      - If `MODEL_FINAL_FALLBACK` is set, it will be used as a last resort.
+      - Known codenames are displayed with responses: `gemini-3-flash-preview → 3FP`, `gemini-2.5-flash → 2.5F`, `gemini-2.5-flash-lite → 2.5FL`, `gemini-2.5-pro → 2.5P` (unknown models display `FF` for final fallback).
 
 ---
 
@@ -133,6 +145,12 @@ pip install -r requirements.txt
    - View highlight clips and insignificant motion snapshots.
    - Click the "Глянути" (View) or timestamp buttons to receive the full original video.
 
+4. **(Optional) Run a one-off analysis for a single video:**
+   ```bash
+   python3 tools/run_detect_motion.py /path/to/video.mp4
+   ```
+   This prints a JSON summary (including up/down) and writes a highlight clip.
+
 ---
 
 ## How It Works
@@ -144,7 +162,7 @@ pip install -r requirements.txt
    - **Video Analysis (CPU-Bound Task):** The video is passed to the `motion_executor`.
      - **Motion Detection:** OpenCV analyzes frames within a cropped ROI to find initial motion, filtering out noise.
      - **Object Tracking:** If significant motion is found, the `ultralytics` YOLO model tracks objects (people, cars) across frames.
-     - **Event Classification:** The script determines the event type: `gate_crossing`, `significant_motion`, `insignificant_motion`, or `no_motion`.
+       - **Event Classification:** The script determines the event type: `gate_crossing`, `significant_motion`, `insignificant_motion`, or `no_motion`.
      - **Artifact Generation:** A highlight clip (.mp4) or insignificant motion snapshots (.jpg) are created in the `temp/` directory.
    - **AI Analysis (I/O-Bound Task):** The result is passed to the `io_executor`.
      - For gate crossings or off-peak hours, Gemini is skipped.
@@ -168,9 +186,21 @@ pip install -r requirements.txt
 
 - **Prompt:** Edit `prompt.txt` to change the analysis prompt sent to Gemini AI.
 - **AI Models:** Edit `gemini_models.env` to control which Gemini models are used; changes apply without restarting the app.
-- **Motion & Detection Parameters:** Adjust constants in `main.py` (e.g., `MIN_CONTOUR_AREA`, `CONF_THRESHOLD`, `LINE_Y`) to fine-tune sensitivity.
+- **Motion & Detection Parameters:** Adjust constants in `detect_motion.py` to fine-tune sensitivity. Key knobs:
+  - `LINE_Y`: horizontal line Y position
+  - `LINE_Y_TOLERANCE`: pixel tolerance around the line to suppress jitter near the threshold
+  - `STABLE_MIN_FRAMES`: frames outside tolerance required to accept a side change (hysteresis)
+  - `DWELL_SECONDS`: minimum time on the new side to count mid-event flips; the last flip can be confirmed by final side
+  - `TRACK_FULL_UNTIL_SECONDS`, `TRACK_SKIP_FROM_SECONDS`: speed/quality trade-offs for tracking/rendering long events
+  - `MAX_EVENT_GAP_SECONDS`: max gap between motion frames before splitting into separate events
+  - `MIN_EVENT_DURATION_SECONDS`, `MIN_INSIGNIFICANT_EVENT_DURATION_SECONDS`: event duration filters
+  - `PERSON_MIN_FRAMES`: minimum person-in-ROI frames required to keep an event
+  - `MIN_CONTOUR_AREA`: motion contour area threshold for initial motion detection
+  - `CONF_THRESHOLD`: detection confidence threshold for the YOLO model
+  - `HIGHLIGHT_WINDOW_FRAMES`: frames to keep the red highlight after a crossing
+  - `CROP_PADDING`: extra pixels around ROI for cropped analysis
 - **ROI:** Modify `roi.json` to change the monitored area.
-- **Object Detection Model:** Replace the contents of the `best_openvino_model` directory with your own exported YOLOv11 OpenVINO model.
+- **Object Detection Model:** Replace the contents of the `best_openvino_model` directory with your own exported YOLOv12 OpenVINO model.
   - Follow instructions in [tools/finetuning/](tools/finetuning/) to train your own model if needed.
 
 ---
