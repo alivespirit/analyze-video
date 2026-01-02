@@ -196,9 +196,9 @@ def draw_tracked_box(frame, box, local_id, label_name, conf, soc, highlight=Fals
 
     if label_name == 'person' and display_id is not None:
         if display_id == local_id:
-            label_text = f"p {display_id} {conf:.0%}"
+            label_text = f"p{display_id} {conf:.0%}"
         else:
-            label_text = f"p {display_id}/T{local_id} {conf:.0%}"
+            label_text = f"p{display_id}/T{local_id} {conf:.0%}"
     else:
         label_text = f"{label_name} {local_id} {conf:.0%}"
 
