@@ -33,18 +33,6 @@ This project is a Python-based application that monitors a folder for new video 
 - **Enhanced Logging**:
   - **Custom Log Rotation**: Creates daily rotating log files with a clear `YYYY-MM-DD` naming convention.
   - **Network Error Filtering**: Suppresses noisy network-related stack traces to keep logs clean.
-- **Robust Telegram Integration**:
-  - **Grouped Notifications**: Combines multiple insignificant/no-motion events into a single, editable Telegram message to reduce clutter.
-  - **Interactive Callbacks**: Allows users to request the full original video via inline buttons.
-  - **Media Handling**: Sends highlight clips as animations and insignificant motion as photos.
-- **Performance & Stability**:
-  - **Dual-Executor Design**: Uses separate, single-worker thread pools for CPU-bound (video analysis) and I/O-bound (API calls) tasks to prevent system overload.
-  - **Graceful Shutdown & Auto-Restart**: Automatically restarts the script if any of the Python files is modified, with robust shutdown logic.
-  - **Battery Monitoring**: Appends battery status to notifications if the device is on battery power and running low (requires `psutil`).
-  - **Low Hardware Requirements**: Optimized to be efficient without losing accuracy, tested on Intel Core m5 CPU with 8Gb of RAM.
-- **Enhanced Logging**:
-  - **Custom Log Rotation**: Creates daily rotating log files with a clear `YYYY-MM-DD` naming convention.
-  - **Network Error Filtering**: Suppresses noisy network-related stack traces to keep logs clean.
 
 ---
 
