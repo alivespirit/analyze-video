@@ -978,7 +978,7 @@ def detect_motion(input_video_path, output_dir):
 
     final_clip = ImageSequenceClip(all_clip_frames_rgb, fps=fps)
     output_filename = os.path.join(output_dir, file_basename)
-    logger.info(f"[{file_basename}] Writing final highlight clip to {output_filename}...")
+    logger.info(f"[{file_basename}] Writing final highlight clip...")
     final_clip.write_videofile(
         output_filename, codec='libx264', audio=False, bitrate='2000k',
         preset='medium', threads=4, logger=None
