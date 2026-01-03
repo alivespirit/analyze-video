@@ -4,8 +4,11 @@ import concurrent.futures
 import logging
 import sys
 import time
+import json
 import psutil
 import threading
+from types import SimpleNamespace
+from datetime import datetime, timedelta
 
 from dotenv import load_dotenv
 from telegram.ext import Application, CallbackQueryHandler, MessageReactionHandler
@@ -112,6 +115,7 @@ LOG_PATH = os.getenv("LOG_PATH", default="")
 ENABLE_LOG_DASHBOARD = os.getenv("ENABLE_LOG_DASHBOARD", "false").lower() == "true"
 LOG_DASHBOARD_PORT = int(os.getenv("LOG_DASHBOARD_PORT", "8000"))
 LOG_DASHBOARD_HOST = os.getenv("LOG_DASHBOARD_HOST", "0.0.0.0")
+RESTART_RECOVERY_WINDOW_SECONDS = int(os.getenv("RESTART_RECOVERY_WINDOW_SECONDS", "180"))
 
 class CustomTimedRotatingFileHandler(TimedRotatingFileHandler):
     def rotation_filename(self, default_name):
@@ -258,6 +262,11 @@ except OSError as e:
     exit(1) # Can't proceed without a temp dir, so exit.
 # ---------------------------------------------
 
+# Marker file to record restart timestamp
+RESTART_MARKER_PATH = os.path.join(TEMP_DIR, "restart_marker.json")
+# Processing ledger to track file statuses across restarts
+PROCESSING_LEDGER_PATH = os.path.join(TEMP_DIR, "processing_ledger.json")
+
 # --- Check Environment Variables ---
 if not all([GEMINI_API_KEY, TELEGRAM_TOKEN, CHAT_ID, USERNAME, VIDEO_FOLDER]):
     logger.critical("ERROR: One or more essential environment variables are missing. Exiting.")
@@ -367,6 +376,7 @@ class FileHandler(FileSystemEventHandler):
 
         try:
             current_loop = asyncio.get_running_loop()
+            update_processing_ledger(file_path, "started", {"start_ts": time.time()})
             
             # --- REFACTORED: Run motion detection and Gemini analysis in separate executors ---
             # 1. Run CPU-bound motion detection in the single-worker executor.
@@ -387,11 +397,13 @@ class FileHandler(FileSystemEventHandler):
             insignificant_frames = analysis_result['insignificant_frames']
             clip_path = analysis_result.get('clip_path')
             self.logger.info(f"[{file_basename}] Analysis complete.")
+            update_processing_ledger(file_path, "completed", {"end_ts": time.time()})
         except Exception as e:
             self.logger.error(f"[{file_basename}] Error during video processing pipeline: {e}", exc_info=True)
             video_response = f"_{timestamp_text}:_ \u274C Відео не вдалося проаналізувати: " + str(e)[:512] + "..."
             insignificant_frames = []
             clip_path = None
+            update_processing_ledger(file_path, "failed", {"end_ts": time.time(), "error": str(e)[:256]})
 
         battery = psutil.sensors_battery()
         if not battery.power_plugged:
@@ -442,6 +454,176 @@ class FileHandler(FileSystemEventHandler):
                 await asyncio.sleep(wait_seconds) # Wait before the next check
 
         self.logger.info(f"[{file_basename}] File considered stable at {last_size} bytes.")
+
+
+# --- Restart Recovery Utilities ---
+def write_restart_marker(path: str):
+    try:
+        payload = {"restart_requested_at": time.time()}
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(payload, f)
+        logger.info(f"Wrote restart marker: {path}")
+    except Exception as e:
+        logger.error(f"Failed to write restart marker '{path}': {e}")
+
+
+def read_restart_marker(path: str):
+    try:
+        if not os.path.exists(path):
+            return None
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        ts = float(data.get("restart_requested_at", 0))
+        return ts if ts > 0 else None
+    except Exception as e:
+        logger.error(f"Failed to read restart marker '{path}': {e}")
+        return None
+
+
+def read_processing_ledger(path: str):
+    try:
+        if not os.path.exists(path):
+            return {}
+        with open(path, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return {}
+
+
+def write_processing_ledger(path: str, ledger: dict):
+    try:
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(ledger, f)
+    except Exception as e:
+        logger.error(f"Failed to write processing ledger '{path}': {e}")
+
+
+def prune_processing_ledger(ledger: dict, max_entries: int = 20) -> dict:
+    """Keep only the last `max_entries` entries by most recent timestamp (end_ts/start_ts)."""
+    try:
+        items = []
+        for k, v in ledger.items():
+            ts = v.get("end_ts") or v.get("start_ts") or 0
+            items.append((ts, k, v))
+        items.sort(key=lambda x: x[0], reverse=True)
+        pruned = items[:max_entries]
+        return {k: v for _, k, v in pruned}
+    except Exception as e:
+        logger.error(f"Failed to prune processing ledger: {e}")
+        return ledger
+
+
+def update_processing_ledger(file_path: str, status: str, extra: dict | None = None):
+    ledger = read_processing_ledger(PROCESSING_LEDGER_PATH)
+    entry = ledger.get(file_path, {})
+    entry.update({"status": status})
+    if extra:
+        entry.update(extra)
+    ledger[file_path] = entry
+    ledger = prune_processing_ledger(ledger, 20)
+    write_processing_ledger(PROCESSING_LEDGER_PATH, ledger)
+
+
+async def recover_missed_files_since(since_ts: float):
+    """
+    Scan the recent hour directories for .mp4 files modified between
+    (since_ts - RESTART_RECOVERY_WINDOW_SECONDS) and now, and process them.
+
+    Runs after the Telegram application is started to ensure notifications work.
+    """
+    try:
+        # Wait until Telegram application is running
+        for _ in range(50):  # up to ~10s
+            if getattr(application, "running", False):
+                break
+            await asyncio.sleep(0.2)
+
+        window_start = max(0.0, since_ts - RESTART_RECOVERY_WINDOW_SECONDS)
+        window_end = time.time()
+
+        start_dt = datetime.fromtimestamp(window_start)
+        end_dt = datetime.fromtimestamp(window_end)
+
+        # Generate candidate hour dir names between start_dt and end_dt
+        candidate_dirs = set()
+        cursor = start_dt.replace(minute=0, second=0, microsecond=0)
+        while cursor <= end_dt:
+            candidate_dirs.add(cursor.strftime("%Y%m%d%H"))
+            cursor += timedelta(hours=1)
+
+        ledger = read_processing_ledger(PROCESSING_LEDGER_PATH)
+        files_to_process = []
+        seen_paths = set()
+        mtime_candidates = 0
+        ledger_candidates = 0
+        for hour_dir in candidate_dirs:
+            dir_path = os.path.join(VIDEO_FOLDER, hour_dir)
+            if not os.path.isdir(dir_path):
+                continue
+            try:
+                for name in os.listdir(dir_path):
+                    if not name.endswith(".mp4"):
+                        continue
+                    fpath = os.path.join(dir_path, name)
+                    try:
+                        mtime = os.path.getmtime(fpath)
+                    except Exception:
+                        continue
+                    if window_start <= mtime <= window_end:
+                        entry = ledger.get(fpath)
+                        if entry and entry.get("status") == "completed":
+                            continue
+                        if fpath not in seen_paths:
+                            files_to_process.append((mtime, fpath))
+                            seen_paths.add(fpath)
+                            mtime_candidates += 1
+            except Exception as e:
+                logger.error(f"Error scanning directory '{dir_path}': {e}")
+
+        # Include files that were started/failed within the window, regardless of mtime
+        try:
+            for fpath, entry in ledger.items():
+                if entry.get("status") == "completed":
+                    continue
+                start_ts = float(entry.get("start_ts") or 0)
+                if start_ts <= 0:
+                    continue
+                if window_start <= start_ts <= window_end and os.path.exists(fpath):
+                    if fpath not in seen_paths:
+                        files_to_process.append((start_ts, fpath))
+                        seen_paths.add(fpath)
+                        ledger_candidates += 1
+        except Exception as e:
+            logger.error(f"Error merging ledger entries for recovery: {e}")
+
+        if not files_to_process:
+            logger.info("Restart recovery: No missed files found in window.")
+            return
+
+        files_to_process.sort(key=lambda x: x[0])
+        logger.info(f"Restart recovery: Found {len(files_to_process)} file(s) to process.")
+
+        # Use FileHandler directly to run the standard pipeline
+        loop = asyncio.get_running_loop()
+        fh = FileHandler(loop, application)
+        processed_count = 0
+        failed_count = 0
+        for _, fpath in files_to_process:
+            try:
+                event = SimpleNamespace(src_path=fpath, is_directory=False)
+                await fh.handle_event(event)
+                logger.info(f"Restart recovery: Processed {fpath}")
+                processed_count += 1
+            except Exception as e:
+                logger.error(f"Restart recovery: Failed processing {fpath}: {e}", exc_info=True)
+                failed_count += 1
+
+        logger.info(
+            f"Restart recovery summary: candidates={len(files_to_process)} (mtime={mtime_candidates}, ledger={ledger_candidates}), "
+            f"processed={processed_count}, failed={failed_count}"
+        )
+    except Exception as e:
+        logger.error(f"Restart recovery task failed: {e}", exc_info=True)
 
 
 # Add the callback handler
@@ -607,6 +789,25 @@ async def main():
     )
 
     tasks = {telegram_task, watcher_task, main_script_monitor_task}
+    recovery_task_ref = None
+
+    # If a restart marker exists, schedule recovery of missed files
+    marker_ts = read_restart_marker(RESTART_MARKER_PATH)
+    if marker_ts is not None:
+        # Only recover for recent restarts within a reasonable window (e.g., 10 minutes)
+        if (time.time() - marker_ts) <= max(600, RESTART_RECOVERY_WINDOW_SECONDS * 2):
+            logger.info("Restart marker detected. Scheduling missed-file recovery...")
+            recovery_task_ref = asyncio.create_task(recover_missed_files_since(marker_ts), name="MissedFilesRecoveryTask")
+            try:
+                recovery_task_ref.add_done_callback(lambda t: logger.info("MissedFilesRecoveryTask completed."))
+            except Exception:
+                pass
+        else:
+            logger.info("Restart marker is too old. Skipping recovery.")
+        try:
+            os.remove(RESTART_MARKER_PATH)
+        except Exception:
+            pass
 
     # Add log dashboard watcher to auto-restart the dashboard on changes
     if ENABLE_LOG_DASHBOARD and dashboard_runner is not None:
@@ -718,6 +919,14 @@ async def main():
 
         logger.info("All application tasks have finished.")
 
+        # Ensure recovery task is not left hanging
+        if recovery_task_ref is not None and not recovery_task_ref.done():
+            try:
+                recovery_task_ref.cancel()
+                await asyncio.gather(recovery_task_ref, return_exceptions=True)
+            except Exception:
+                pass
+
         # Stop dashboard if running
         if dashboard_runner is not None:
             try:
@@ -734,6 +943,8 @@ async def main():
             logger.info("Executors issued fast shutdown command.")
 
             logger.info("RESTART_REQUESTED is True. Executing self-restart...")
+            # Write restart marker before replacing the process
+            write_restart_marker(RESTART_MARKER_PATH)
             # Flush standard streams before exec, as they might be inherited
             sys.stdout.flush()
             sys.stderr.flush()
