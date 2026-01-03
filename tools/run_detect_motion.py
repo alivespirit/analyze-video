@@ -3,6 +3,7 @@ import os
 import sys
 import json
 import argparse
+import logging
 
 # Ensure we can import detect_motion from the repo root
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -16,11 +17,26 @@ def main():
     parser = argparse.ArgumentParser(description="Run detect_motion on a single video and save outputs.")
     parser.add_argument("input_video", help="Path to the input .mp4 file")
     parser.add_argument("output_dir", nargs="?", default=os.path.join(REPO_ROOT, "temp"), help="Directory to save outputs (default: repo/temp)")
+    parser.add_argument(
+        "--log-level",
+        default="INFO",
+        choices=["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"],
+        help="Logging level for console output (default: INFO)",
+    )
     args = parser.parse_args()
 
     input_video = os.path.abspath(args.input_video)
     output_dir = os.path.abspath(args.output_dir)
     os.makedirs(output_dir, exist_ok=True)
+
+    # Configure console logging so detect_motion logs are visible
+    level = getattr(logging, args.log_level.upper(), logging.INFO)
+    logging.basicConfig(
+        level=level,
+        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+        handlers=[logging.StreamHandler(sys.stdout)],
+        force=True,
+    )
 
     print(f"Running detect_motion on: {input_video}")
     res = detect_motion(input_video, output_dir)
