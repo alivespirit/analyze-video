@@ -164,6 +164,7 @@ pip install -r requirements.txt
    - **Gate Crossing:** A special, high-priority message is sent immediately.
    - **Significant Motion:** A message is sent with the generated highlight clip and the AI description.
    - **Insignificant/No Motion:** Events are grouped into a single, editable message to avoid spam.
+   - **Resilient Sending:** Animation delivery is retried non-blockingly at 5/10/15 minutes. If all retries fail (e.g., corrupted or oversized media), a final plain message with a “Глянути” button is sent so you still receive a notification. Highlight clips are preserved during retries and cleaned up after a successful send or after the final fallback.
 
 4. **Callback Handling:**
    - When a button is clicked, the bot retrieves the corresponding full video file and sends it as a reply.

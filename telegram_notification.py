@@ -375,7 +375,7 @@ async def button_callback(update, context):
         pass
 
 
-async def send_notifications(app, video_response, insignificant_frames, clip_path, file_path, file_basename, timestamp_text):
+async def send_notifications(app, video_response, insignificant_frames, clip_path, file_path, file_basename, timestamp_text, preserve_media_on_failure: bool = False, allow_plain_fallback: bool = True):
     """
     Sends Telegram notifications based on analysis results, including:
     - Animation or message with button for significant motion.
@@ -391,6 +391,8 @@ async def send_notifications(app, video_response, insignificant_frames, clip_pat
         file_path (str): Original video file path.
         file_basename (str): Basename of the original video file.
         timestamp_text (str): Short timestamp text used for buttons/captions.
+        preserve_media_on_failure (bool): Preserve highlight media when send fails (for external retries).
+        allow_plain_fallback (bool): If True, allow plain-message fallback with button when animation send fails. Typically False during initial/retry sends, then True after all retries are exhausted for a final notification attempt.
     """
     global no_motion_group_message_id, no_motion_grouped_videos
 
@@ -411,25 +413,29 @@ async def send_notifications(app, video_response, insignificant_frames, clip_pat
             if not os.path.exists(media_path):
                 logger.warning(f"[{file_basename}] Highlight clip not found, using original video.")
                 media_path = file_path
+            send_success = False
+            # Single button row: only "Глянути"
+            keyboard = [[InlineKeyboardButton("Глянути", callback_data=callback_file)]]
+            reply_markup = InlineKeyboardMarkup(keyboard)
             try:
-                # Single button row: only "Глянути" (use reactions for actions)
-                keyboard = [[
-                    InlineKeyboardButton("Глянути", callback_data=callback_file)
-                ]]
-                reply_markup = InlineKeyboardMarkup(keyboard)
                 with open(media_path, 'rb') as animation_file:
                     sent_message = await app.bot.send_animation(
-                        chat_id=CHAT_ID, animation=animation_file, caption=video_response,
-                        reply_markup=reply_markup, parse_mode='Markdown'
+                        chat_id=CHAT_ID,
+                        animation=animation_file,
+                        caption=video_response,
+                        reply_markup=reply_markup,
+                        parse_mode='Markdown'
                     )
-                    logger.info(f"[{file_basename}] Animation sent successfully.")
-                    try:
-                        async with message_map_lock:
-                            video_message_map[f"{CHAT_ID}:{sent_message.message_id}"] = {"path": file_path, "caption": video_response, "mode": "Markdown"}
-                            save_message_map_to_disk()
-                        logger.info(f"[{file_basename}] Mapped animation message {sent_message.message_id} to video path (persisted).")
-                    except Exception as map_e:
-                        logger.warning(f"[{file_basename}] Failed to persist animation mapping: {map_e}")
+                logger.info(f"[{file_basename}] Animation sent successfully.")
+                send_success = True
+                # Persist mapping
+                try:
+                    async with message_map_lock:
+                        video_message_map[f"{CHAT_ID}:{sent_message.message_id}"] = {"path": file_path, "caption": video_response, "mode": "Markdown"}
+                        save_message_map_to_disk()
+                    logger.info(f"[{file_basename}] Mapped animation message {sent_message.message_id} to video path (persisted).")
+                except Exception as map_e:
+                    logger.warning(f"[{file_basename}] Failed to persist animation mapping: {map_e}")
             except telegram.error.BadRequest as bad_request_error:
                 logger.warning(f"[{file_basename}] BadRequest error: {bad_request_error}. Retrying with escaped Markdown.")
                 try:
@@ -442,6 +448,7 @@ async def send_notifications(app, video_response, insignificant_frames, clip_pat
                             parse_mode='Markdown'
                         )
                     logger.info(f"[{file_basename}] Animation sent successfully after escaping Markdown.")
+                    send_success = True
                     try:
                         escaped_caption = escape_markdown(video_response, version=1)
                         async with message_map_lock:
@@ -452,84 +459,59 @@ async def send_notifications(app, video_response, insignificant_frames, clip_pat
                         logger.warning(f"[{file_basename}] Failed to persist escaped animation mapping: {map_e}")
                 except Exception as retry_error:
                     logger.error(f"[{file_basename}] Failed to send animation after escaping Markdown: {retry_error}. Status: error", exc_info=True)
-                    logger.info(f"[{file_basename}] Sending plain message with button to Telegram...")
-                    try:
-                        sent_message = await app.bot.send_message(
-                            chat_id=CHAT_ID,
-                            text=video_response,
-                            reply_markup=reply_markup,
-                            parse_mode='Markdown'
-                        )
-                        logger.info(f"[{file_basename}] Plain message with button sent successfully.")
-                        try:
-                            async with message_map_lock:
-                                video_message_map[f"{CHAT_ID}:{sent_message.message_id}"] = {"path": file_path, "caption": video_response, "mode": "Markdown"}
-                                save_message_map_to_disk()
-                            logger.info(f"[{file_basename}] Mapped plain message {sent_message.message_id} to video path (persisted).")
-                        except Exception as map_e:
-                            logger.warning(f"[{file_basename}] Failed to persist plain message mapping: {map_e}")
-                    except telegram.error.BadRequest as bad_request_error_fallback:
-                        logger.warning(f"[{file_basename}] BadRequest error on fallback: {bad_request_error_fallback}. Retrying with escaped Markdown.")
+                    if allow_plain_fallback:
+                        logger.info(f"[{file_basename}] Sending plain message with button to Telegram...")
                         try:
                             sent_message = await app.bot.send_message(
                                 chat_id=CHAT_ID,
-                                text=escape_markdown(video_response, version=1),
+                                text=video_response,
                                 reply_markup=reply_markup,
                                 parse_mode='Markdown'
                             )
-                            logger.info(f"[{file_basename}] Message sent successfully after escaping Markdown.")
+                            logger.info(f"[{file_basename}] Plain message with button sent successfully.")
+                            send_success = True
                             try:
-                                escaped_text = escape_markdown(video_response, version=1)
                                 async with message_map_lock:
-                                    video_message_map[f"{CHAT_ID}:{sent_message.message_id}"] = {"path": file_path, "caption": escaped_text, "mode": "Markdown"}
+                                    video_message_map[f"{CHAT_ID}:{sent_message.message_id}"] = {"path": file_path, "caption": video_response, "mode": "Markdown"}
                                     save_message_map_to_disk()
-                                logger.info(f"[{file_basename}] Mapped escaped plain message {sent_message.message_id} to video path (persisted).")
+                                logger.info(f"[{file_basename}] Mapped plain message {sent_message.message_id} to video path (persisted).")
                             except Exception as map_e:
-                                logger.warning(f"[{file_basename}] Failed to persist escaped plain message mapping: {map_e}")
-                        except Exception as e_final_fallback:
-                            logger.error(f"[{file_basename}] Failed to send message after escaping Markdown: {e_final_fallback}", exc_info=True)
-            except Exception as e:
-                logger.error(f"[{file_basename}] Error sending animation: {e}. Status: error", exc_info=True)
-                logger.info(f"[{file_basename}] Sending plain message with button to Telegram...")
-                try:
-                    sent_message = await app.bot.send_message(
-                        chat_id=CHAT_ID,
-                        text=video_response,
-                        reply_markup=reply_markup,
-                        parse_mode='Markdown'
-                    )
-                    logger.info(f"[{file_basename}] Plain message with button sent successfully.")
-                    try:
-                        async with message_map_lock:
-                            video_message_map[f"{CHAT_ID}:{sent_message.message_id}"] = {"path": file_path, "caption": video_response, "mode": "Markdown"}
-                            save_message_map_to_disk()
-                        logger.info(f"[{file_basename}] Mapped plain message {sent_message.message_id} to video path (persisted).")
-                    except Exception as map_e:
-                        logger.warning(f"[{file_basename}] Failed to persist plain message mapping: {map_e}")
-                except telegram.error.BadRequest as bad_request_error:
-                    logger.warning(f"[{file_basename}] BadRequest error: {bad_request_error}. Retrying with escaped Markdown.")
-                    try:
-                        sent_message = await app.bot.send_message(
-                            chat_id=CHAT_ID,
-                            text=escape_markdown(video_response, version=1),
-                            reply_markup=reply_markup,
-                            parse_mode='Markdown'
-                        )
-                        logger.info(f"[{file_basename}] Message sent successfully after escaping Markdown.")
-                        try:
-                            escaped_text = escape_markdown(video_response, version=1)
-                            async with message_map_lock:
-                                video_message_map[f"{CHAT_ID}:{sent_message.message_id}"] = {"path": file_path, "caption": escaped_text, "mode": "Markdown"}
-                                save_message_map_to_disk()
-                            logger.info(f"[{file_basename}] Mapped escaped plain message {sent_message.message_id} to video path (persisted).")
-                        except Exception as map_e:
-                            logger.warning(f"[{file_basename}] Failed to persist escaped plain message mapping: {map_e}")
-                    except Exception as retry_error:
-                        logger.error(f"[{file_basename}] Failed to send message after escaping Markdown: {retry_error}. Status: error", exc_info=True)
-                except Exception as e_send:
-                    logger.error(f"[{file_basename}] Failed to send plain message: {e_send}. Status: error", exc_info=True)
-            finally:
-                await cleanup_temp_media(media_path, file_path, logger, file_basename)
+                                logger.warning(f"[{file_basename}] Failed to persist plain message mapping: {map_e}")
+                        except telegram.error.BadRequest as bad_request_error_fallback:
+                            logger.warning(f"[{file_basename}] BadRequest error on fallback: {bad_request_error_fallback}. Retrying with escaped Markdown.")
+                            try:
+                                sent_message = await app.bot.send_message(
+                                    chat_id=CHAT_ID,
+                                    text=escape_markdown(video_response, version=1),
+                                    reply_markup=reply_markup,
+                                    parse_mode='Markdown'
+                                )
+                                logger.info(f"[{file_basename}] Message sent successfully after escaping Markdown.")
+                                send_success = True
+                                try:
+                                    escaped_text = escape_markdown(video_response, version=1)
+                                    async with message_map_lock:
+                                        video_message_map[f"{CHAT_ID}:{sent_message.message_id}"] = {"path": file_path, "caption": escaped_text, "mode": "Markdown"}
+                                        save_message_map_to_disk()
+                                    logger.info(f"[{file_basename}] Mapped escaped plain message {sent_message.message_id} to video path (persisted).")
+                                except Exception as map_e:
+                                    logger.warning(f"[{file_basename}] Failed to persist escaped plain message mapping: {map_e}")
+                            except Exception as e_final_fallback:
+                                logger.error(f"[{file_basename}] Failed to send message after escaping Markdown: {e_final_fallback}. Status: error", exc_info=True)
+                        except Exception as e_send:
+                            logger.error(f"[{file_basename}] Failed to send plain message: {e_send}. Status: error", exc_info=True)
+                    else:
+                        # Skip plain fallback; propagate so caller can retry later
+                        raise
+
+            # Conditional cleanup: preserve media on failure if requested
+            try:
+                if (not preserve_media_on_failure) or send_success:
+                    await cleanup_temp_media(media_path, file_path, logger, file_basename)
+                else:
+                    logger.info(f"[{file_basename}] Preserving media for retries: {media_path}")
+            except Exception as e_clean:
+                logger.warning(f"[{file_basename}] Cleanup step encountered an error: {e_clean}")
 
         else: # --- This block now handles ALL non-significant videos ---
             video_info = {'text': video_response, 'callback': callback_file, 'timestamp': timestamp_text}

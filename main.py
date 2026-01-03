@@ -282,7 +282,7 @@ if not os.path.exists(OBJECT_DETECTION_MODEL_PATH):
 # Import after .env and logging are configured to ensure modules read env vars
 from analyze_video import analyze_video
 from detect_motion import detect_motion
-from telegram_notification import button_callback, send_notifications, reaction_callback
+from telegram_notification import button_callback, send_notifications, reaction_callback, cleanup_temp_media
 
 
 # Initialize the Application
@@ -413,7 +413,23 @@ class FileHandler(FileSystemEventHandler):
             else:
                 video_response += f"\n\U0001F50B *{battery.percent}% ~{battery_time_left}*"
 
-        await send_notifications(self.app, video_response, insignificant_frames, clip_path, file_path, file_basename, timestamp_text)
+        try:
+            await send_notifications(self.app, video_response, insignificant_frames, clip_path, file_path, file_basename, timestamp_text, preserve_media_on_failure=True, allow_plain_fallback=False)
+            update_processing_ledger(file_path, "completed", {"telegram_status": "sent"})
+        except Exception as e_send:
+            logger.error(f"[{file_basename}] Telegram send failed, scheduling retries: {e_send}")
+            update_processing_ledger(file_path, "completed", {"telegram_status": "failed", "last_error": str(e_send)[:256]})
+            schedule_notification_retries(
+                self.app,
+                video_response,
+                insignificant_frames,
+                clip_path,
+                file_path,
+                file_basename,
+                timestamp_text,
+                delays=(300, 600, 900)
+            )
+            # Do not raise; allow pipeline to finish without blocking future videos
 
 
     async def wait_for_file_stable(self, file_path, file_basename, wait_seconds=2, checks=2):
@@ -522,6 +538,47 @@ def update_processing_ledger(file_path: str, status: str, extra: dict | None = N
     ledger[file_path] = entry
     ledger = prune_processing_ledger(ledger, 20)
     write_processing_ledger(PROCESSING_LEDGER_PATH, ledger)
+
+
+def schedule_notification_retries(app,
+                                  video_response: str,
+                                  insignificant_frames: list,
+                                  clip_path: str | None,
+                                  file_path: str,
+                                  file_basename: str,
+                                  timestamp_text: str,
+                                  delays: tuple[int, ...] = (300, 600, 900)):
+    async def retry_sender():
+        for delay in delays:
+            try:
+                await asyncio.sleep(delay)
+                await send_notifications(app, video_response, insignificant_frames, clip_path, file_path, file_basename, timestamp_text, preserve_media_on_failure=True, allow_plain_fallback=False)
+                logger.info(f"[{file_basename}] Telegram retry succeeded after {delay} seconds.")
+                update_processing_ledger(file_path, "completed", {"telegram_status": "sent_retry", "retry_delay": delay, "end_ts": time.time()})
+                return
+            except Exception as e:
+                logger.error(f"[{file_basename}] Telegram retry failed after {delay} seconds: {e}")
+                update_processing_ledger(file_path, "completed", {"telegram_status": "retry_failed", "last_error": str(e)[:256]})
+                continue
+        logger.warning(f"[{file_basename}] Telegram retries exhausted; attempting plain message.")
+        try:
+            # Final attempt: allow plain fallback
+            await send_notifications(app, video_response, insignificant_frames, clip_path, file_path, file_basename, timestamp_text, preserve_media_on_failure=True, allow_plain_fallback=True)
+            update_processing_ledger(file_path, "completed", {"telegram_status": "sent_plain_after_retries", "end_ts": time.time()})
+        except Exception as e_final:
+            logger.error(f"[{file_basename}] Final plain message attempt failed: {e_final}")
+            update_processing_ledger(file_path, "completed", {"telegram_status": "final_plain_failed", "last_error": str(e_final)[:256]})
+        try:
+            if clip_path:
+                await cleanup_temp_media(clip_path, file_path, logger, file_basename)
+        except Exception as e_clean:
+            logger.warning(f"[{file_basename}] Cleanup after exhausted retries failed: {e_clean}")
+
+    try:
+        asyncio.create_task(retry_sender(), name=f"TelegramRetry-{file_basename}")
+    except Exception:
+        # Fallback: run without named task
+        asyncio.create_task(retry_sender())
 
 
 async def recover_missed_files_since(since_ts: float):
