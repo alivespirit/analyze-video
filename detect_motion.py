@@ -472,12 +472,12 @@ def detect_motion(input_video_path, output_dir):
         duration_frames = end_frame - start_frame
         duration_seconds = duration_frames / fps
         if duration_seconds >= MIN_EVENT_DURATION_SECONDS:
-            logger.info(f"[{file_basename}]   - Event lasting {duration_seconds:.2f}s is SIGNIFICANT. Will process with tracker.")
+            logger.info(f"[{file_basename}]   - Event at {(start_frame / fps):.1f}s lasting {duration_seconds:.2f}s is SIGNIFICANT. Will process with tracker.")
             significant_sub_clips.append((start_frame, end_frame))
         elif duration_seconds >= MIN_INSIGNIFICANT_EVENT_DURATION_SECONDS:
             all_shorter_than_insignificant = False
             if SEND_INSIGNIFICANT_FRAMES:
-                logger.info(f"[{file_basename}]   - Event lasting {duration_seconds:.2f}s is insignificant. Extracting frame.")
+                logger.info(f"[{file_basename}]   - Event at {(start_frame / fps):.1f}s lasting {duration_seconds:.2f}s is insignificant. Extracting frame.")
                 mid_frame_index = start_frame + (end_frame - start_frame) // 2
 
                 cap.set(cv2.CAP_PROP_POS_FRAMES, mid_frame_index)
@@ -509,9 +509,9 @@ def detect_motion(input_video_path, output_dir):
                     #insignificant_motion_frames.append(frame_path) # disabled to keep frames for further analysis only
                     logger.info(f"[{file_basename}] Saved insignificant motion frame to {frame_path}")
             else:
-                logger.info(f"[{file_basename}]   - Event lasting {duration_seconds:.2f}s is insignificant. Skipping frame extraction.")
+                logger.info(f"[{file_basename}]   - Event at {(start_frame / fps):.1f}s lasting {duration_seconds:.2f}s is insignificant. Skipping frame extraction.")
         else:
-            logger.info(f"[{file_basename}]   - Event lasting {duration_seconds:.2f}s is too short. Discarding as noise/shadow.")
+            logger.info(f"[{file_basename}]   - Event at {(start_frame / fps):.1f}s lasting {duration_seconds:.2f}s is too short. Discarding as noise/shadow.")
 
     # If all sub-clips were shorter than the insignificant threshold, treat as no motion
     if not significant_sub_clips and all_shorter_than_insignificant:
@@ -925,7 +925,7 @@ def detect_motion(input_video_path, output_dir):
 
         # Decide whether to include this event based on person frames within ROI
         if person_frames_in_roi >= PERSON_MIN_FRAMES:
-            logger.info(f"[{file_basename}] Event kept: person present in ROI for {person_frames_in_roi} frames (>= {PERSON_MIN_FRAMES}).")
+            logger.info(f"[{file_basename}] Event #{clip_index + 1} at {(start_frame / fps):.1f}s kept: person present in ROI for {person_frames_in_roi} frames (>= {PERSON_MIN_FRAMES}).")
             all_clip_frames_rgb.extend(event_frames_rgb)
             # Merge event stats into overall
             unique_objects_detected['person'].update(event_unique_objects['person'])
@@ -933,7 +933,7 @@ def detect_motion(input_video_path, output_dir):
             persons_up += event_persons_up
             persons_down += event_persons_down
         else:
-            logger.info(f"[{file_basename}] Event discarded: person in ROI only {person_frames_in_roi} frames (< {PERSON_MIN_FRAMES}).")
+            logger.info(f"[{file_basename}] Event #{clip_index + 1} at {(start_frame / fps):.1f}s discarded: person in ROI only {person_frames_in_roi} frames (< {PERSON_MIN_FRAMES}).")
             # Save a representative middle frame for significant-but-no-person events
             if SEND_INSIGNIFICANT_FRAMES:
                 try:
