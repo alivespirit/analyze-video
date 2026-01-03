@@ -514,7 +514,7 @@ def write_processing_ledger(path: str, ledger: dict):
         logger.error(f"Failed to write processing ledger '{path}': {e}")
 
 
-def prune_processing_ledger(ledger: dict, max_entries: int = 20) -> dict:
+def prune_processing_ledger(ledger: dict, max_entries: int = 100) -> dict:
     """Keep only the last `max_entries` entries by most recent timestamp (end_ts/start_ts)."""
     try:
         items = []
@@ -536,7 +536,7 @@ def update_processing_ledger(file_path: str, status: str, extra: dict | None = N
     if extra:
         entry.update(extra)
     ledger[file_path] = entry
-    ledger = prune_processing_ledger(ledger, 20)
+    ledger = prune_processing_ledger(ledger, 100)
     write_processing_ledger(PROCESSING_LEDGER_PATH, ledger)
 
 
@@ -567,7 +567,7 @@ def schedule_notification_retries(app,
             update_processing_ledger(file_path, "completed", {"telegram_status": "sent_plain_after_retries", "end_ts": time.time()})
         except Exception as e_final:
             logger.error(f"[{file_basename}] Final plain message attempt failed: {e_final}")
-            update_processing_ledger(file_path, "completed", {"telegram_status": "final_plain_failed", "last_error": str(e_final)[:256]})
+            update_processing_ledger(file_path, "failed", {"telegram_status": "final_plain_failed", "last_error": str(e_final)[:256]})
         try:
             if clip_path:
                 await cleanup_temp_media(clip_path, file_path, logger, file_basename)
