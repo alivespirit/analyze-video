@@ -14,9 +14,6 @@ This project is a Python-based application that monitors a folder for new video 
   - **Smart Event Filtering**: Differentiates between significant, insignificant, and noisy motion events based on duration.
   - **Highlight Clips**: Generates clips for significant motion with tracked objects and bounding boxes. Long events are automatically sped up (2x).
   - **Insignificant Motion Snapshots**: Extracts and sends a single frame for brief motion events, now with object detection boxes drawn on them.
-- **Tesla Integration (Optional)**:
-  - **State of Charge (SoC) Display**: If a car is detected in a predefined location, the bot fetches the Tesla's SoC and displays it directly on the video highlight clip.
-  - **Efficient Caching**: Caches the SoC in `tesla_soc.txt` and only queries the API periodically or when the cache is stale to avoid waking the vehicle unnecessarily.
 - **Dynamic Gemini AI Analysis**:
   - **Time-Based Model Selection**: Automatically switches between different Gemini models (e.g., Pro vs. Flash) based on the time of day for cost optimization.
   - **Fallback Models**: Includes logic to fall back to secondary and final models if the primary one fails.
@@ -25,6 +22,9 @@ This project is a Python-based application that monitors a folder for new video 
   - **Grouped Notifications**: Combines multiple insignificant/no-motion events into a single, editable Telegram message to reduce clutter.
   - **Interactive Callbacks**: Allows users to request the full original video via inline buttons.
   - **Media Handling**: Sends highlight clips as animations and insignificant motion as photos.
+- **Tesla Integration (Optional)**:
+  - **State of Charge (SoC) Display**: If a car is detected in a predefined location, the bot fetches the Tesla's SoC and displays it directly on the video highlight clip.
+  - **Efficient Caching**: Caches the SoC in `tesla_soc.txt` and only queries the API periodically or when the cache is stale to avoid waking the vehicle unnecessarily.
 - **Performance & Stability**:
   - **Dual-Executor Design**: Uses separate, single-worker thread pools for CPU-bound (video analysis) and I/O-bound (API calls) tasks to prevent system overload.
   - **Graceful Shutdown & Auto-Restart**: Automatically restarts the script if any of the Python files is modified, with robust shutdown logic.
@@ -170,6 +170,13 @@ pip install -r requirements.txt
 
 5. **Self-Monitoring & Auto-Restart:**
    - A separate `watchdog` instance monitors `*.py`. If any Python file is modified, it triggers a graceful shutdown and restarts the script.
+   - Restart Recovery: To avoid losing files that appear during the restart window, the app writes a restart marker and, on startup, performs a short recovery pass:
+     - It scans recent `YYYYMMDDHH` directories for new `.mp4` files and also consults a small processing ledger in `temp/processing_ledger.json`.
+     - Files marked as `completed` in the ledger are skipped to prevent duplicates.
+     - Files marked as `started` or `failed` within the window are re-queued even if their file `mtime` falls outside the window, ensuring in-progress items are not missed.
+     - The recovery window is controlled by `RESTART_RECOVERY_WINDOW_SECONDS` (default 180 seconds).
+     - The ledger is pruned to the last 20 entries (most recent by `end_ts`/`start_ts`) to keep it small.
+     - A concise summary is logged at the end of recovery with counts of candidates (by source), processed, and failures.
 
 ---
 
