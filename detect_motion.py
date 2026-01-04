@@ -925,7 +925,7 @@ def detect_motion(input_video_path, output_dir):
 
         # Decide whether to include this event based on person frames within ROI
         if person_frames_in_roi >= PERSON_MIN_FRAMES:
-            logger.info(f"[{file_basename}] Event #{clip_index + 1} at {(start_frame / fps):.1f}s kept: person present in ROI for {person_frames_in_roi} frames (>= {PERSON_MIN_FRAMES}).")
+            logger.info(f"[{file_basename}] Event at {(start_frame / fps):.1f}s kept: person present in ROI for {person_frames_in_roi} frames (>= {PERSON_MIN_FRAMES}).")
             all_clip_frames_rgb.extend(event_frames_rgb)
             # Merge event stats into overall
             unique_objects_detected['person'].update(event_unique_objects['person'])
@@ -933,7 +933,7 @@ def detect_motion(input_video_path, output_dir):
             persons_up += event_persons_up
             persons_down += event_persons_down
         else:
-            logger.info(f"[{file_basename}] Event #{clip_index + 1} at {(start_frame / fps):.1f}s discarded: person in ROI only {person_frames_in_roi} frames (< {PERSON_MIN_FRAMES}).")
+            logger.info(f"[{file_basename}] Event at {(start_frame / fps):.1f}s discarded: person in ROI only {person_frames_in_roi} frames (< {PERSON_MIN_FRAMES}).")
             # Save a representative middle frame for significant-but-no-person events
             if SEND_INSIGNIFICANT_FRAMES:
                 try:
