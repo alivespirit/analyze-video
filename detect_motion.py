@@ -766,13 +766,18 @@ def detect_motion(input_video_path, output_dir):
                                     event_cross_dirs[entity_id].add('down')
                                 # Visual highlight and force frame inclusion
                                 frame_has_crossing = True
-                                event_highlight_until[entity_id] = max(event_highlight_until.get(entity_id, 0), frame_idx + HIGHLIGHT_WINDOW_FRAMES)
                                 # Ensure display id exists for this entity
                                 if label_name == 'person':
                                     disp_id = event_entity_display_ids.get(entity_id)
                                 else:
                                     disp_id = None
-                                draw_tracked_box(frame, box, local_id, label_name, conf, soc, highlight=True, display_id=disp_id)
+                                # Highlight if currently in tolerance or still within minimum highlight window
+                                in_tol_now = abs(y_center - LINE_Y) <= LINE_Y_TOLERANCE if label_name == 'person' else False
+                                window_active = (event_highlight_until.get(entity_id, 0) >= frame_idx) if label_name == 'person' else False
+                                highlight_active = in_tol_now or window_active
+                                if highlight_active:
+                                    frame_has_highlight = True
+                                draw_tracked_box(frame, box, local_id, label_name, conf, soc, highlight=highlight_active, display_id=disp_id)
                                 logger.debug(f"[{file_basename}] Person p{disp_id} re-acquired at frame {frame_idx}; side changed {prev_global_side} -> {current_side} (inferred crossing)")
                                 # Skip normal draw below for this object to avoid double drawing
                                 event_last_side_global[global_id] = current_side
@@ -805,6 +810,8 @@ def detect_motion(input_video_path, output_dir):
                             was_in_tol = event_in_tolerance.get(entity_id, False)
                             if in_tol and not was_in_tol and label_name == 'person':
                                 logger.debug(f"[{file_basename}] Person p{disp_id} entered line tolerance at frame {frame_idx}")
+                                # Start a minimum highlight window from the entry moment
+                                event_highlight_until[entity_id] = max(event_highlight_until.get(entity_id, 0), frame_idx + HIGHLIGHT_WINDOW_FRAMES)
                             elif (not in_tol) and was_in_tol and label_name == 'person':
                                 logger.debug(f"[{file_basename}] Person p{disp_id} left line tolerance at frame {frame_idx}")
                             event_in_tolerance[entity_id] = in_tol
@@ -854,7 +861,6 @@ def detect_motion(input_video_path, output_dir):
                             event_last_side[entity_id] = current_side
                             if visual_crossed:
                                 frame_has_crossing = True
-                                event_highlight_until[entity_id] = max(event_highlight_until.get(entity_id, 0), frame_idx + HIGHLIGHT_WINDOW_FRAMES)
                                 # Person-in-ROI check for this detection (so crossing frames still count toward ROI presence)
                                 cx = int((box[0] + box[2]) / 2)
                                 cy = int((box[1] + box[3]) / 2)
@@ -869,7 +875,13 @@ def detect_motion(input_video_path, output_dir):
                                     disp_id = event_entity_display_ids[entity_id]
                                 else:
                                     disp_id = None
-                                draw_tracked_box(frame, box, local_id, label_name, conf, soc, highlight=True, display_id=disp_id)
+                                # Highlight if in tolerance or within minimum highlight window
+                                in_tol_now = abs(y_center - LINE_Y) <= LINE_Y_TOLERANCE if label_name == 'person' else False
+                                window_active = (event_highlight_until.get(entity_id, 0) >= frame_idx) if label_name == 'person' else False
+                                highlight_active = in_tol_now or window_active
+                                if highlight_active:
+                                    frame_has_highlight = True
+                                draw_tracked_box(frame, box, local_id, label_name, conf, soc, highlight=highlight_active, display_id=disp_id)
                                 if label_name == 'person':
                                     logger.debug(f"[{file_basename}] Person p{disp_id} visually crossed the line at frame {frame_idx} (prev_y={prev_y} -> y={y_center})")
                                 # Skip normal draw below for this object to avoid double drawing
@@ -885,12 +897,14 @@ def detect_motion(input_video_path, output_dir):
                         if cv2.pointPolygonTest(roi_polygon_cv, (cx, cy), False) >= 0:
                             frame_has_person_in_roi = True
 
-                    # Apply forward highlight window for persons who recently crossed
+                    # Highlight when in tolerance OR still within minimum highlight window
                     highlight_active = False
                     if label_name == 'person':
+                        in_tol_now = abs(y_center - LINE_Y) <= LINE_Y_TOLERANCE
                         eid = event_global_to_entity.get(global_id)
-                        if eid is not None and event_highlight_until.get(eid, 0) >= frame_idx:
-                            highlight_active = True
+                        window_active = (event_highlight_until.get(eid, 0) >= frame_idx) if eid is not None else False
+                        highlight_active = in_tol_now or window_active
+                        if highlight_active:
                             frame_has_highlight = True
                     # Determine display id for person labels
                     disp_id = None
