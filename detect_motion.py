@@ -588,6 +588,8 @@ def detect_motion(input_video_path, output_dir):
         event_stable_since = {}
         event_stable_frames = {}
         event_pending_cross = {}  # entity_id -> {'dir': 'up'|'down', 'since_frame': int}
+        # Track if entity is inside line tolerance band to reduce log spam
+        event_in_tolerance = {}
         # Stable display IDs per entity (for persons)
         event_entity_display_ids = {}
         event_display_id_counter = 1
@@ -739,6 +741,14 @@ def detect_motion(input_video_path, output_dir):
                         frame_assigned_entities.add(entity_id)
                         event_global_to_entity[global_id] = entity_id
 
+                        # Ensure display id exists early for logging clarity
+                        disp_id = None
+                        if label_name == 'person':
+                            if entity_id not in event_entity_display_ids:
+                                event_entity_display_ids[entity_id] = event_display_id_counter
+                                event_display_id_counter += 1
+                            disp_id = event_entity_display_ids[entity_id]
+
                         # Previous side seen for this tracker id (global)
                         prev_global_side = event_last_side_global.get(global_id)
                         if entity_id not in event_prev_y:
@@ -759,33 +769,45 @@ def detect_motion(input_video_path, output_dir):
                                 event_highlight_until[entity_id] = max(event_highlight_until.get(entity_id, 0), frame_idx + HIGHLIGHT_WINDOW_FRAMES)
                                 # Ensure display id exists for this entity
                                 if label_name == 'person':
-                                    if entity_id not in event_entity_display_ids:
-                                        event_entity_display_ids[entity_id] = event_display_id_counter
-                                        event_display_id_counter += 1
-                                    disp_id = event_entity_display_ids[entity_id]
+                                    disp_id = event_entity_display_ids.get(entity_id)
                                 else:
                                     disp_id = None
                                 draw_tracked_box(frame, box, local_id, label_name, conf, soc, highlight=True, display_id=disp_id)
+                                logger.debug(f"[{file_basename}] Person p{disp_id} re-acquired at frame {frame_idx}; side changed {prev_global_side} -> {current_side} (inferred crossing)")
                                 # Skip normal draw below for this object to avoid double drawing
                                 event_last_side_global[global_id] = current_side
                                 continue
                             else:
                                 event_first_side[entity_id] = current_side
                                 event_last_side[entity_id] = current_side
+                                if label_name == 'person':
+                                    logger.debug(f"[{file_basename}] Person p{disp_id} appeared at frame {frame_idx} {current_side} the line")
                         else:
                             prev_y = event_prev_y[entity_id]
                             visual_crossed = False
                             # Apply tolerance band to reduce jitter-based flips
                             if prev_y <= LINE_Y - LINE_Y_TOLERANCE and y_center >= LINE_Y + LINE_Y_TOLERANCE:
                                 event_cross_dirs[entity_id].add('down')
+                                if label_name == 'person':
+                                    logger.debug(f"[{file_basename}] Person p{disp_id} logical crossing 'down' detected at frame {frame_idx} (tolerance band)")
                             elif prev_y >= LINE_Y + LINE_Y_TOLERANCE and y_center <= LINE_Y - LINE_Y_TOLERANCE:
                                 event_cross_dirs[entity_id].add('up')
+                                if label_name == 'person':
+                                    logger.debug(f"[{file_basename}] Person p{disp_id} logical crossing 'up' detected at frame {frame_idx} (tolerance band)")
                             # Hysteresis-based crossing + dwell gating: use stable side outside tolerance band
                             current_stable_side = None
                             if y_center <= LINE_Y - LINE_Y_TOLERANCE:
                                 current_stable_side = 'above'
                             elif y_center >= LINE_Y + LINE_Y_TOLERANCE:
                                 current_stable_side = 'below'
+                            # Track entry into tolerance band for explicit logging
+                            in_tol = abs(y_center - LINE_Y) <= LINE_Y_TOLERANCE
+                            was_in_tol = event_in_tolerance.get(entity_id, False)
+                            if in_tol and not was_in_tol and label_name == 'person':
+                                logger.debug(f"[{file_basename}] Person p{disp_id} entered line tolerance at frame {frame_idx}")
+                            elif (not in_tol) and was_in_tol and label_name == 'person':
+                                logger.debug(f"[{file_basename}] Person p{disp_id} left line tolerance at frame {frame_idx}")
+                            event_in_tolerance[entity_id] = in_tol
                             # Update stability counters
                             if current_stable_side is not None:
                                 event_stable_frames[entity_id] = event_stable_frames.get(entity_id, 0) + 1
@@ -800,6 +822,8 @@ def detect_motion(input_video_path, output_dir):
                                     # Clear any stale pending
                                     if entity_id in event_pending_cross:
                                         del event_pending_cross[entity_id]
+                                    if label_name == 'person':
+                                        logger.debug(f"[{file_basename}] Person p{disp_id} stable '{current_stable_side}' at frame {frame_idx}")
                                 elif current_stable_side != prev_stable:
                                     # Stable side changed → start pending crossing that must pass dwell
                                     new_dir = None
@@ -811,6 +835,8 @@ def detect_motion(input_video_path, output_dir):
                                     event_stable_since[entity_id] = frame_idx
                                     if new_dir is not None:
                                         event_pending_cross[entity_id] = {'dir': new_dir, 'since_frame': frame_idx}
+                                        if label_name == 'person':
+                                            logger.debug(f"[{file_basename}] Person p{disp_id} stable side changed to '{current_stable_side}' at frame {frame_idx}; pending '{new_dir}' crossing started")
                                 else:
                                     # Staying on same stable side → if pending for this side, confirm after dwell time
                                     pend = event_pending_cross.get(entity_id)
@@ -819,6 +845,8 @@ def detect_motion(input_video_path, output_dir):
                                         if dwell_frames >= int(DWELL_SECONDS * fps):
                                             event_cross_dirs[entity_id].add(pend['dir'])
                                             del event_pending_cross[entity_id]
+                                            if label_name == 'person':
+                                                logger.debug(f"[{file_basename}] Person p{disp_id} crossing '{pend['dir']}' confirmed after dwell ({dwell_frames} frames) at frame {frame_idx}")
                             # Visual crossing detection without tolerance (for highlight only)
                             if (prev_y < LINE_Y <= y_center) or (prev_y > LINE_Y >= y_center):
                                 visual_crossed = True
@@ -842,6 +870,8 @@ def detect_motion(input_video_path, output_dir):
                                 else:
                                     disp_id = None
                                 draw_tracked_box(frame, box, local_id, label_name, conf, soc, highlight=True, display_id=disp_id)
+                                if label_name == 'person':
+                                    logger.debug(f"[{file_basename}] Person p{disp_id} visually crossed the line at frame {frame_idx} (prev_y={prev_y} -> y={y_center})")
                                 # Skip normal draw below for this object to avoid double drawing
                                 continue
 
