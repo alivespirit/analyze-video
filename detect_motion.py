@@ -59,7 +59,7 @@ COLOR_DEFAULT = (255, 255, 255)
 COLOR_HIGHLIGHT = (80, 90, 245)
 COLOR_LINE = (0, 255, 255)
 LINE_Y_TOLERANCE = 6
-HIGHLIGHT_WINDOW_FRAMES = 5
+HIGHLIGHT_WINDOW_FRAMES = 5 # Minimum highlight duration (frames) after entering tolerance band
 STABLE_MIN_FRAMES = 2  # frames outside tolerance required to confirm stable side
 DWELL_SECONDS = 2.0    # seconds to stay on the other side to confirm a crossing
 
@@ -582,6 +582,7 @@ def detect_motion(input_video_path, output_dir):
         event_last_side = {}
         event_prev_y = {}
         event_cross_dirs = {}
+        # Minimum highlight window per entity: starts when entering tolerance
         event_highlight_until = {}
         # Stable-side tracking and dwell confirmation per entity
         event_stable_side = {}
@@ -764,7 +765,7 @@ def detect_motion(input_video_path, output_dir):
                                     event_cross_dirs[entity_id].add('up')
                                 elif prev_global_side == 'above' and current_side == 'below':
                                     event_cross_dirs[entity_id].add('down')
-                                # Visual highlight and force frame inclusion
+                                # Mark crossing for frame inclusion; highlight is based on tolerance or window
                                 frame_has_crossing = True
                                 # Ensure display id exists for this entity
                                 if label_name == 'person':
