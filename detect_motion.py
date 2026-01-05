@@ -27,6 +27,7 @@ SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 # --- Motion detection configuration ---
 MIN_CONTOUR_AREA = 1800
 ROI_CONFIG_FILE = os.path.join(SCRIPT_DIR, "roi.json")
+TRACK_ROI_CONFIG_FILE = os.path.join(SCRIPT_DIR, "tracker_roi.json")
 PADDING_SECONDS = 1.5
 WARMUP_FRAMES = 15
 MAX_EVENT_GAP_SECONDS = 3.0
@@ -41,6 +42,7 @@ TRACK_SKIP_FROM_SECONDS = 12.0
 SAVE_INSIGNIFICANT_FRAMES = True
 SEND_INSIGNIFICANT_FRAMES = False
 CROP_PADDING = 30
+TRACK_ROI_PADDING = 10  # padding for tracker ROI bounding box
 PERSON_MIN_FRAMES = 10
 
 # --- Tesla config ---
@@ -54,6 +56,7 @@ TESLA_SOC_CHECK_ENABLED = bool(teslapy and TESLA_REFRESH_TOKEN and TESLA_EMAIL)
 OBJECT_DETECTION_MODEL_PATH = os.getenv("OBJECT_DETECTION_MODEL_PATH", default="best_openvino_model")
 CONF_THRESHOLD = 0.5
 DETECT_CLASSES = [0, 1]  # 0: person, 1: car
+TRACK_ROI_ENABLED = False  # Enable tracker ROI crop (from tracker_roi.json)
 LINE_Y = 860
 COLOR_PERSON = (100, 200, 0)
 COLOR_CAR = (200, 120, 0)
@@ -422,6 +425,27 @@ def detect_motion(input_video_path, output_dir):
 
     analysis_roi_points = local_roi_points.astype(np.int32)
 
+    # Optional: Load tracker-specific ROI and compute a fixed crop bounding box (guarded by TRACK_ROI_ENABLED)
+    track_roi_bbox = None
+    if TRACK_ROI_ENABLED:
+        track_roi_poly_points = load_roi(TRACK_ROI_CONFIG_FILE)
+        if track_roi_poly_points is not None and len(track_roi_poly_points) >= 3:
+            tx_coords = track_roi_poly_points[:, 0]
+            ty_coords = track_roi_poly_points[:, 1]
+            tx1 = max(0, int(np.min(tx_coords) - TRACK_ROI_PADDING))
+            ty1 = max(0, int(np.min(ty_coords) - TRACK_ROI_PADDING))
+            tx2 = min(orig_w, int(np.max(tx_coords) + TRACK_ROI_PADDING))
+            ty2 = min(orig_h, int(np.max(ty_coords) + TRACK_ROI_PADDING))
+            if tx2 > tx1 and ty2 > ty1:
+                track_roi_bbox = (tx1, ty1, tx2, ty2)
+                logger.info("[%s] Using tracker ROI crop: %dx%d at (%d,%d)", file_basename, tx2 - tx1, ty2 - ty1, tx1, ty1)
+            else:
+                logger.warning("[%s] Invalid tracker ROI bbox computed; falling back to full frame.", file_basename)
+        else:
+            logger.debug("[%s] Tracker ROI enabled but tracker_roi.json not found or invalid; tracking full frame.", file_basename)
+    else:
+        logger.debug("[%s] Tracker ROI disabled; tracking full frame.", file_basename)
+
     backSub = cv2.createBackgroundSubtractorKNN(history=500, dist2Threshold=600, detectShadows=True)
     roi_mask = np.zeros((crop_h, crop_w), dtype=np.uint8)
     cv2.fillPoly(roi_mask, [analysis_roi_points], 255)
@@ -675,7 +699,17 @@ def detect_motion(input_video_path, output_dir):
             if not ret or frame is None:
                 continue
 
-            results = object_detection_model.track(frame, imgsz=640, conf=CONF_THRESHOLD, persist=True, verbose=False, tracker="tracker.yaml", classes=DETECT_CLASSES)
+            # Apply tracker ROI crop if available
+            if track_roi_bbox is not None:
+                tx1, ty1, tx2, ty2 = track_roi_bbox
+                track_frame = frame[ty1:ty2, tx1:tx2]
+            else:
+                track_frame = frame
+
+            results = object_detection_model.track(
+                track_frame, imgsz=640, conf=CONF_THRESHOLD, persist=True, verbose=False,
+                tracker="tracker.yaml", classes=DETECT_CLASSES
+            )
 
             # Count whether this frame contains a person within ROI and whether any crossing/highlight happens
             frame_has_person_in_roi = False
@@ -684,6 +718,14 @@ def detect_motion(input_video_path, output_dir):
 
             if results[0].boxes.id is not None:
                 boxes = results[0].boxes.xyxy.cpu().tolist()
+                # Offset boxes back to global coordinates if we tracked on a crop
+                if track_roi_bbox is not None:
+                    tx1, ty1, tx2, ty2 = track_roi_bbox
+                    for i in range(len(boxes)):
+                        boxes[i][0] += tx1
+                        boxes[i][1] += ty1
+                        boxes[i][2] += tx1
+                        boxes[i][3] += ty1
                 global_ids = results[0].boxes.id.int().cpu().tolist()
                 clss = results[0].boxes.cls.int().cpu().tolist()
                 confs = results[0].boxes.conf.float().cpu().tolist()
