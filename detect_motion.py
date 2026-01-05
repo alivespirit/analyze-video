@@ -38,7 +38,8 @@ MIN_INSIGNIFICANT_EVENT_DURATION_SECONDS = 0.2
 # > TRACK_SKIP_FROM_SECONDS: track every 2nd frame, render every 2nd frame (legacy behavior)
 TRACK_FULL_UNTIL_SECONDS = 6.0
 TRACK_SKIP_FROM_SECONDS = 12.0
-SEND_INSIGNIFICANT_FRAMES = True
+SAVE_INSIGNIFICANT_FRAMES = True
+SEND_INSIGNIFICANT_FRAMES = False
 CROP_PADDING = 30
 PERSON_MIN_FRAMES = 10
 
@@ -52,6 +53,7 @@ TESLA_SOC_CHECK_ENABLED = bool(teslapy and TESLA_REFRESH_TOKEN and TESLA_EMAIL)
 # --- Object Detection Configuration ---
 OBJECT_DETECTION_MODEL_PATH = os.getenv("OBJECT_DETECTION_MODEL_PATH", default="best_openvino_model")
 CONF_THRESHOLD = 0.5
+DETECT_CLASSES = [0, 1]  # 0: person, 1: car
 LINE_Y = 860
 COLOR_PERSON = (100, 200, 0)
 COLOR_CAR = (200, 120, 0)
@@ -270,6 +272,64 @@ def draw_event_overlay(frame, event_idx, total_events, seconds_from_start):
     cv2.putText(frame, text, (text_x, text_y), font, font_scale, (255, 255, 255), thickness, cv2.LINE_AA)
 
 
+def detect_draw_and_save_snapshot(frame, soc, output_dir, input_video_path, file_basename, mid_frame_index, tag, classes=None):
+    """
+    Runs a single-frame detection (no tracking), draws boxes and overlays, and saves JPEG.
+
+    Args:
+        frame (np.ndarray): BGR frame to analyze and draw on.
+        soc (int | None): Tesla SoC for labeling if applicable.
+        output_dir (str): Base output directory to save the snapshot under a daily subfolder.
+        input_video_path (str): Full input path to derive camera/time prefix.
+        file_basename (str): Basename of the input file for logging/prefix.
+        mid_frame_index (int): Frame index used for naming the snapshot.
+        tag (str): Label for the snapshot type, e.g., 'insignificant' or 'no_person'.
+        classes (list[int] | None): Optional class indices to detect (Ultralytics). Defaults to DETECT_CLASSES.
+
+    Returns:
+        tuple[str | None, int]: (saved path or None on failure, number of detections drawn)
+    """
+    if classes is None:
+        classes = DETECT_CLASSES
+    try:
+        results = object_detection_model.predict(frame, imgsz=640, conf=CONF_THRESHOLD, verbose=False, classes=classes)
+    except Exception as e:
+        logger.warning("[%s] Snapshot detection failed: %s", file_basename, e)
+        return None
+
+    try:
+        if results and results[0].boxes is not None:
+            boxes = results[0].boxes.xyxy.cpu().tolist()
+            clss = results[0].boxes.cls.int().cpu().tolist()
+            confs = results[0].boxes.conf.float().cpu().tolist()
+            class_names = object_detection_model.names
+
+            local_id_counter = 1
+            for box, cls, conf in zip(boxes, clss, confs):
+                label_name = class_names[cls]
+                draw_tracked_box(frame, box, local_id_counter, label_name, conf, soc, highlight=False, display_id=None)
+                local_id_counter += 1
+
+        # Draw line overlay similar to main path
+        cv2.line(frame, (0, LINE_Y), (frame.shape[1], LINE_Y), COLOR_LINE, 1)
+        cv2.putText(frame, f"Hvirtka Y={LINE_Y}", (10, LINE_Y - 10),
+                    cv2.FONT_HERSHEY_DUPLEX, 1, COLOR_LINE, 1, cv2.LINE_AA)
+
+        # Save to daily folder inside output dir (YYYYMMDD)
+        date_folder = datetime.now().strftime("%Y%m%d")
+        daily_dir = os.path.join(output_dir, date_folder)
+        os.makedirs(daily_dir, exist_ok=True)
+        cam_prefix = input_video_path.split(os.path.sep)[-2][-2:] if len(input_video_path.split(os.path.sep)) >= 2 else ""
+        frame_filename = f"{cam_prefix}H{os.path.splitext(file_basename)[0]}_{tag}_{mid_frame_index}.jpg"
+        frame_path = os.path.join(daily_dir, frame_filename)
+        cv2.imwrite(frame_path, frame, [cv2.IMWRITE_JPEG_QUALITY, 85])
+        logger.info("[%s] Saved %s frame to %s", file_basename, tag, frame_path)
+        return frame_path
+    except Exception as e:
+        logger.warning("[%s] Failed to save %s frame: %s", file_basename, tag, e)
+        return None
+
+
 # --- Lightweight geometry helpers for entity matching ---
 def _box_area(b):
     return max(1.0, float(max(0.0, b[2] - b[0]) * max(0.0, b[3] - b[1])))
@@ -366,7 +426,7 @@ def detect_motion(input_video_path, output_dir):
     roi_mask = np.zeros((crop_h, crop_w), dtype=np.uint8)
     cv2.fillPoly(roi_mask, [analysis_roi_points], 255)
 
-    logger.debug(f"[{file_basename}] Starting smart background model pre-training...")
+    logger.debug("[%s] Starting smart background model pre-training...", file_basename)
     pre_trained = False
     training_candidate_times = [30, 40, 50, 20]
 
@@ -476,38 +536,25 @@ def detect_motion(input_video_path, output_dir):
             significant_sub_clips.append((start_frame, end_frame))
         elif duration_seconds >= MIN_INSIGNIFICANT_EVENT_DURATION_SECONDS:
             all_shorter_than_insignificant = False
-            if SEND_INSIGNIFICANT_FRAMES:
+            if SAVE_INSIGNIFICANT_FRAMES:
                 logger.info(f"[{file_basename}]   - Event at {(start_frame / fps):.1f}s lasting {duration_seconds:.2f}s is insignificant. Extracting frame.")
                 mid_frame_index = start_frame + (end_frame - start_frame) // 2
 
                 cap.set(cv2.CAP_PROP_POS_FRAMES, mid_frame_index)
                 ret, frame = cap.read()
                 if ret:
-                    results = object_detection_model.track(frame, imgsz=640, conf=CONF_THRESHOLD, persist=False, verbose=False)
-                    if results[0].boxes.id is not None:
-                        boxes = results[0].boxes.xyxy.cpu().tolist()
-                        clss = results[0].boxes.cls.int().cpu().tolist()
-                        confs = results[0].boxes.conf.float().cpu().tolist()
-                        class_names = object_detection_model.names
-
-                        local_id_counter = 1
-                        for box, cls, conf in zip(boxes, clss, confs):
-                            label_name = class_names[cls]
-                            draw_tracked_box(frame, box, local_id_counter, label_name, conf, soc, highlight=False, display_id=None)
-                            local_id_counter += 1
-
-                    # Save to daily folder inside output dir (YYYYMMDD)
-                    date_folder = datetime.now().strftime("%Y%m%d")
-                    daily_dir = os.path.join(output_dir, date_folder)
-                    os.makedirs(daily_dir, exist_ok=True)
-                    frame_filename = f"{input_video_path.split(os.path.sep)[-2][-2:]}H{os.path.splitext(file_basename)[0]}_insignificant_{mid_frame_index}.jpg"
-                    frame_path = os.path.join(daily_dir, frame_filename)
-                    cv2.line(frame, (0, LINE_Y), (orig_w, LINE_Y), COLOR_LINE, 1)
-                    cv2.putText(frame, f"Hvirtka Y={LINE_Y}", (10, LINE_Y - 10),
-                            cv2.FONT_HERSHEY_DUPLEX, 1, COLOR_LINE, 1, cv2.LINE_AA)
-                    cv2.imwrite(frame_path, frame, [cv2.IMWRITE_JPEG_QUALITY, 85])
-                    #insignificant_motion_frames.append(frame_path) # disabled to keep frames for further analysis only
-                    logger.info(f"[{file_basename}] Saved insignificant motion frame to {frame_path}")
+                    frame_path = detect_draw_and_save_snapshot(
+                        frame=frame,
+                        soc=soc,
+                        output_dir=output_dir,
+                        input_video_path=input_video_path,
+                        file_basename=file_basename,
+                        mid_frame_index=mid_frame_index,
+                        tag="insignificant",
+                        classes=DETECT_CLASSES,
+                    )
+                    if frame_path and SEND_INSIGNIFICANT_FRAMES:
+                        insignificant_motion_frames.append(frame_path)
             else:
                 logger.info(f"[{file_basename}]   - Event at {(start_frame / fps):.1f}s lasting {duration_seconds:.2f}s is insignificant. Skipping frame extraction.")
         else:
@@ -533,7 +580,7 @@ def detect_motion(input_video_path, output_dir):
     if hasattr(object_detection_model, 'predictor') and object_detection_model.predictor is not None:
         if hasattr(object_detection_model.predictor, 'trackers') and object_detection_model.predictor.trackers:
             object_detection_model.predictor.trackers[0].reset()
-            logger.debug(f"[{file_basename}] Object tracker state reset.")
+            logger.debug("[%s] Object tracker state reset.", file_basename)
 
     # Prepare ROI polygon for point-in-polygon checks
     roi_polygon_cv = roi_poly_points.reshape((-1, 1, 2))
@@ -628,7 +675,7 @@ def detect_motion(input_video_path, output_dir):
             if not ret or frame is None:
                 continue
 
-            results = object_detection_model.track(frame, imgsz=640, conf=CONF_THRESHOLD, persist=True, verbose=False, tracker="tracker.yaml")
+            results = object_detection_model.track(frame, imgsz=640, conf=CONF_THRESHOLD, persist=True, verbose=False, tracker="tracker.yaml", classes=DETECT_CLASSES)
 
             # Count whether this frame contains a person within ROI and whether any crossing/highlight happens
             frame_has_person_in_roi = False
@@ -779,7 +826,7 @@ def detect_motion(input_video_path, output_dir):
                                 if highlight_active:
                                     frame_has_highlight = True
                                 draw_tracked_box(frame, box, local_id, label_name, conf, soc, highlight=highlight_active, display_id=disp_id)
-                                logger.debug(f"[{file_basename}] Person p{disp_id} re-acquired at frame {frame_idx}; side changed {prev_global_side} -> {current_side} (inferred crossing)")
+                                logger.debug("[%s] Person p%s re-acquired at frame %d; side changed %s -> %s (inferred crossing)", file_basename, disp_id, frame_idx, prev_global_side, current_side)
                                 # Skip normal draw below for this object to avoid double drawing
                                 event_last_side_global[global_id] = current_side
                                 continue
@@ -787,7 +834,7 @@ def detect_motion(input_video_path, output_dir):
                                 event_first_side[entity_id] = current_side
                                 event_last_side[entity_id] = current_side
                                 if label_name == 'person':
-                                    logger.debug(f"[{file_basename}] Person p{disp_id} appeared at frame {frame_idx} {current_side} the line")
+                                    logger.debug("[%s] Person p%s appeared at frame %d %s the line", file_basename, disp_id, frame_idx, current_side)
                         else:
                             prev_y = event_prev_y[entity_id]
                             visual_crossed = False
@@ -795,11 +842,11 @@ def detect_motion(input_video_path, output_dir):
                             if prev_y <= LINE_Y - LINE_Y_TOLERANCE and y_center >= LINE_Y + LINE_Y_TOLERANCE:
                                 event_cross_dirs[entity_id].add('down')
                                 if label_name == 'person':
-                                    logger.debug(f"[{file_basename}] Person p{disp_id} logical crossing 'down' detected at frame {frame_idx} (tolerance band)")
+                                    logger.debug("[%s] Person p%s logical crossing 'down' detected at frame %d (tolerance band)", file_basename, disp_id, frame_idx)
                             elif prev_y >= LINE_Y + LINE_Y_TOLERANCE and y_center <= LINE_Y - LINE_Y_TOLERANCE:
                                 event_cross_dirs[entity_id].add('up')
                                 if label_name == 'person':
-                                    logger.debug(f"[{file_basename}] Person p{disp_id} logical crossing 'up' detected at frame {frame_idx} (tolerance band)")
+                                    logger.debug("[%s] Person p%s logical crossing 'up' detected at frame %d (tolerance band)", file_basename, disp_id, frame_idx)
                             # Hysteresis-based crossing + dwell gating: use stable side outside tolerance band
                             current_stable_side = None
                             if y_center <= LINE_Y - LINE_Y_TOLERANCE:
@@ -810,11 +857,11 @@ def detect_motion(input_video_path, output_dir):
                             in_tol = abs(y_center - LINE_Y) <= LINE_Y_TOLERANCE
                             was_in_tol = event_in_tolerance.get(entity_id, False)
                             if in_tol and not was_in_tol and label_name == 'person':
-                                logger.debug(f"[{file_basename}] Person p{disp_id} entered line tolerance at frame {frame_idx}")
+                                logger.debug("[%s] Person p%s entered line tolerance at frame %d", file_basename, disp_id, frame_idx)
                                 # Start a minimum highlight window from the entry moment
                                 event_highlight_until[entity_id] = max(event_highlight_until.get(entity_id, 0), frame_idx + HIGHLIGHT_WINDOW_FRAMES)
                             elif (not in_tol) and was_in_tol and label_name == 'person':
-                                logger.debug(f"[{file_basename}] Person p{disp_id} left line tolerance at frame {frame_idx}")
+                                logger.debug("[%s] Person p%s left line tolerance at frame %d", file_basename, disp_id, frame_idx)
                             event_in_tolerance[entity_id] = in_tol
                             # Update stability counters
                             if current_stable_side is not None:
@@ -831,7 +878,7 @@ def detect_motion(input_video_path, output_dir):
                                     if entity_id in event_pending_cross:
                                         del event_pending_cross[entity_id]
                                     if label_name == 'person':
-                                        logger.debug(f"[{file_basename}] Person p{disp_id} stable '{current_stable_side}' at frame {frame_idx}")
+                                        logger.debug("[%s] Person p%s stable '%s' at frame %d", file_basename, disp_id, current_stable_side, frame_idx)
                                 elif current_stable_side != prev_stable:
                                     # Stable side changed → start pending crossing that must pass dwell
                                     new_dir = None
@@ -844,7 +891,7 @@ def detect_motion(input_video_path, output_dir):
                                     if new_dir is not None:
                                         event_pending_cross[entity_id] = {'dir': new_dir, 'since_frame': frame_idx}
                                         if label_name == 'person':
-                                            logger.debug(f"[{file_basename}] Person p{disp_id} stable side changed to '{current_stable_side}' at frame {frame_idx}; pending '{new_dir}' crossing started")
+                                            logger.debug("[%s] Person p%s stable side changed to '%s' at frame %d; pending '%s' crossing started", file_basename, disp_id, current_stable_side, frame_idx, new_dir)
                                 else:
                                     # Staying on same stable side → if pending for this side, confirm after dwell time
                                     pend = event_pending_cross.get(entity_id)
@@ -854,7 +901,7 @@ def detect_motion(input_video_path, output_dir):
                                             event_cross_dirs[entity_id].add(pend['dir'])
                                             del event_pending_cross[entity_id]
                                             if label_name == 'person':
-                                                logger.debug(f"[{file_basename}] Person p{disp_id} crossing '{pend['dir']}' confirmed after dwell ({dwell_frames} frames) at frame {frame_idx}")
+                                                logger.debug("[%s] Person p%s crossing '%s' confirmed after dwell (%d frames) at frame %d", file_basename, disp_id, pend['dir'], dwell_frames, frame_idx)
                             # Visual crossing detection without tolerance (for highlight only)
                             if (prev_y < LINE_Y <= y_center) or (prev_y > LINE_Y >= y_center):
                                 visual_crossed = True
@@ -884,7 +931,7 @@ def detect_motion(input_video_path, output_dir):
                                     frame_has_highlight = True
                                 draw_tracked_box(frame, box, local_id, label_name, conf, soc, highlight=highlight_active, display_id=disp_id)
                                 if label_name == 'person':
-                                    logger.debug(f"[{file_basename}] Person p{disp_id} visually crossed the line at frame {frame_idx} (prev_y={prev_y} -> y={y_center})")
+                                    logger.debug("[%s] Person p%s visually crossed the line at frame %d (prev_y=%d -> y=%d)", file_basename, disp_id, frame_idx, prev_y, y_center)
                                 # Skip normal draw below for this object to avoid double drawing
                                 continue
 
@@ -980,37 +1027,24 @@ def detect_motion(input_video_path, output_dir):
         else:
             logger.info(f"[{file_basename}] Event at {(start_frame / fps):.1f}s discarded: person in ROI only {person_frames_in_roi} frames (< {PERSON_MIN_FRAMES}).")
             # Save a representative middle frame for significant-but-no-person events
-            if SEND_INSIGNIFICANT_FRAMES:
+            if SAVE_INSIGNIFICANT_FRAMES:
                 try:
                     mid_frame_index = start_frame + (end_frame - start_frame) // 2
                     cap.set(cv2.CAP_PROP_POS_FRAMES, mid_frame_index)
                     ret, frame = cap.read()
                     if ret and frame is not None:
-                        results = object_detection_model.track(frame, imgsz=640, conf=CONF_THRESHOLD, persist=False, verbose=False)
-                        if results[0].boxes.id is not None:
-                            boxes = results[0].boxes.xyxy.cpu().tolist()
-                            clss = results[0].boxes.cls.int().cpu().tolist()
-                            confs = results[0].boxes.conf.float().cpu().tolist()
-                            class_names = object_detection_model.names
-
-                            local_id_counter = 1
-                            for box, cls, conf in zip(boxes, clss, confs):
-                                label_name = class_names[cls]
-                                draw_tracked_box(frame, box, local_id_counter, label_name, conf, soc, highlight=False, display_id=None)
-                                local_id_counter += 1
-
-                        # Save to daily folder inside output dir (YYYYMMDD)
-                        date_folder = datetime.now().strftime("%Y%m%d")
-                        daily_dir = os.path.join(output_dir, date_folder)
-                        os.makedirs(daily_dir, exist_ok=True)
-                        frame_filename = f"{input_video_path.split(os.path.sep)[-2][-2:]}H{os.path.splitext(file_basename)[0]}_no_person_{mid_frame_index}.jpg"
-                        frame_path = os.path.join(daily_dir, frame_filename)
-                        cv2.line(frame, (0, LINE_Y), (orig_w, LINE_Y), COLOR_LINE, 1)
-                        cv2.putText(frame, f"Hvirtka Y={LINE_Y}", (10, LINE_Y - 10),
-                                    cv2.FONT_HERSHEY_DUPLEX, 1, COLOR_LINE, 1, cv2.LINE_AA)
-                        cv2.imwrite(frame_path, frame, [cv2.IMWRITE_JPEG_QUALITY, 85])
-                        #insignificant_motion_frames.append(frame_path) # disabled to keep frames for further analysis only
-                        logger.info(f"[{file_basename}] Saved no_person frame to {frame_path}")
+                        frame_path = detect_draw_and_save_snapshot(
+                            frame=frame,
+                            soc=soc,
+                            output_dir=output_dir,
+                            input_video_path=input_video_path,
+                            file_basename=file_basename,
+                            mid_frame_index=mid_frame_index,
+                            tag="no_person",
+                            classes=DETECT_CLASSES,
+                        )
+                        if frame_path and SEND_INSIGNIFICANT_FRAMES:
+                            insignificant_motion_frames.append(frame_path)
                 except Exception as e:
                     logger.warning(f"[{file_basename}] Failed to save no_person frame: {e}")
 
