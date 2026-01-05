@@ -56,7 +56,7 @@ TESLA_SOC_CHECK_ENABLED = bool(teslapy and TESLA_REFRESH_TOKEN and TESLA_EMAIL)
 OBJECT_DETECTION_MODEL_PATH = os.getenv("OBJECT_DETECTION_MODEL_PATH", default="best_openvino_model")
 CONF_THRESHOLD = 0.5
 DETECT_CLASSES = [0, 1]  # 0: person, 1: car
-TRACK_ROI_ENABLED = False  # Enable tracker ROI crop (from tracker_roi.json)
+TRACK_ROI_ENABLED = True  # Enable tracker ROI crop (from tracker_roi.json)
 LINE_Y = 860
 COLOR_PERSON = (100, 200, 0)
 COLOR_CAR = (200, 120, 0)
