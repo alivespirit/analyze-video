@@ -1185,7 +1185,8 @@ def detect_motion(input_video_path, output_dir):
     if written_frame_count == 0:
         elapsed_time = time.time() - start_time
         logger.info(f"[{file_basename}] No significant events with person in ROI found. Full processing took {elapsed_time:.2f} seconds.")
-        return {'status': 'no_significant_motion', 'clip_path': None, 'insignificant_frames': insignificant_motion_frames}
+        return {'status': 'no_person', 'clip_path': None, 'insignificant_frames': insignificant_motion_frames}
+
     # Finalize CRF-based H.264 writer
     logger.debug("[%s] Finalizing highlight clip...", file_basename)
     if writer is not None:

@@ -157,7 +157,7 @@ pip install -r requirements.txt
    - **Video Analysis (CPU-Bound Task):** The video is passed to the `motion_executor`.
      - **Motion Detection:** OpenCV analyzes frames within a cropped ROI to find initial motion, filtering out noise.
      - **Object Tracking:** If significant motion is found, the `ultralytics` pretrained YOLO model tracks objects (people, cars) across frames.
-       - **Event Classification:** The script determines the event type: `gate_crossing`, `significant_motion`, `insignificant_motion`, or `no_motion`.
+       - **Event Classification:** The script determines the event type: `gate_crossing`, `significant_motion`, `no_significant_motion`, `no_person`, or `no_motion`.
      - **Artifact Generation:** A highlight clip (.mp4) or insignificant motion snapshots (.jpg) are created in the `temp/` directory.
    - **AI Analysis (I/O-Bound Task):** The result is passed to the `io_executor`.
      - For gate crossings or off-peak hours, Gemini is skipped.

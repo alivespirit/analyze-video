@@ -384,7 +384,8 @@ def severity_levels() -> List[str]:
 # Status → color mapping for chart bars
 STATUS_COLORS = {
     "no_motion": "#64748b",            # slate
-    "no_significant_motion": "#f59e0b", # amber
+    "no_significant_motion": "#eb980a", # amber
+    "no_person": "#f8e805",             # yellow
     "significant_motion": "#8b5cf6",    # violet
     "gate_crossing": "#22c55e",        # green
     "error": "#ef4444",               # red

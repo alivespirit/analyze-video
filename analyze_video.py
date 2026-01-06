@@ -103,7 +103,7 @@ def analyze_video(motion_result, video_path):
         logger.info(f"[{file_basename}] Skipping Gemini analysis (off-peak hours).")
         if detected_motion_status == "error":
             return {'response': timestamp + "\U0001F4A2 Шось неясно", 'insignificant_frames': motion_result['insignificant_frames'], 'clip_path': None}
-        elif detected_motion_status == "no_significant_motion":
+        elif detected_motion_status == "no_significant_motion" or detected_motion_status == "no_person":
             return {'response': timestamp + "\U0001F518 Шось там тойво...", 'insignificant_frames': motion_result['insignificant_frames'], 'clip_path': None}
         elif detected_motion_status == "significant_motion":
             # --- MODIFIED: Append detected object counts to the off-peak message ---
@@ -125,8 +125,8 @@ def analyze_video(motion_result, video_path):
     if detected_motion_status == "error":
         logger.warning(f"[{file_basename}] Error during motion detection. Analyzing full video.")
         video_to_process = video_path
-    elif detected_motion_status == "no_significant_motion":
-        logger.info(f"[{file_basename}] Analyzing full video as there was no significant motion.")
+    elif detected_motion_status == "no_significant_motion" or detected_motion_status == "no_person":
+        logger.info(f"[{file_basename}] Analyzing full video as there was no significant motion or no person detected.")
         video_to_process = video_path
     elif detected_motion_status == "significant_motion":
         logger.info(f"[{file_basename}] Running Gemini analysis for detected motion at {motion_result['clip_path']}")
