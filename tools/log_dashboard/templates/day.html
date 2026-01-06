@@ -19,8 +19,8 @@
 
   <main>
     <!-- Floating action buttons (mobile): jump to end / top -->
-    <a href="#page-bottom" class="fab" aria-label="Jump to end">↓</a>
-    <a href="#page-top" class="fab-top" aria-label="Back to top">↑</a>
+    <a href="#page-bottom" class="fab hidden" aria-label="Jump to end">↓</a>
+    <a href="#page-top" class="fab-top hidden" aria-label="Back to top">↑</a>
     {% if is_today_route %}{% set base = '/today' %}{% else %}{% set base = '/day/' ~ day %}{% endif %}
     <section class="controls">
       <div class="filters">
@@ -596,6 +596,21 @@
           }
         }catch(e){ /* noop */ }
       })();
+      // Toggle floating buttons visibility based on scroll position (hide at top)
+      function toggleFabs(){
+        try{
+          var y = window.scrollY || document.documentElement.scrollTop || 0;
+          var atTop = y <= 2;
+          var down = document.querySelector('.fab');
+          var up = document.querySelector('.fab-top');
+          if(down){ down.classList.toggle('hidden', atTop); }
+          if(up){ up.classList.toggle('hidden', atTop); }
+        }catch(e){ /* noop */ }
+      }
+      // Initial state and listeners
+      toggleFabs();
+      window.addEventListener('scroll', toggleFabs, { passive: true });
+      window.addEventListener('resize', toggleFabs);
       window.addEventListener('hashchange', ensureLogsOpenIfHash);
     })();
   </script>
