@@ -7,7 +7,7 @@ import cv2
 import numpy as np
 from datetime import datetime
 
-from moviepy import ImageSequenceClip
+from moviepy.video.io.ffmpeg_writer import FFMPEG_VideoWriter
 
 try:
     from ultralytics import YOLO
@@ -27,7 +27,6 @@ SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 # --- Motion detection configuration ---
 MIN_CONTOUR_AREA = 1800
 ROI_CONFIG_FILE = os.path.join(SCRIPT_DIR, "roi.json")
-TRACK_ROI_CONFIG_FILE = os.path.join(SCRIPT_DIR, "tracker_roi.json")
 PADDING_SECONDS = 1.5
 WARMUP_FRAMES = 15
 MAX_EVENT_GAP_SECONDS = 3.0
@@ -56,7 +55,7 @@ TESLA_SOC_CHECK_ENABLED = bool(teslapy and TESLA_REFRESH_TOKEN and TESLA_EMAIL)
 OBJECT_DETECTION_MODEL_PATH = os.getenv("OBJECT_DETECTION_MODEL_PATH", default="best_openvino_model")
 CONF_THRESHOLD = 0.5
 DETECT_CLASSES = [0, 1]  # 0: person, 1: car
-TRACK_ROI_ENABLED = True  # Enable tracker ROI crop (from tracker_roi.json)
+TRACK_ROI_ENABLED = True  # Enable tracker ROI crop (from roi.json: 'tracker_roi' or fallback to motion_detection_roi/legacy)
 LINE_Y = 860
 COLOR_PERSON = (100, 200, 0)
 COLOR_CAR = (200, 120, 0)
@@ -157,21 +156,29 @@ def check_tesla_soc(file_basename):
             return None
 
 
-def load_roi(file_path):
+def read_roi_config(file_path):
     """
-    Loads the Region of Interest (ROI) polygon points from a JSON file.
-
-    Args:
-        file_path (str): The path to the roi.json file.
+    Reads and returns the raw content of roi.json.
 
     Returns:
-        np.ndarray: A NumPy array of points defining the ROI, or None if the file doesn't exist.
+        dict | list | None: Parsed JSON (dict for multi-ROI config, or list for legacy array of points), or None if missing/invalid.
     """
-    if os.path.exists(file_path):
+    if not os.path.exists(file_path):
+        return None
+    try:
         with open(file_path, 'r') as f:
-            points = json.load(f)
+            return json.load(f)
+    except Exception:
+        return None
+
+
+def as_np_points(points):
+    try:
+        if points is None:
+            return None
         return np.array(points, dtype=np.int32)
-    return None
+    except Exception:
+        return None
 
 
 def draw_tracked_box(frame, box, local_id, label_name, conf, soc, highlight=False, display_id=None):
@@ -200,10 +207,8 @@ def draw_tracked_box(frame, box, local_id, label_name, conf, soc, highlight=Fals
             color = COLOR_DEFAULT
 
     if label_name == 'person' and display_id is not None:
-        if display_id == local_id:
-            label_text = f"p{display_id} {conf:.0%}"
-        else:
-            label_text = f"p{display_id}/T{local_id} {conf:.0%}"
+        # Show only session-wide person display ID; omit local/tracker IDs
+        label_text = f"p{display_id} {conf:.0%}"
     else:
         label_text = f"{label_name} {local_id} {conf:.0%}"
 
@@ -334,11 +339,11 @@ def detect_draw_and_save_snapshot(frame, soc, output_dir, input_video_path, file
 
 
 # --- Lightweight geometry helpers for entity matching ---
-def _box_area(b):
+def box_area(b):
     return max(1.0, float(max(0.0, b[2] - b[0]) * max(0.0, b[3] - b[1])))
 
 
-def _iou(a, b):
+def iou(a, b):
     xA = max(a[0], b[0])
     yA = max(a[1], b[1])
     xB = min(a[2], b[2])
@@ -348,12 +353,12 @@ def _iou(a, b):
     inter = inter_w * inter_h
     if inter <= 0:
         return 0.0
-    areaA = _box_area(a)
-    areaB = _box_area(b)
+    areaA = box_area(a)
+    areaB = box_area(b)
     return inter / (areaA + areaB - inter)
 
 
-def _center_distance(a, b):
+def center_distance(a, b):
     ax = (a[0] + a[2]) * 0.5
     ay = (a[1] + a[3]) * 0.5
     bx = (b[0] + b[2]) * 0.5
@@ -363,7 +368,7 @@ def _center_distance(a, b):
     return (dx * dx + dy * dy) ** 0.5
 
 
-def _bbox_diag(b):
+def bbox_diag(b):
     w = max(0.0, b[2] - b[0])
     h = max(0.0, b[3] - b[1])
     return (w * w + h * h) ** 0.5
@@ -391,9 +396,21 @@ def detect_motion(input_video_path, output_dir):
               path to the generated clip, paths to insignificant frames, and detected object counts.
     """
     file_basename = os.path.basename(input_video_path)
-    roi_poly_points = load_roi(ROI_CONFIG_FILE)
+    # Read roi.json once and derive required polygons (motion, tracker, person)
+    roi_config = read_roi_config(ROI_CONFIG_FILE)
+    if roi_config is None:
+        logger.error(f"[{file_basename}] ROI config file not found or invalid: {ROI_CONFIG_FILE}.")
+        return {'status': 'error', 'clip_path': None, 'insignificant_frames': []}
+
+    # Motion detection ROI: if dict, expect 'motion_detection_roi'; if legacy (list), use it directly
+    if isinstance(roi_config, dict):
+        roi_poly_points = as_np_points(roi_config.get('motion_detection_roi'))
+    elif isinstance(roi_config, list):
+        roi_poly_points = as_np_points(roi_config)
+    else:
+        roi_poly_points = None
     if roi_poly_points is None:
-        logger.error(f"[{file_basename}] ROI config file not found.")
+        logger.error(f"[{file_basename}] Motion detection ROI missing in roi.json.")
         return {'status': 'error', 'clip_path': None, 'insignificant_frames': []}
 
     cap = cv2.VideoCapture(input_video_path)
@@ -417,18 +434,20 @@ def detect_motion(input_video_path, output_dir):
     crop_w = crop_x2 - crop_x1
     crop_h = crop_y2 - crop_y1
 
-    logger.info(f"[{file_basename}] Original frame: {orig_w}x{orig_h}. Analyzing cropped region: {crop_w}x{crop_h} at ({crop_x1},{crop_y1}).")
-
     local_roi_points = roi_poly_points.copy()
     local_roi_points[:, 0] -= crop_x1
     local_roi_points[:, 1] -= crop_y1
 
     analysis_roi_points = local_roi_points.astype(np.int32)
 
-    # Optional: Load tracker-specific ROI and compute a fixed crop bounding box (guarded by TRACK_ROI_ENABLED)
+    # Optional: Load tracker-specific ROI (from roi.json) and compute a fixed crop bounding box (guarded by TRACK_ROI_ENABLED)
     track_roi_bbox = None
     if TRACK_ROI_ENABLED:
-        track_roi_poly_points = load_roi(TRACK_ROI_CONFIG_FILE)
+        # Load tracker ROI from roi.json; if missing or legacy, use motion_detection_roi
+        if isinstance(roi_config, dict) and 'tracker_roi' in roi_config:
+            track_roi_poly_points = as_np_points(roi_config.get('tracker_roi'))
+        else:
+            track_roi_poly_points = roi_poly_points
         if track_roi_poly_points is not None and len(track_roi_poly_points) >= 3:
             tx_coords = track_roi_poly_points[:, 0]
             ty_coords = track_roi_poly_points[:, 1]
@@ -438,13 +457,26 @@ def detect_motion(input_video_path, output_dir):
             ty2 = min(orig_h, int(np.max(ty_coords) + TRACK_ROI_PADDING))
             if tx2 > tx1 and ty2 > ty1:
                 track_roi_bbox = (tx1, ty1, tx2, ty2)
-                logger.info("[%s] Using tracker ROI crop: %dx%d at (%d,%d)", file_basename, tx2 - tx1, ty2 - ty1, tx1, ty1)
-            else:
-                logger.warning("[%s] Invalid tracker ROI bbox computed; falling back to full frame.", file_basename)
-        else:
-            logger.debug("[%s] Tracker ROI enabled but tracker_roi.json not found or invalid; tracking full frame.", file_basename)
-    else:
-        logger.debug("[%s] Tracker ROI disabled; tracking full frame.", file_basename)
+            # else invalid bbox -> leave None
+
+    # Optional: Load a person-specific tracker ROI to filter person detections outside this polygon
+    person_tracker_roi_points = None
+    if isinstance(roi_config, dict):
+        person_tracker_roi_points = as_np_points(roi_config.get('person_tracker_roi'))
+    person_tracker_polygon_cv = None
+    if person_tracker_roi_points is not None and len(person_tracker_roi_points) >= 3:
+        try:
+            person_tracker_polygon_cv = person_tracker_roi_points.reshape((-1, 1, 2))
+        except Exception:
+            person_tracker_polygon_cv = None
+
+    track_roi_used = bool(TRACK_ROI_ENABLED and track_roi_bbox is not None)
+    person_roi_used = bool(person_tracker_polygon_cv is not None)
+    logger.info(
+        f"[{file_basename}] Original frame: {orig_w}x{orig_h}. motion_detection_roi={crop_w}x{crop_h}, "
+        f"tracker_roi={(f'{track_roi_bbox[2]-track_roi_bbox[0]}x{track_roi_bbox[3]-track_roi_bbox[1]}' if track_roi_bbox is not None else 'False')}, "
+        f"person_tracker_roi={(f'{int(np.max(person_tracker_roi_points[:,0]) - np.min(person_tracker_roi_points[:,0]))}x{int(np.max(person_tracker_roi_points[:,1]) - np.min(person_tracker_roi_points[:,1]))}' if person_tracker_polygon_cv is not None else 'False')}"
+    )
 
     backSub = cv2.createBackgroundSubtractorKNN(history=500, dist2Threshold=600, detectShadows=True)
     roi_mask = np.zeros((crop_h, crop_w), dtype=np.uint8)
@@ -600,6 +632,7 @@ def detect_motion(input_video_path, output_dir):
         return {'status': 'no_significant_motion', 'clip_path': None, 'insignificant_frames': insignificant_motion_frames}
 
     logger.info(f"[{file_basename}] Starting object tracking for {len(significant_sub_clips)} significant event(s).")
+    output_filename = os.path.join(output_dir, file_basename)
 
     if hasattr(object_detection_model, 'predictor') and object_detection_model.predictor is not None:
         if hasattr(object_detection_model.predictor, 'trackers') and object_detection_model.predictor.trackers:
@@ -609,13 +642,18 @@ def detect_motion(input_video_path, output_dir):
     # Prepare ROI polygon for point-in-polygon checks
     roi_polygon_cv = roi_poly_points.reshape((-1, 1, 2))
 
-    all_clip_frames_rgb = []
+    writer = None
+    written_frame_count = 0
     class_names = object_detection_model.names
     id_mapping = {}
     class_counters = {}
     unique_objects_detected = {'person': set(), 'car': set()}
     persons_up = 0
     persons_down = 0
+    # Session-wide display IDs for persons: local_id -> display_id
+    person_display_ids = {}
+    person_display_id_counter = 1
+    session_display_initialized = False
 
     # Process each event separately and include only those with person inside ROI for >= PERSON_MIN_FRAMES
     for clip_index, (start_frame, end_frame) in enumerate(significant_sub_clips):
@@ -662,8 +700,8 @@ def detect_motion(input_video_path, output_dir):
         event_pending_cross = {}  # entity_id -> {'dir': 'up'|'down', 'since_frame': int}
         # Track if entity is inside line tolerance band to reduce log spam
         event_in_tolerance = {}
-        # Stable display IDs per entity (for persons)
-        event_entity_display_ids = {}
+        # Event-local display IDs (used until first kept event seeds the session mapping)
+        event_display_ids = {}
         event_display_id_counter = 1
         # Track last known side per tracker id to bridge gaps
         event_last_side_global = {}
@@ -735,6 +773,13 @@ def detect_motion(input_video_path, output_dir):
                 for box, global_id, cls, conf in zip(boxes, global_ids, clss, confs):
                     label_name = class_names[cls]
 
+                    # If configured, ignore person detections outside the person_tracker ROI
+                    if label_name == 'person' and person_tracker_polygon_cv is not None:
+                        cx = int((box[0] + box[2]) / 2)
+                        cy = int((box[1] + box[3]) / 2)
+                        if cv2.pointPolygonTest(person_tracker_polygon_cv, (cx, cy), False) < 0:
+                            continue
+
                     if label_name not in class_counters:
                         class_counters[label_name] = 1
                     if global_id not in id_mapping:
@@ -767,16 +812,16 @@ def detect_motion(input_video_path, output_dir):
                             for ent in event_entities:
                                 if (frame_idx - ent['last_frame']) > MAX_GAP_FRAMES:
                                     continue
-                                iou = _iou(box, ent['last_box'])
-                                if iou > best_iou:
-                                    best_iou = iou
+                                iou_score = iou(box, ent['last_box'])
+                                if iou_score > best_iou:
+                                    best_iou = iou_score
                                     best_id = ent['id']
                                     best_ent = ent
                         if best_ent is not None:
-                            diag = _bbox_diag(best_ent['last_box'])
-                            dist = _center_distance(box, best_ent['last_box'])
-                            area_now = _box_area(box)
-                            area_prev = _box_area(best_ent['last_box'])
+                            diag = bbox_diag(best_ent['last_box'])
+                            dist = center_distance(box, best_ent['last_box'])
+                            area_now = box_area(box)
+                            area_prev = box_area(best_ent['last_box'])
                             size_ratio = area_now / max(1e-6, area_prev)
                             if size_ratio < 1.0:
                                 size_ratio = 1.0 / size_ratio
@@ -802,8 +847,8 @@ def detect_motion(input_video_path, output_dir):
                                 last_side = 'above' if last_y < LINE_Y else 'below'
                                 gap2 = frame_idx - ent['last_frame']
                                 gap2_ratio = min(1.0, max(0.0, gap2 / max(1.0, MAX_GAP_FRAMES)))
-                                dist2 = _center_distance(box, ent['last_box'])
-                                diag2 = _bbox_diag(ent['last_box'])
+                                dist2 = center_distance(box, ent['last_box'])
+                                diag2 = bbox_diag(ent['last_box'])
                                 # Allow tighter center distance as gap grows
                                 allow_ratio = 0.6 * (1.0 - 0.5 * gap2_ratio)
                                 # Prefer opposite side handoff, but for short gaps also allow same-side if very close
@@ -831,13 +876,19 @@ def detect_motion(input_video_path, output_dir):
                         frame_assigned_entities.add(entity_id)
                         event_global_to_entity[global_id] = entity_id
 
-                        # Ensure display id exists early for logging clarity
+                        # Determine display id: event-local until first kept event, then session-wide
                         disp_id = None
                         if label_name == 'person':
-                            if entity_id not in event_entity_display_ids:
-                                event_entity_display_ids[entity_id] = event_display_id_counter
-                                event_display_id_counter += 1
-                            disp_id = event_entity_display_ids[entity_id]
+                            if session_display_initialized:
+                                if local_id not in person_display_ids:
+                                    person_display_ids[local_id] = person_display_id_counter
+                                    person_display_id_counter += 1
+                                disp_id = person_display_ids[local_id]
+                            else:
+                                if local_id not in event_display_ids:
+                                    event_display_ids[local_id] = event_display_id_counter
+                                    event_display_id_counter += 1
+                                disp_id = event_display_ids[local_id]
 
                         # Previous side seen for this tracker id (global)
                         prev_global_side = event_last_side_global.get(global_id)
@@ -856,9 +907,18 @@ def detect_motion(input_video_path, output_dir):
                                     event_cross_dirs[entity_id].add('down')
                                 # Mark crossing for frame inclusion; highlight is based on tolerance or window
                                 frame_has_crossing = True
-                                # Ensure display id exists for this entity
+                                # Determine display id for label
                                 if label_name == 'person':
-                                    disp_id = event_entity_display_ids.get(entity_id)
+                                    if session_display_initialized:
+                                        if local_id not in person_display_ids:
+                                            person_display_ids[local_id] = person_display_id_counter
+                                            person_display_id_counter += 1
+                                        disp_id = person_display_ids[local_id]
+                                    else:
+                                        if local_id not in event_display_ids:
+                                            event_display_ids[local_id] = event_display_id_counter
+                                            event_display_id_counter += 1
+                                        disp_id = event_display_ids[local_id]
                                 else:
                                     disp_id = None
                                 # Highlight if currently in tolerance or still within minimum highlight window
@@ -957,12 +1017,18 @@ def detect_motion(input_video_path, output_dir):
                                 if cv2.pointPolygonTest(roi_polygon_cv, (cx, cy), False) >= 0:
                                     frame_has_person_in_roi = True
                                 # Draw highlight if crossing detected on this frame
-                                # Ensure display id exists for this entity
+                                # Determine display id for label
                                 if label_name == 'person':
-                                    if entity_id not in event_entity_display_ids:
-                                        event_entity_display_ids[entity_id] = event_display_id_counter
-                                        event_display_id_counter += 1
-                                    disp_id = event_entity_display_ids[entity_id]
+                                    if session_display_initialized:
+                                        if local_id not in person_display_ids:
+                                            person_display_ids[local_id] = person_display_id_counter
+                                            person_display_id_counter += 1
+                                        disp_id = person_display_ids[local_id]
+                                    else:
+                                        if local_id not in event_display_ids:
+                                            event_display_ids[local_id] = event_display_id_counter
+                                            event_display_id_counter += 1
+                                        disp_id = event_display_ids[local_id]
                                 else:
                                     disp_id = None
                                 # Highlight if in tolerance or within minimum highlight window
@@ -999,12 +1065,16 @@ def detect_motion(input_video_path, output_dir):
                     # Determine display id for person labels
                     disp_id = None
                     if label_name == 'person':
-                        eid = event_global_to_entity.get(global_id)
-                        if eid is not None:
-                            if eid not in event_entity_display_ids:
-                                event_entity_display_ids[eid] = event_display_id_counter
+                        if session_display_initialized:
+                            if local_id not in person_display_ids:
+                                person_display_ids[local_id] = person_display_id_counter
+                                person_display_id_counter += 1
+                            disp_id = person_display_ids[local_id]
+                        else:
+                            if local_id not in event_display_ids:
+                                event_display_ids[local_id] = event_display_id_counter
                                 event_display_id_counter += 1
-                            disp_id = event_entity_display_ids[eid]
+                            disp_id = event_display_ids[local_id]
                     draw_tracked_box(frame, box, local_id, label_name, conf, soc, highlight=highlight_active, display_id=disp_id)
 
             if frame_has_person_in_roi:
@@ -1060,7 +1130,29 @@ def detect_motion(input_video_path, output_dir):
         # Decide whether to include this event based on person frames within ROI
         if person_frames_in_roi >= PERSON_MIN_FRAMES:
             logger.info(f"[{file_basename}] Event at {(start_frame / fps):.1f}s kept: person present in ROI for {person_frames_in_roi} frames (>= {PERSON_MIN_FRAMES}).")
-            all_clip_frames_rgb.extend(event_frames_rgb)
+            # Initialize CRF-based H.264 writer lazily on first accepted event
+            if writer is None:
+                logger.info(f"[{file_basename}] Initializing CRF-based H.264 writer (libx264, preset=medium, crf=28)...")
+                writer = FFMPEG_VideoWriter(
+                    output_filename,
+                    size=(orig_w, orig_h),
+                    fps=fps,
+                    codec='libx264',
+                    preset='medium',
+                    threads=2,
+                    ffmpeg_params=['-crf', '28', '-pix_fmt', 'yuv420p', '-movflags', '+faststart']
+                )
+            for rgb_frame in event_frames_rgb:
+                writer.write_frame(rgb_frame)
+            written_frame_count += len(event_frames_rgb)
+            # Seed session-wide display IDs from the first kept event
+            if not session_display_initialized:
+                if event_display_ids:
+                    # Preserve numbering used in this event
+                    for lid, did in event_display_ids.items():
+                        person_display_ids[lid] = did
+                    person_display_id_counter = max(event_display_ids.values()) + 1
+                session_display_initialized = True
             # Merge event stats into overall
             unique_objects_detected['person'].update(event_unique_objects['person'])
             unique_objects_detected['car'].update(event_unique_objects['car'])
@@ -1092,20 +1184,16 @@ def detect_motion(input_video_path, output_dir):
 
     cap.release()
 
-    if not all_clip_frames_rgb:
+    if written_frame_count == 0:
         elapsed_time = time.time() - start_time
         logger.info(f"[{file_basename}] No significant events with person in ROI found. Full processing took {elapsed_time:.2f} seconds.")
         return {'status': 'no_significant_motion', 'clip_path': None, 'insignificant_frames': insignificant_motion_frames}
+    # Finalize CRF-based H.264 writer
+    logger.debug("[%s] Finalizing highlight clip...", file_basename)
+    if writer is not None:
+        writer.close()
 
-    final_clip = ImageSequenceClip(all_clip_frames_rgb, fps=fps)
-    output_filename = os.path.join(output_dir, file_basename)
-    logger.info(f"[{file_basename}] Writing final highlight clip...")
-    final_clip.write_videofile(
-        output_filename, codec='libx264', audio=False, bitrate='2000k',
-        preset='medium', threads=4, logger=None
-    )
-
-    file_duration = final_clip.duration
+    file_duration = written_frame_count / fps
     file_size = os.path.getsize(output_filename) / (1024 * 1024)
     logger.info(f"[{file_basename}] Successfully created clip: {output_filename}. Duration: {file_duration:.2f}s, Size: {file_size:.2f} MB")
 

@@ -12,7 +12,7 @@ This project is a Python-based application that monitors a folder for new video 
   - **Gate Crossing Detection**: Identifies and sends a special notification when a person crosses a predefined horizontal line in the frame, indicating entry or exit.
   - **Cropped ROI Analysis**: Performs analysis on a smaller, padded region around the ROI for better performance.
   - **Smart Event Filtering**: Differentiates between significant, insignificant, and noisy motion events based on duration.
-  - **Highlight Clips**: Generates clips for significant motion with tracked objects and bounding boxes. Long events are automatically sped up (2x).
+   - **Highlight Clips**: Generates clips for significant motions with tracked objects and bounding boxes. Uses a CRF-based H.264 writer (libx264, preset=medium, CRF=28, yuv420p, faststart). Frames are streamed to disk during processing, lowering RAM usage. Long events are automatically sped up (2x).
   - **Insignificant Motion Snapshots**: Extracts and sends a single frame for brief motion events, now with object detection boxes drawn on them.
 - **Dynamic Gemini AI Analysis**:
   - **Time-Based Model Selection**: Automatically switches between different Gemini models (e.g., Pro vs. Flash) based on the time of day for cost optimization.
@@ -105,6 +105,10 @@ pip install -r requirements.txt
 5. **Configure Regions of Interest (ROI):**
    - Generate a `roi.json` file defining the coordinates of the area you want to monitor for initial motion.
    - You can use the script in `tools/gate_motion_detector.py` as a starting point to select an ROI for your video.
+   - Single `roi.json` consolidates ROIs with clear purposes:
+     - `motion_detection_roi`: polygon used for initial motion detection and for deriving the cropped analysis region baseline.
+     - `tracker_roi` (optional): polygon defining the tracker’s working area; a padded bounding box around it is used to crop frames for faster tracking (falls back to `motion_detection_roi` if absent).
+     - `person_tracker_roi` (optional): polygon filter for person detections; only persons whose bounding-box center lies inside this polygon are counted/tracked.
 
 6. **(Optional) Configure AI Models and Prompts:**
     - Place your custom analysis instructions in `prompt.txt`.
@@ -152,7 +156,7 @@ pip install -r requirements.txt
 2. **Processing Pipeline:**
    - **Video Analysis (CPU-Bound Task):** The video is passed to the `motion_executor`.
      - **Motion Detection:** OpenCV analyzes frames within a cropped ROI to find initial motion, filtering out noise.
-     - **Object Tracking:** If significant motion is found, the `ultralytics` YOLO model tracks objects (people, cars) across frames.
+     - **Object Tracking:** If significant motion is found, the `ultralytics` pretrained YOLO model tracks objects (people, cars) across frames.
        - **Event Classification:** The script determines the event type: `gate_crossing`, `significant_motion`, `insignificant_motion`, or `no_motion`.
      - **Artifact Generation:** A highlight clip (.mp4) or insignificant motion snapshots (.jpg) are created in the `temp/` directory.
    - **AI Analysis (I/O-Bound Task):** The result is passed to the `io_executor`.
