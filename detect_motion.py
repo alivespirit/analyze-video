@@ -470,8 +470,6 @@ def detect_motion(input_video_path, output_dir):
         except Exception:
             person_tracker_polygon_cv = None
 
-    track_roi_used = bool(TRACK_ROI_ENABLED and track_roi_bbox is not None)
-    person_roi_used = bool(person_tracker_polygon_cv is not None)
     logger.info(
         f"[{file_basename}] Original frame: {orig_w}x{orig_h}. motion_detection_roi={crop_w}x{crop_h}, "
         f"tracker_roi={(f'{track_roi_bbox[2]-track_roi_bbox[0]}x{track_roi_bbox[3]-track_roi_bbox[1]}' if track_roi_bbox is not None else 'False')}, "
