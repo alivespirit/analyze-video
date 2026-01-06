@@ -320,6 +320,8 @@ def analyze_video(motion_result, video_path):
 
         if detected_motion_status == "significant_motion":
             timestamp += "\u2705 *Отакої!* "
+        elif detected_motion_status == "no_person":
+            timestamp += "\u274E "
         else:
             timestamp += "\u2747\uFE0F "
 
