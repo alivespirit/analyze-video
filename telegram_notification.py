@@ -571,6 +571,18 @@ async def send_notifications(app, video_response, insignificant_frames, clip_pat
                                 save_group_state_to_disk(no_motion_group_message_id, no_motion_grouped_videos)
                             except Exception as e3:
                                 logger.warning(f"[{file_basename}] Failed to persist group state after clearing: {e3}")
+                            # Re-raise to allow caller to schedule retries
+                            raise
+                except Exception as e_edit:
+                    logger.error(f"[{file_basename}] Edit message failed: {e_edit}. Status: error", exc_info=True)
+                    no_motion_group_message_id = None
+                    no_motion_grouped_videos.clear()
+                    try:
+                        save_group_state_to_disk(no_motion_group_message_id, no_motion_grouped_videos)
+                    except Exception as e4:
+                        logger.warning(f"[{file_basename}] Failed to persist group state after clearing: {e4}")
+                    # Re-raise to allow caller to schedule retries
+                    raise
 
             elif no_motion_group_message_id is None or len(no_motion_grouped_videos) >= 4:
                 logger.info(f"[{file_basename}] Starting a new insignificant message group.")
@@ -616,6 +628,8 @@ async def send_notifications(app, video_response, insignificant_frames, clip_pat
                             save_group_state_to_disk(no_motion_group_message_id, no_motion_grouped_videos)
                         except Exception as e3:
                             logger.warning(f"[{file_basename}] Failed to persist group state after clearing: {e3}")
+                        # Re-raise to allow caller to schedule retries
+                        raise
                 except Exception as e_send:
                     logger.error(f"[{file_basename}] Failed to send new group message: {e_send}. Status: error", exc_info=True)
                     no_motion_group_message_id = None
@@ -624,6 +638,8 @@ async def send_notifications(app, video_response, insignificant_frames, clip_pat
                         save_group_state_to_disk(no_motion_group_message_id, no_motion_grouped_videos)
                     except Exception as e4:
                         logger.warning(f"[{file_basename}] Failed to persist group state after clearing: {e4}")
+                    # Re-raise to allow caller to schedule retries
+                    raise
 
         if insignificant_frames:
             logger.info(f"[{file_basename}] Found {len(insignificant_frames)} insignificant motion frames to send.")
