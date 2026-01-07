@@ -701,6 +701,9 @@ def detect_motion(input_video_path, output_dir):
         # Event-local display IDs (used until first kept event seeds the session mapping)
         event_display_ids = {}
         event_display_id_counter = 1
+        # Event-entity display IDs (stable per physical person across tracker id flips)
+        event_entity_display_ids = {}
+        event_entity_display_id_counter = 1
         # Track last known side per tracker id to bridge gaps
         event_last_side_global = {}
         # Event-local entity matcher (stable IDs across tracker flips)
@@ -714,6 +717,9 @@ def detect_motion(input_video_path, output_dir):
         CENTER_DIST_RATIO = 0.35
         SIZE_RATIO_LIMIT = 1.6
         MAX_GAP_FRAMES = int(2 * fps * tracker_stride)
+        # Within-frame duplicate suppression for persons
+        DUP_IOU = 0.7
+        DUP_CENTER_RATIO = 0.25
         person_frames_in_roi = 0
 
         # Seek once to the start of the event, then advance sequentially to avoid decoder seek artifacts
@@ -765,10 +771,15 @@ def detect_motion(input_video_path, output_dir):
                 global_ids = results[0].boxes.id.int().cpu().tolist()
                 clss = results[0].boxes.cls.int().cpu().tolist()
                 confs = results[0].boxes.conf.float().cpu().tolist()
+                # Sort detections by confidence (high->low) to keep best when suppressing duplicates
+                dets = list(zip(boxes, global_ids, clss, confs))
+                dets.sort(key=lambda d: d[3], reverse=True)
                 # Prevent multiple detections mapping to same entity within a single frame
                 frame_assigned_entities = set()
+                # Track accepted person detections for duplicate suppression within this frame
+                accepted_persons = []  # list of (box, entity_id)
 
-                for box, global_id, cls, conf in zip(boxes, global_ids, clss, confs):
+                for box, global_id, cls, conf in dets:
                     label_name = class_names[cls]
 
                     # If configured, ignore person detections outside the person_tracker ROI
@@ -790,6 +801,21 @@ def detect_motion(input_video_path, output_dir):
 
                     # Line crossing tracking per person (compute net outcome per event)
                     if label_name == 'person':
+                        # Suppress near-duplicate person detections within the same frame
+                        dup_found = False
+                        for acc_box, acc_eid in accepted_persons:
+                            if iou(box, acc_box) >= DUP_IOU:
+                                dup_found = True
+                                break
+                            # Also consider small center distance relative to size
+                            dist_c = center_distance(box, acc_box)
+                            diag_c = max(bbox_diag(acc_box), bbox_diag(box))
+                            if diag_c > 0 and (dist_c / diag_c) <= DUP_CENTER_RATIO:
+                                dup_found = True
+                                break
+                        if dup_found:
+                            # Skip processing this duplicate detection
+                            continue
                         # Assign stable entity_id
                         y_center = int((box[1] + box[3]) / 2)
                         current_side = 'above' if y_center < LINE_Y else 'below'
@@ -874,7 +900,7 @@ def detect_motion(input_video_path, output_dir):
                         frame_assigned_entities.add(entity_id)
                         event_global_to_entity[global_id] = entity_id
 
-                        # Determine display id: event-local until first kept event, then session-wide
+                        # Determine display id: event-local (by entity) until first kept event, then session-wide
                         disp_id = None
                         if label_name == 'person':
                             if session_display_initialized:
@@ -883,10 +909,14 @@ def detect_motion(input_video_path, output_dir):
                                     person_display_id_counter += 1
                                 disp_id = person_display_ids[local_id]
                             else:
-                                if local_id not in event_display_ids:
-                                    event_display_ids[local_id] = event_display_id_counter
-                                    event_display_id_counter += 1
-                                disp_id = event_display_ids[local_id]
+                                # Event-level IDs based on entity_id to survive tracker ID flips
+                                if 'event_entity_display_ids' not in locals():
+                                    event_entity_display_ids = {}
+                                    event_entity_display_id_counter = 1
+                                if entity_id not in event_entity_display_ids:
+                                    event_entity_display_ids[entity_id] = event_entity_display_id_counter
+                                    event_entity_display_id_counter += 1
+                                disp_id = event_entity_display_ids[entity_id]
 
                         # Previous side seen for this tracker id (global)
                         prev_global_side = event_last_side_global.get(global_id)
@@ -913,10 +943,13 @@ def detect_motion(input_video_path, output_dir):
                                             person_display_id_counter += 1
                                         disp_id = person_display_ids[local_id]
                                     else:
-                                        if local_id not in event_display_ids:
-                                            event_display_ids[local_id] = event_display_id_counter
-                                            event_display_id_counter += 1
-                                        disp_id = event_display_ids[local_id]
+                                        if 'event_entity_display_ids' not in locals():
+                                            event_entity_display_ids = {}
+                                            event_entity_display_id_counter = 1
+                                        if entity_id not in event_entity_display_ids:
+                                            event_entity_display_ids[entity_id] = event_entity_display_id_counter
+                                            event_entity_display_id_counter += 1
+                                        disp_id = event_entity_display_ids[entity_id]
                                 else:
                                     disp_id = None
                                 # Highlight if currently in tolerance or still within minimum highlight window
@@ -926,6 +959,8 @@ def detect_motion(input_video_path, output_dir):
                                 if highlight_active:
                                     frame_has_highlight = True
                                 draw_tracked_box(frame, box, local_id, label_name, conf, soc, highlight=highlight_active, display_id=disp_id)
+                                if label_name == 'person':
+                                    accepted_persons.append((box[:], entity_id))
                                 logger.debug("[%s] Person p%s re-acquired at frame %d; side changed %s -> %s (inferred crossing)", file_basename, disp_id, frame_idx, prev_global_side, current_side)
                                 # Skip normal draw below for this object to avoid double drawing
                                 event_last_side_global[global_id] = current_side
@@ -1023,10 +1058,13 @@ def detect_motion(input_video_path, output_dir):
                                             person_display_id_counter += 1
                                         disp_id = person_display_ids[local_id]
                                     else:
-                                        if local_id not in event_display_ids:
-                                            event_display_ids[local_id] = event_display_id_counter
-                                            event_display_id_counter += 1
-                                        disp_id = event_display_ids[local_id]
+                                        if 'event_entity_display_ids' not in locals():
+                                            event_entity_display_ids = {}
+                                            event_entity_display_id_counter = 1
+                                        if entity_id not in event_entity_display_ids:
+                                            event_entity_display_ids[entity_id] = event_entity_display_id_counter
+                                            event_entity_display_id_counter += 1
+                                        disp_id = event_entity_display_ids[entity_id]
                                 else:
                                     disp_id = None
                                 # Highlight if in tolerance or within minimum highlight window
@@ -1038,6 +1076,7 @@ def detect_motion(input_video_path, output_dir):
                                 draw_tracked_box(frame, box, local_id, label_name, conf, soc, highlight=highlight_active, display_id=disp_id)
                                 if label_name == 'person':
                                     logger.debug("[%s] Person p%s visually crossed the line at frame %d (prev_y=%d -> y=%d)", file_basename, disp_id, frame_idx, prev_y, y_center)
+                                    accepted_persons.append((box[:], entity_id))
                                 # Skip normal draw below for this object to avoid double drawing
                                 continue
 
@@ -1069,11 +1108,19 @@ def detect_motion(input_video_path, output_dir):
                                 person_display_id_counter += 1
                             disp_id = person_display_ids[local_id]
                         else:
-                            if local_id not in event_display_ids:
-                                event_display_ids[local_id] = event_display_id_counter
-                                event_display_id_counter += 1
-                            disp_id = event_display_ids[local_id]
+                            if 'event_entity_display_ids' not in locals():
+                                event_entity_display_ids = {}
+                                event_entity_display_id_counter = 1
+                            eid_for_disp = event_global_to_entity.get(global_id)
+                            if eid_for_disp is None:
+                                eid_for_disp = entity_id if 'entity_id' in locals() else None
+                            if eid_for_disp is not None and eid_for_disp not in event_entity_display_ids:
+                                event_entity_display_ids[eid_for_disp] = event_entity_display_id_counter
+                                event_entity_display_id_counter += 1
+                            disp_id = event_entity_display_ids.get(eid_for_disp)
                     draw_tracked_box(frame, box, local_id, label_name, conf, soc, highlight=highlight_active, display_id=disp_id)
+                    if label_name == 'person' and disp_id is not None:
+                        accepted_persons.append((box[:], event_global_to_entity.get(global_id, entity_id if 'entity_id' in locals() else -1)))
 
             if frame_has_person_in_roi:
                 person_frames_in_roi += 1
