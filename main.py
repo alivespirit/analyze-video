@@ -637,19 +637,21 @@ async def recover_missed_files_since(since_ts: float):
             except Exception as e:
                 logger.error(f"Error scanning directory '{dir_path}': {e}")
 
-        # Include files that were started/failed within the window, regardless of mtime
+        # Include ALL files that are started/failed in the ledger (regardless of start_ts), as long as they exist.
+        # This ensures we don't miss in-progress items that began before the recovery window.
         try:
             for fpath, entry in ledger.items():
                 if entry.get("status") == "completed":
                     continue
-                start_ts = float(entry.get("start_ts") or 0)
-                if start_ts <= 0:
+                if not os.path.exists(fpath):
                     continue
-                if window_start <= start_ts <= window_end and os.path.exists(fpath):
-                    if fpath not in seen_paths:
-                        files_to_process.append((start_ts, fpath))
-                        seen_paths.add(fpath)
-                        ledger_candidates += 1
+                if fpath in seen_paths:
+                    continue
+                # Use ledger start_ts if available; otherwise fall back to file mtime, else window_start
+                ts = float(entry.get("start_ts") or 0) or os.path.getmtime(fpath) or window_start
+                files_to_process.append((ts, fpath))
+                seen_paths.add(fpath)
+                ledger_candidates += 1
         except Exception as e:
             logger.error(f"Error merging ledger entries for recovery: {e}")
 
