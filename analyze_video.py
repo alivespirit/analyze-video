@@ -263,6 +263,9 @@ def analyze_video(motion_result, video_path):
                     break
                 except Exception as e_fallback:
                     logger.warning(f"[{file_basename}] {model_fallback} also failed: {e_fallback}")
+                    if '429' in str(e_fallback) and '429' in str(e_main) and (detected_motion_status == "no_significant_motion" or detected_motion_status == "no_person"):
+                        logger.info(f"[{file_basename}] Rate limit exceeded on both models, skipping retries.")
+                        attempt = max_retries - 1  # Skip retries for rate limit on non-critical analyses
                     if attempt < max_retries - 1:
                         wait_time = 10 * (2 ** attempt)
                         logger.warning(f"[{file_basename}] Retrying in {wait_time}s...")
