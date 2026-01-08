@@ -229,9 +229,11 @@ def analyze_video(motion_result, video_path):
                     types.Part(text=prompt)
                 ]
             )
+        gen_config = types.GenerateContentConfig(automatic_function_calling=types.AutomaticFunctionCallingConfig(disable=True))
 
         analysis_result = ""
         additional_text = ""
+
 
         for attempt in range(max_retries):
             try:
@@ -239,11 +241,7 @@ def analyze_video(motion_result, video_path):
                 response = client.models.generate_content(
                     model=model_main,
                     contents=contents,
-                    config=types.GenerateContentConfig(
-                        automatic_function_calling=types.AutomaticFunctionCallingConfig(
-                            disable=True
-                        )
-                    )
+                    config=gen_config
                 )
                 logger.info(f"[{file_basename}] {model_main} response received.")
                 if response.text is None or response.text.strip() == "":
@@ -256,11 +254,7 @@ def analyze_video(motion_result, video_path):
                     response = client.models.generate_content(
                         model=model_fallback,
                         contents=contents,
-                        config=types.GenerateContentConfig(
-                            automatic_function_calling=types.AutomaticFunctionCallingConfig(
-                                disable=True
-                            )
-                        )
+                        config=gen_config
                     )
                     logger.info(f"[{file_basename}] {model_fallback} response received.")
                     if response.text is None or response.text.strip() == "":
@@ -280,11 +274,7 @@ def analyze_video(motion_result, video_path):
                                 response = client.models.generate_content(
                                     model=model_final_fallback,
                                     contents=contents,
-                                    config=types.GenerateContentConfig(
-                                        automatic_function_calling=types.AutomaticFunctionCallingConfig(
-                                            disable=True
-                                        )
-                                    )
+                                    config=gen_config
                                 )
                                 logger.info(f"[{file_basename}] {model_final_fallback} response received.")
                                 analysis_result = model_final_fallback_text + response.text
