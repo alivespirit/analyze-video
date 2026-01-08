@@ -268,7 +268,7 @@ def analyze_video(motion_result, video_path):
                         attempt = max_retries - 1  # Skip retries for rate limit on non-critical analyses
                     if attempt < max_retries - 1:
                         wait_time = 10 * (2 ** attempt)
-                        logger.warning(f"[{file_basename}] Retrying in {wait_time}s...")
+                        logger.info(f"[{file_basename}] Retrying in {wait_time}s...")
                         time.sleep(wait_time)
                     else:
                         if final_fallback_enabled:
