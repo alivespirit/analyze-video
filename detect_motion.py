@@ -30,8 +30,8 @@ ROI_CONFIG_FILE = os.path.join(SCRIPT_DIR, "roi.json")
 PADDING_SECONDS = 1.5
 WARMUP_FRAMES = 15
 MAX_EVENT_GAP_SECONDS = 3.0
-MIN_EVENT_DURATION_SECONDS = 0.8
-MIN_INSIGNIFICANT_EVENT_DURATION_SECONDS = 0.2
+MIN_EVENT_DURATION_SECONDS = 0.8               # Events shorter than this are considered insignificant, but sent to Gemini for analysis
+MIN_INSIGNIFICANT_EVENT_DURATION_SECONDS = 0.2 # Events shorter than this are discarded as noise/shadows
 # Tracking/render speed-up thresholds
 # <= TRACK_FULL_UNTIL_SECONDS: track all frames, render all frames
 # > TRACK_FULL_UNTIL_SECONDS and <= TRACK_SKIP_FROM_SECONDS: track all frames, render every 2nd frame
@@ -41,8 +41,8 @@ TRACK_SKIP_FROM_SECONDS = 12.0
 SAVE_INSIGNIFICANT_FRAMES = True
 SEND_INSIGNIFICANT_FRAMES = False
 CROP_PADDING = 30
-TRACK_ROI_PADDING = 10  # padding for tracker ROI bounding box
-PERSON_MIN_FRAMES = 10
+TRACK_ROI_PADDING = 10 # padding for tracker ROI bounding box
+PERSON_MIN_FRAMES = 10 # Minimum frames with person inside ROI to consider event significant, if less then sent to Gemini for analysis
 
 # --- Tesla config ---
 TESLA_EMAIL = os.getenv("TESLA_EMAIL")
