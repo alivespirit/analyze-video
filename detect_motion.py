@@ -781,6 +781,8 @@ def detect_motion(input_video_path, output_dir):
             frame_has_person_in_roi = False
             frame_has_crossing = False
             frame_has_highlight = False
+            # Ensure defined even if there are no tracker detections this frame
+            accepted_persons = []
 
             if results[0].boxes.id is not None:
                 boxes = results[0].boxes.xyxy.cpu().tolist()
