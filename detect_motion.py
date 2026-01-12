@@ -8,6 +8,7 @@ import numpy as np
 from datetime import datetime
 
 from moviepy.video.io.ffmpeg_writer import FFMPEG_VideoWriter
+from person_id import PersonReID
 
 try:
     from ultralytics import YOLO
@@ -52,7 +53,7 @@ TESLA_LAST_CHECK = 0
 TESLA_SOC_CHECK_ENABLED = bool(teslapy and TESLA_REFRESH_TOKEN and TESLA_EMAIL)
 
 # --- Object Detection Configuration ---
-OBJECT_DETECTION_MODEL_PATH = os.getenv("OBJECT_DETECTION_MODEL_PATH", default="best_openvino_model")
+OBJECT_DETECTION_MODEL_PATH = os.getenv("OBJECT_DETECTION_MODEL_PATH", default=os.path.join("models", "best_openvino_model"))
 CONF_THRESHOLD = 0.5
 DETECT_CLASSES = [0, 1]  # 0: person, 1: car
 TRACK_ROI_ENABLED = True  # Enable tracker ROI crop (from roi.json: 'tracker_roi' or fallback to motion_detection_roi/legacy)
@@ -66,6 +67,25 @@ LINE_Y_TOLERANCE = 6
 HIGHLIGHT_WINDOW_FRAMES = 5 # Minimum highlight duration (frames) after entering tolerance band
 STABLE_MIN_FRAMES = 2  # frames outside tolerance required to confirm stable side
 DWELL_SECONDS = 2.0    # seconds to stay on the other side to confirm a crossing
+
+# --- Person ReID Configuration ---
+REID_ENABLED = True
+REID_MODEL_PATH = os.path.join(
+    SCRIPT_DIR,
+    "models",
+    "reid",
+    "intel",
+    "person-reidentification-retail-0288",
+    "FP16",
+    "person-reidentification-retail-0288.xml",
+)
+REID_GALLERY_PATH = os.getenv("REID_GALLERY_PATH", os.path.join(SCRIPT_DIR, "person_of_interest"))
+REID_THRESHOLD = 0.6 # cosine similarity threshold
+REID_SAMPLING_STRIDE = 2  # sample every Nth frame near the line for ReID
+REID_LINE_EXTRA_TOLERANCE = 20  # pixels beyond LINE_Y_TOLERANCE for ReID sampling
+REID_MAX_SAMPLES = 128 # maximum number of ReID samples to collect per event
+REID_CROP_PADDING = 12 # pixels to expand crop around detected person box
+SAVE_REID_BEST_CROP = True
 
 # --- Load Object Detection Model ---
 try:
@@ -653,6 +673,9 @@ def detect_motion(input_video_path, output_dir):
     person_display_id_counter = 1
     session_display_initialized = False
 
+    # Prepare accumulator for ReID samples across all kept/processed events
+    reid_candidate_crops = []
+
     # Process each event separately and include only those with person inside ROI for >= PERSON_MIN_FRAMES
     for clip_index, (start_frame, end_frame) in enumerate(significant_sub_clips):
         duration_seconds = (end_frame - start_frame) / fps
@@ -739,6 +762,8 @@ def detect_motion(input_video_path, output_dir):
             frame_idx += 1
             if not ret or frame is None:
                 continue
+            # Keep a clean copy for ReID crops (avoid overlay artifacts)
+            frame_for_reid = frame.copy()
 
             # Apply tracker ROI crop if available
             if track_roi_bbox is not None:
@@ -1094,6 +1119,22 @@ def detect_motion(input_video_path, output_dir):
                 rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
                 event_frames_rgb.append(rgb_frame)
 
+            # Collect ReID candidate crops near line tolerance every REID_SAMPLING_STRIDE
+            # Use clean frame copy to avoid drawn overlays in crops
+            if REID_ENABLED and REID_SAMPLING_STRIDE > 0 and (processed_offset % REID_SAMPLING_STRIDE == 0):
+                if len(reid_candidate_crops) < REID_MAX_SAMPLES and accepted_persons:
+                    for pbox, _eid in accepted_persons:
+                        y_center = int((pbox[1] + pbox[3]) / 2)
+                        if abs(y_center - LINE_Y) <= (LINE_Y_TOLERANCE + REID_LINE_EXTRA_TOLERANCE):
+                            x1 = max(0, int(pbox[0]) - REID_CROP_PADDING)
+                            y1 = max(0, int(pbox[1]) - REID_CROP_PADDING)
+                            x2 = min(orig_w, int(pbox[2]) + REID_CROP_PADDING)
+                            y2 = min(orig_h, int(pbox[3]) + REID_CROP_PADDING)
+                            if x2 > x1 and y2 > y1:
+                                crop = frame_for_reid[y1:y2, x1:x2]
+                                if crop is not None and crop.size > 0:
+                                    reid_candidate_crops.append(crop)
+
         # Confirm any last pending crossing if it matches the final side
         for pid, pend in list(event_pending_cross.items()):
             end_side = event_last_side.get(pid, event_first_side.get(pid))
@@ -1211,6 +1252,46 @@ def detect_motion(input_video_path, output_dir):
             crossing_direction = 'down'
         logger.info(f"[{file_basename}] Gate crossing detected! Direction: {crossing_direction}. Persons Up: {persons_up}, Down: {persons_down}.")
 
+        # Person ReID run: evaluate collected crops against gallery
+        reid_result = None
+        if REID_ENABLED:
+            reid_result = {"matched": False, "score": 0.0, "threshold": REID_THRESHOLD, "samples": 0, "best_path": None}
+            try:
+                samples = reid_candidate_crops
+                reid_result["samples"] = len(samples)
+                if len(samples) > 0:
+                    logger.info(f"[{file_basename}] Running person ReID on {len(samples)} crop(s) with stride={REID_SAMPLING_STRIDE}.")
+                    reid = PersonReID(REID_MODEL_PATH, REID_GALLERY_PATH, threshold=REID_THRESHOLD, file_basename=file_basename)
+                    best_score = 0.0
+                    best_crop = None
+                    for crop in samples:
+                        is_match, score = reid.identify(crop)
+                        if score > best_score:
+                            best_score = score
+                            best_crop = crop
+                    reid_result["matched"] = best_score >= REID_THRESHOLD
+                    reid_result["score"] = round(best_score, 4)
+                    if reid_result["matched"] and SAVE_REID_BEST_CROP and best_crop is not None:
+                        try:
+                            date_folder = datetime.now().strftime("%Y%m%d")
+                            daily_dir = os.path.join(output_dir, date_folder)
+                            os.makedirs(daily_dir, exist_ok=True)
+                            cam_prefix = input_video_path.split(os.path.sep)[-2][-2:] if len(input_video_path.split(os.path.sep)) >= 2 else ""
+                            fname = f"{cam_prefix}H{os.path.splitext(file_basename)[0]}_reid_best.jpg"
+                            save_path = os.path.join(daily_dir, fname)
+                            cv2.imwrite(save_path, best_crop, [cv2.IMWRITE_JPEG_QUALITY, 90])
+                            reid_result["best_path"] = save_path
+                            logger.debug(f"[{file_basename}] ReID positive (score={best_score:.3f} >= {REID_THRESHOLD}). Saved best crop to {save_path}.")
+                        except Exception as e:
+                            logger.warning(f"[{file_basename}] Failed to save best ReID crop: {e}")
+                    logger.info(f"[{file_basename}] ReID result: matched={reid_result['matched']}, best_score={best_score:.3f}, threshold={REID_THRESHOLD}.")
+                else:
+                    logger.info(f"[{file_basename}] No ReID candidate crops collected.")
+            except Exception as e:
+                logger.warning(f"[{file_basename}] ReID evaluation failed: {e}")
+        else:
+            logger.debug(f"[{file_basename}] ReID is disabled (REID_ENABLED=False). Skipping identification.")
+
     elapsed_time = time.time() - start_time
     logger.info(f"[{file_basename}] Full processing took {elapsed_time:.2f} seconds. Detected: {num_persons} persons, {num_cars} cars.")
 
@@ -1222,5 +1303,6 @@ def detect_motion(input_video_path, output_dir):
         'cars_detected': num_cars,
         'crossing_direction': crossing_direction,
         'persons_up': persons_up,
-        'persons_down': persons_down
+        'persons_down': persons_down,
+        'reid': reid_result if (crossing_detected and REID_ENABLED) else None,
     }

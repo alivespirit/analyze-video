@@ -88,9 +88,17 @@ def analyze_video(motion_result, video_path):
         elif direction == 'both':
             direction_text = "\U0001F6B6\u200D\u27A1\uFE0F" * persons_down + " \U0001F6A7" + "\U0001F6B6\u200D\u27A1\uFE0F" * persons_up
 
-        analysis_result = direction_text
-        if 9 <= now.hour <= 13:
-            analysis_result += f"\n{USERNAME}"
+        # Append ReID result if available and positive
+        reid = motion_result.get('reid')
+        reid_text = ""
+        if isinstance(reid, dict) and reid.get('matched'):
+            score = float(reid.get('score', 0.0))
+            percent = int(round(score * 100))
+            reid_text = f" / \U0001FAC6 *{percent}%*\n{USERNAME}"
+
+        analysis_result = direction_text + reid_text
+        #if 9 <= now.hour <= 13:
+        #    analysis_result += f"\n{USERNAME}"
         return {
             'response': timestamp + analysis_result,
             'insignificant_frames': motion_result.get('insignificant_frames', []),

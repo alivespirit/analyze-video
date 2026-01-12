@@ -244,7 +244,7 @@ TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 USERNAME = os.getenv("TELEGRAM_NOTIFY_USERNAME")
 VIDEO_FOLDER = os.getenv("VIDEO_FOLDER")
-OBJECT_DETECTION_MODEL_PATH = os.getenv("OBJECT_DETECTION_MODEL_PATH", default="best_openvino_model")
+OBJECT_DETECTION_MODEL_PATH = os.getenv("OBJECT_DETECTION_MODEL_PATH", default=os.path.join("models", "best_openvino_model"))
 TESLA_EMAIL = os.getenv("TESLA_EMAIL")
 TESLA_REFRESH_TOKEN = os.getenv("TESLA_REFRESH_TOKEN")
 

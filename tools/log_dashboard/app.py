@@ -39,6 +39,10 @@ NEW_FILE_RE = re.compile(r"^New file detected:")
 AWAY_RE = re.compile(r"Reaction detected: object went away")
 BACK_RE = re.compile(r"Reaction detected: object came back")
 REACTION_REMOVED_RE = re.compile(r"Reaction removed\.")
+# ReID result pattern: "ReID result: matched=True/False, best_score=0.xxx, threshold=..."
+REID_RESULT_RE = re.compile(
+    r"ReID result:\s*matched=(?P<matched>True|False),\s*best_score=(?P<score>[0-9]*\.?[0-9]+),\s*threshold=(?P<thresh>[0-9]*\.?[0-9]+)"
+)
 
 
 env = Environment(
@@ -137,6 +141,9 @@ def collect_metrics(entries: List[Dict]) -> Dict:
     # Away/back reaction events and latest reaction state per video
     away_back_events: List[Dict] = []
     reaction_state_per_video: Dict[str, Optional[str]] = {}
+    # ReID results per video
+    reid_best_score_per_video: Dict[str, float] = {}
+    reid_matched_per_video: Dict[str, bool] = {}
 
     for e in entries:
         content = e["content"]
@@ -175,6 +182,17 @@ def collect_metrics(entries: List[Dict]) -> Dict:
             elif REACTION_REMOVED_RE.search(content):
                 # Remove current reaction state for this video
                 reaction_state_per_video[vid] = None
+
+            # ReID result parsing
+            m = REID_RESULT_RE.search(content)
+            if m:
+                try:
+                    matched = True if m.group("matched") == "True" else False
+                    score = float(m.group("score"))
+                    reid_best_score_per_video[vid] = score
+                    reid_matched_per_video[vid] = matched
+                except Exception:
+                    pass
 
             # If a later error-level line appears for this video, treat it as status=error
             level = e.get("level")
@@ -259,6 +277,9 @@ def collect_metrics(entries: List[Dict]) -> Dict:
         # Latest reaction state after processing entire day
         "away_videos": sorted([v for v, st in reaction_state_per_video.items() if st == "away"]),
         "back_videos": sorted([v for v, st in reaction_state_per_video.items() if st == "back"]),
+        # ReID metrics
+        "reid_best_score_per_video": reid_best_score_per_video,
+        "reid_matched_per_video": reid_matched_per_video,
     }
 
 
@@ -436,6 +457,13 @@ def text_color_on_bg(hex_color: str) -> str:
 STATUS_TEXT_COLORS = {k: text_color_on_bg(v) for k, v in STATUS_COLORS.items()}
 SEVERITY_TEXT_COLORS = {k: text_color_on_bg(v) for k, v in SEVERITY_COLORS.items()}
 
+# ReID chip colors: light blue for matched=True, dark blue for matched=False
+REID_COLORS = {
+    "true": "#93c5fd",   # light blue 300
+    "false": "#1e3a8a",  # dark blue 900
+}
+REID_TEXT_COLORS = {k: text_color_on_bg(v) for k, v in REID_COLORS.items()}
+
 
 # (moved helper functions above)
 
@@ -587,6 +615,8 @@ def today_view(
         severity_colors=SEVERITY_COLORS,
         status_text_colors=STATUS_TEXT_COLORS,
         severity_text_colors=SEVERITY_TEXT_COLORS,
+        reid_colors=REID_COLORS,
+        reid_text_colors=REID_TEXT_COLORS,
         statuses_present=sorted(metrics["status_counts"].keys()),
         total_videos_all=metrics_all.get("videos_total", 0),
         log_dir=LOG_DIR,
@@ -677,6 +707,8 @@ def day_view(
         severity_colors=SEVERITY_COLORS,
         status_text_colors=STATUS_TEXT_COLORS,
         severity_text_colors=SEVERITY_TEXT_COLORS,
+        reid_colors=REID_COLORS,
+        reid_text_colors=REID_TEXT_COLORS,
         statuses_present=sorted(metrics["status_counts"].keys()),
         total_videos_all=metrics_all.get("videos_total", 0),
         log_dir=LOG_DIR,

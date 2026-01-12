@@ -322,6 +322,15 @@
                 {% if gdir %}
                   <span class="tag gate-chip" title="Gate: {{ gdir }}" aria-label="Gate: {{ gdir }}">{{ arrow }}</span>
                 {% endif %}
+                {# ReID score chip #}
+                {% set rscore = metrics.reid_best_score_per_video.get(vid) %}
+                {% set rmatch = metrics.reid_matched_per_video.get(vid) %}
+                {% if (rscore is not none) and (rmatch is not none) %}
+                  {% set rkey = 'true' if rmatch else 'false' %}
+                  {% set rcol = reid_colors.get(rkey, '#3b82f6') %}
+                  {% set rtcol = reid_text_colors.get(rkey, '#ffffff') %}
+                  <span class="tag aux-chip" style="background: {{ rcol }}; color: {{ rtcol }}" title="ReID score">{{ '%.0f'|format(rscore * 100.0) }}%</span>
+                {% endif %}
                 {% if metrics.away_videos and (vid in metrics.away_videos) %}
                   <span class="tag aux-chip" title="Away reaction">away</span>
                 {% endif %}

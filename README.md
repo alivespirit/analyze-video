@@ -12,7 +12,7 @@ This project is a Python-based application that monitors a folder for new video 
   - **Gate Crossing Detection**: Identifies and sends a special notification when a person crosses a predefined horizontal line in the frame, indicating entry or exit.
   - **Cropped ROI Analysis**: Performs analysis on a smaller, padded region around the ROI for better performance.
   - **Smart Event Filtering**: Differentiates between significant, insignificant, and noisy motion events based on duration.
-   - **Highlight Clips**: Generates clips for significant motions with tracked objects and bounding boxes. Uses a CRF-based H.264 writer (libx264, preset=medium, CRF=28, yuv420p, faststart). Frames are streamed to disk during processing, lowering RAM usage. Long events are automatically sped up (2x).
+  - **Highlight Clips**: Generates clips for significant motions with tracked objects and bounding boxes. Uses a CRF-based H.264 writer (libx264, preset=medium, CRF=28, yuv420p, faststart). Frames are streamed to disk during processing, lowering RAM usage. Long events are automatically sped up (2x).
   - **Insignificant Motion Snapshots**: Extracts and sends a single frame for brief motion events, now with object detection boxes drawn on them.
 - **Dynamic Gemini AI Analysis**:
   - **Time-Based Model Selection**: Automatically switches between different Gemini models (e.g., Pro vs. Flash) based on the time of day for cost optimization.
@@ -25,6 +25,11 @@ This project is a Python-based application that monitors a folder for new video 
 - **Tesla Integration (Optional)**:
   - **State of Charge (SoC) Display**: If a car is detected in a predefined location, the bot fetches the Tesla's SoC and displays it directly on the video highlight clip.
   - **Efficient Caching**: Caches the SoC in `tesla_soc.txt` and only queries the API periodically or when the cache is stale to avoid waking the vehicle unnecessarily.
+- **Person Re-Identification (ReID)**:
+  - **Who Crossed?** On gate crossings, the system optionally runs person re-identification using Intel's `person-reidentification-retail-0288` (OpenVINO) against a gallery in `person_of_interest/`.
+  - **Line-Centered Sampling**: Samples person crops near the gate line tolerance every N frames and compares normalized embeddings via cosine similarity.
+  - **Disk Cache**: Embeddings are cached to `temp/` so separate worker processes reuse precomputed vectors.
+  - **Readable Output**: When a match exceeds the threshold, the Telegram gate message includes `XX%`. Optionally saves the best matching crop to the daily folder for manual review.
 - **Performance & Stability**:
   - **Dual-Executor Design**: Uses separate, single-worker thread pools for CPU-bound (video analysis) and I/O-bound (API calls) tasks to prevent system overload.
   - **Graceful Shutdown & Auto-Restart**: Automatically restarts the script if any of the Python files is modified, with robust shutdown logic.
@@ -93,9 +98,13 @@ pip install -r requirements.txt
    VIDEO_FOLDER=/path/to/your/video/folder
    LOG_PATH=logs/
 
-   # --- Object Detection ---
+   # --- Object Detection (Optional) ---
    # Path to the exported OpenVINO model directory
-   OBJECT_DETECTION_MODEL_PATH=best_openvino_model
+   OBJECT_DETECTION_MODEL_PATH=models/best_openvino_model
+
+   # --- Person Re-Identification (Optional) ---
+   # Path to a folder with reference images of the person of interest
+   REID_GALLERY_PATH=/path/to/person_of_interest
 
    # --- Tesla Integration (Optional) ---
    TESLA_EMAIL=your_tesla_account_email
@@ -159,6 +168,11 @@ pip install -r requirements.txt
      - **Object Tracking:** If significant motion is found, the `ultralytics` pretrained YOLO model tracks objects (people, cars) across frames.
        - **Event Classification:** The script determines the event type: `gate_crossing`, `significant_motion`, `no_significant_motion`, `no_person`, or `no_motion`.
      - **Artifact Generation:** A highlight clip (.mp4) or insignificant motion snapshots (.jpg) are created in the `temp/` directory.
+     - **Person ReID (Gate Crossings):**
+       - During tracking, the analyzer samples person crops near the line tolerance band every `REID_SAMPLING_STRIDE` frames.
+       - After a gate crossing is confirmed, these crops are compared against gallery embeddings using Intel's `person-reidentification-retail-0288` model.
+       - Gallery embeddings are cached on disk at `temp/` per gallery path to avoid recomputation across worker processes.
+       - If a positive match is found, the gate message includes `XX%` and (optionally) the best crop is saved to the daily output folder.
    - **AI Analysis (I/O-Bound Task):** The result is passed to the `io_executor`.
      - For gate crossings or off-peak hours, Gemini is skipped.
      - For significant motion during peak hours, the highlight clip is sent to Gemini for a text description.
@@ -202,6 +216,16 @@ pip install -r requirements.txt
   - `CONF_THRESHOLD`: detection confidence threshold for the YOLO model
   - `HIGHLIGHT_WINDOW_FRAMES`: frames to keep the red highlight after a crossing
   - `CROP_PADDING`: extra pixels around ROI for cropped analysis
+- **ReID Parameters (detect_motion.py):**
+  - `REID_ENABLED`: enable/disable person re-identification (default: True)
+  - `REID_THRESHOLD`: cosine similarity threshold for a positive match (default: 0.6)
+  - `REID_SAMPLING_STRIDE`: sample every N frames near the line tolerance (default: 2)
+  - `REID_LINE_EXTRA_TOLERANCE`: extra pixels beyond `LINE_Y_TOLERANCE` for ReID sampling (default: 20)
+  - `REID_CROP_PADDING`: extra pixels around detected person boxes when creating ReID crops (default: 12)
+  - `REID_MAX_SAMPLES`: cap on crops per video to keep inference snappy (default: 128)
+  - `SAVE_REID_BEST_CROP`: save the best matching crop when matched (default: True)
+  - `REID_GALLERY_PATH` (env): folder with reference images (default: `person_of_interest/`)
+- **ReID Model Location:** By default, the Intel model XML is expected at `model/reid/intel/person-reidentification-retail-0288/FP16/person-reidentification-retail-0288.xml`. Adjust if your model path differs.
 - **ROI:** Modify `roi.json` to change the monitored area.
 - **Object Detection Model:** Replace the contents of the `best_openvino_model` directory with your own exported YOLOv12 OpenVINO model.
   - Follow instructions in [tools/finetuning/](tools/finetuning/) to train your own model if needed.
