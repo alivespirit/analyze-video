@@ -1311,7 +1311,8 @@ def detect_motion(input_video_path, output_dir):
                         # If couldn't reach K due to diversity, backfill from remaining best
                         if len(selected) < max(1, int(REID_TOP_K)):
                             for cand in scored:
-                                if cand in selected:
+                                # Avoid Numpy array equality on dicts; use identity
+                                if any(cand is s for s in selected):
                                     continue
                                 selected.append(cand)
                                 if len(selected) >= max(1, int(REID_TOP_K)):

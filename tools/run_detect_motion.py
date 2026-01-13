@@ -42,6 +42,7 @@ def main():
     res = detect_motion(input_video, output_dir)
 
     # Pretty print result summary
+    reid = res.get("reid") or None
     summary = {
         "status": res.get("status"),
         "clip_path": res.get("clip_path"),
@@ -51,6 +52,17 @@ def main():
         "persons_up": res.get("persons_up"),
         "persons_down": res.get("persons_down"),
         "insignificant_frames_saved": len(res.get("insignificant_frames", [])),
+        "reid": (
+            {
+                "matched": reid.get("matched"),
+                "score": reid.get("score"),
+                "threshold": reid.get("threshold"),
+                "samples": reid.get("samples"),
+                "best_path": reid.get("best_path"),
+            }
+            if isinstance(reid, dict)
+            else None
+        ),
     }
     print(json.dumps(summary, indent=2))
 
