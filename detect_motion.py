@@ -1273,7 +1273,8 @@ def detect_motion(input_video_path, output_dir):
                             best_crop = crop
                     reid_result["matched"] = best_score >= REID_THRESHOLD
                     reid_result["score"] = round(best_score, 4)
-                    if reid_result["matched"] and SAVE_REID_BEST_CROP and best_crop is not None:
+                    # Save best matching crop if enabled
+                    if SAVE_REID_BEST_CROP and best_crop is not None:
                         try:
                             date_folder = datetime.now().strftime("%Y%m%d")
                             daily_dir = os.path.join(output_dir, date_folder)
@@ -1283,7 +1284,7 @@ def detect_motion(input_video_path, output_dir):
                             save_path = os.path.join(daily_dir, fname)
                             cv2.imwrite(save_path, best_crop, [cv2.IMWRITE_JPEG_QUALITY, 90])
                             reid_result["best_path"] = save_path
-                            logger.debug(f"[{file_basename}] ReID positive (score={best_score:.3f} >= {REID_THRESHOLD}). Saved best crop to {save_path}.")
+                            logger.debug(f"[{file_basename}] ReID score={best_score:.3f}. Saved best crop to {save_path}.")
                         except Exception as e:
                             logger.warning(f"[{file_basename}] Failed to save best ReID crop: {e}")
                     logger.info(f"[{file_basename}] ReID result: matched={reid_result['matched']}, best_score={best_score:.3f}, threshold={REID_THRESHOLD}.")

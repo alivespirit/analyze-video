@@ -4,6 +4,7 @@ import logging
 import time
 import shutil
 import json
+import re
 
 from telegram import InlineKeyboardMarkup, InlineKeyboardButton, InputMediaPhoto
 import telegram.error
@@ -32,6 +33,32 @@ _SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 _TEMP_DIR = os.path.join(_SCRIPT_DIR, "temp")
 _MAP_FILE_PATH = os.path.join(_TEMP_DIR, "message_map.json")
 _GROUP_FILE_PATH = os.path.join(_TEMP_DIR, "no_motion_group.json")
+
+# REID gallery destination path
+REID_GALLERY_PATH = os.getenv("REID_GALLERY_PATH", os.path.join(_SCRIPT_DIR, "person_of_interest"))
+
+def compute_reid_paths(video_path: str, file_basename: str):
+    """Compute source .jpg (in temp) and destination (gallery) paths for REID best frame.
+
+    Expected temp filename pattern: _TEMP_DIR/YYYYMMDD/HHH<basename_without_ext>_reid_best.jpg
+    - YYYYMMDD and HH are parsed from the parent folder of the video (e.g., 2026010709 -> 20260107, 09).
+    - video_path may contain Windows (\\) or POSIX (/) separators.
+    """
+    try:
+        parts = re.split(r"[\\/]", video_path)
+        if len(parts) < 2:
+            return None, None
+        parent_folder = parts[-2]
+        m = re.search(r"(\d{8})(\d{2})", parent_folder)
+        if not m:
+            return None, None
+        yyyymmdd, hh = m.group(1), m.group(2)
+        base, _ = os.path.splitext(file_basename)
+        src_file = os.path.join(_TEMP_DIR, yyyymmdd, f"{hh}H{base}_reid_best.jpg")
+        dst_file = os.path.join(REID_GALLERY_PATH, os.path.basename(src_file))
+        return src_file, dst_file
+    except Exception:
+        return None, None
 
 def load_message_map_from_disk():
     try:
@@ -194,6 +221,30 @@ async def reaction_callback(update, context):
 
     # Apply actions based on reactions
     new_caption = caption or ""
+    # REID gallery sync: remove on thumbs removal, copy on thumbs present
+    try:
+        src_reid, dst_reid = compute_reid_paths(video_path, file_basename)
+        if src_reid and dst_reid:
+            if removed_up or removed_down:
+                try:
+                    if os.path.exists(dst_reid):
+                        os.remove(dst_reid)
+                        logger.info(f"[{file_basename}] REID gallery frame removed: {dst_reid}")
+                except Exception as e:
+                    logger.warning(f"[{file_basename}] Failed to remove REID gallery frame: {e}")
+            if has_up or has_down:
+                try:
+                    os.makedirs(REID_GALLERY_PATH, exist_ok=True)
+                    if os.path.exists(src_reid):
+                        shutil.copy2(src_reid, dst_reid)
+                        logger.info(f"[{file_basename}] REID best frame copied to gallery: {dst_reid}")
+                    else:
+                        logger.warning(f"[{file_basename}] REID source not found: {src_reid}")
+                except Exception as e:
+                    logger.warning(f"[{file_basename}] Failed to copy REID frame to gallery: {e}")
+    except Exception as e:
+        logger.warning(f"[{file_basename}] Unexpected error during REID gallery sync: {e}")
+
     if has_up:
         logger.info(f"[{file_basename}] Reaction detected: object went away.")
         if parse_mode == 'MarkdownV2':
