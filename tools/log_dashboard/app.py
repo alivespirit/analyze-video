@@ -347,16 +347,36 @@ def build_away_intervals(entries: List[Dict]) -> List[Dict[str, Optional[str]]]:
     # Sort by derived minute index to ensure chronological pairing
     collected.sort(key=lambda t: (t[0], t[1]))
 
+    # Minimal per-video last-removal filtering:
+    # - If a video's LAST reaction is 'remove' → drop all events for that video
+    # - Else, drop events at or before that video's LAST 'remove'
+    last_remove_minute: Dict[str, int] = {}
+    last_reaction_type: Dict[str, str] = {}
+    for minutes, _ts, typ, _hhmm, vid in collected:
+        if typ == "remove":
+            last_remove_minute[vid] = minutes
+        last_reaction_type[vid] = typ
+
+    filtered: List[Tuple[int, datetime, str, str, str]] = []
+    for minutes, ts, typ, hhmm, vid in collected:
+        if last_reaction_type.get(vid) == "remove":
+            continue
+        lr_min = last_remove_minute.get(vid)
+        if lr_min is not None and minutes <= lr_min:
+            continue
+        filtered.append((minutes, ts, typ, hhmm, vid))
+
+    # Original global pairing with pending back-only and open-away handling
+    filtered.sort(key=lambda t: (t[0], t[1]))
     intervals: List[Dict[str, Optional[str]]] = []
     current_start: Optional[str] = None
     pending_back_only: Dict[str, str] = {}
-    for _, _ts, typ, hhmm, vid in collected:
+    for _minutes, _ts, typ, hhmm, vid in filtered:
         if typ == "away":
             if current_start is None:
                 current_start = hhmm
             else:
-                # Already in "away" state; ignore duplicate away without intervening back
-                # Keep the earliest start until a back closes it
+                # Duplicate away without intervening back → keep earliest
                 pass
         elif typ == "back":
             if current_start is None:
@@ -369,29 +389,25 @@ def build_away_intervals(entries: List[Dict]) -> List[Dict[str, Optional[str]]]:
                     eh, em = [int(x) for x in hhmm.split(":", 1)]
                     start_min = sh * 60 + sm
                     end_min = eh * 60 + em
-                    if end_min >= start_min:
+                    if end_min > start_min:
                         total = end_min - start_min
                         dh = total // 60
                         dm = total % 60
                         dur = (f"{dh}h" if dh else "") + (f"{dm}m" if dm or not dh else "")
+                        intervals.append({"start": current_start, "end": hhmm, "dur": dur})
+                        current_start = None
                     else:
-                        dur = None
+                        # Ignore invalid or zero-length closure; wait for a later valid 'back'
+                        pass
                 except Exception:
-                    dur = None
-                intervals.append({"start": current_start, "end": hhmm, "dur": dur})
-                current_start = None
-        else:  # remove
-            # Cancel any pending back-only interval for this video
-            if vid in pending_back_only:
-                try:
-                    del pending_back_only[vid]
-                except Exception:
+                    # If parsing fails, do not close; keep current_start for a valid later 'back'
                     pass
+        else:  # remove (normally filtered out; safety no-op)
+            pass
 
     # Emit any remaining pending back-only intervals as open-start intervals
     for _vid, end_hhmm in pending_back_only.items():
         intervals.append({"start": None, "end": end_hhmm, "dur": None})
-
     # If we ended with an open "away" without a later back, emit open-ended interval
     if current_start is not None:
         intervals.append({"start": current_start, "end": None, "dur": None})
