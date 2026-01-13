@@ -37,28 +37,37 @@ _GROUP_FILE_PATH = os.path.join(_TEMP_DIR, "no_motion_group.json")
 # REID gallery destination path
 REID_GALLERY_PATH = os.getenv("REID_GALLERY_PATH", os.path.join(_SCRIPT_DIR, "person_of_interest"))
 
-def compute_reid_paths(video_path: str, file_basename: str):
-    """Compute source .jpg (in temp) and destination (gallery) paths for REID best frame.
+def compute_reid_paths_multi(video_path: str, file_basename: str, k: int = 3, include_legacy: bool = True):
+    """Compute all candidate REID best paths (src,dst) for indices 1..k and optional legacy single file.
 
-    Expected temp filename pattern: _TEMP_DIR/YYYYMMDD/HHH<basename_without_ext>_reid_best.jpg
-    - YYYYMMDD and HH are parsed from the parent folder of the video (e.g., 2026010709 -> 20260107, 09).
-    - video_path may contain Windows (\\) or POSIX (/) separators.
+    Returns a list of (src, dst) tuples for files that should be considered for copy/remove.
     """
+    results = []
     try:
         parts = re.split(r"[\\/]", video_path)
         if len(parts) < 2:
-            return None, None
+            return results
         parent_folder = parts[-2]
         m = re.search(r"(\d{8})(\d{2})", parent_folder)
         if not m:
-            return None, None
+            return results
         yyyymmdd, hh = m.group(1), m.group(2)
         base, _ = os.path.splitext(file_basename)
-        src_file = os.path.join(_TEMP_DIR, yyyymmdd, f"{hh}H{base}_reid_best.jpg")
-        dst_file = os.path.join(REID_GALLERY_PATH, os.path.basename(src_file))
-        return src_file, dst_file
+
+        # Indexed files
+        for idx in range(1, max(1, int(k)) + 1):
+            src_file = os.path.join(_TEMP_DIR, yyyymmdd, f"{hh}H{base}_reid_best{idx}.jpg")
+            dst_file = os.path.join(REID_GALLERY_PATH, os.path.basename(src_file))
+            results.append((src_file, dst_file))
+
+        # Legacy file without index (keep for backward compatibility)
+        if include_legacy:
+            src_legacy = os.path.join(_TEMP_DIR, yyyymmdd, f"{hh}H{base}_reid_best.jpg")
+            dst_legacy = os.path.join(REID_GALLERY_PATH, os.path.basename(src_legacy))
+            results.append((src_legacy, dst_legacy))
     except Exception:
-        return None, None
+        return results
+    return results
 
 def load_message_map_from_disk():
     try:
@@ -221,27 +230,29 @@ async def reaction_callback(update, context):
 
     # Apply actions based on reactions
     new_caption = caption or ""
-    # REID gallery sync: remove on thumbs removal, copy on thumbs present
+    # REID gallery sync: remove on thumbs removal, copy on thumbs present (supports multiple best crops)
     try:
-        src_reid, dst_reid = compute_reid_paths(video_path, file_basename)
-        if src_reid and dst_reid:
+        pairs = compute_reid_paths_multi(video_path, file_basename, k=3, include_legacy=True)
+        if pairs:
             if removed_up or removed_down:
-                try:
-                    if os.path.exists(dst_reid):
-                        os.remove(dst_reid)
-                        logger.info(f"[{file_basename}] REID gallery frame removed: {dst_reid}")
-                except Exception as e:
-                    logger.warning(f"[{file_basename}] Failed to remove REID gallery frame: {e}")
+                for _src, dst in pairs:
+                    try:
+                        if os.path.exists(dst):
+                            os.remove(dst)
+                            logger.info(f"[{file_basename}] REID gallery frame removed: {dst}")
+                    except Exception as e:
+                        logger.warning(f"[{file_basename}] Failed to remove REID gallery frame: {e}")
             if has_up or has_down:
-                try:
-                    os.makedirs(REID_GALLERY_PATH, exist_ok=True)
-                    if os.path.exists(src_reid):
-                        shutil.copy2(src_reid, dst_reid)
-                        logger.info(f"[{file_basename}] REID best frame copied to gallery: {dst_reid}")
-                    else:
-                        logger.warning(f"[{file_basename}] REID source not found: {src_reid}")
-                except Exception as e:
-                    logger.warning(f"[{file_basename}] Failed to copy REID frame to gallery: {e}")
+                for src, dst in pairs:
+                    try:
+                        if os.path.exists(src):
+                            shutil.copy2(src, dst)
+                            logger.info(f"[{file_basename}] REID frame copied to gallery: {dst}")
+                        else:
+                            # Don't warn for every missing index; a subset may exist
+                            logger.debug(f"[{file_basename}] REID source not found: {src}")
+                    except Exception as e:
+                        logger.warning(f"[{file_basename}] Failed to copy REID frame to gallery: {e}")
     except Exception as e:
         logger.warning(f"[{file_basename}] Unexpected error during REID gallery sync: {e}")
 

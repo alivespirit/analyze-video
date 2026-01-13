@@ -86,6 +86,8 @@ REID_LINE_EXTRA_TOLERANCE = 20  # pixels beyond LINE_Y_TOLERANCE for ReID sampli
 REID_MAX_SAMPLES = 128 # maximum number of ReID samples to collect per event
 REID_CROP_PADDING = 12 # pixels to expand crop around detected person box
 SAVE_REID_BEST_CROP = True
+REID_TOP_K = 3  # save up to K best, diverse crops per event
+REID_DIVERSITY_MIN_DIST = 0.2  # min cosine distance between selected embeddings
 
 # --- Load Object Detection Model ---
 try:
@@ -1264,29 +1266,77 @@ def detect_motion(input_video_path, output_dir):
                 if len(samples) > 0:
                     logger.info(f"[{file_basename}] Running person ReID on {len(samples)} crop(s) with stride={REID_SAMPLING_STRIDE}.")
                     reid = PersonReID(REID_MODEL_PATH, REID_GALLERY_PATH, threshold=REID_THRESHOLD, file_basename=file_basename)
+
+                    # Score each sample vs gallery and compute embeddings for diversity filtering
+                    scored = []
                     best_score = 0.0
-                    best_crop = None
                     for crop in samples:
-                        is_match, score = reid.identify(crop)
-                        if score > best_score:
-                            best_score = score
-                            best_crop = crop
+                        try:
+                            emb = reid.get_embedding(crop)
+                            score = 0.0
+                            if len(reid.gallery_vectors) > 0:
+                                # compute max cosine similarity to gallery
+                                for ref_vec in reid.gallery_vectors:
+                                    s = float(np.dot(emb, ref_vec))
+                                    if s > score:
+                                        score = s
+                            scored.append({"crop": crop, "score": float(score), "emb": emb})
+                            if score > best_score:
+                                best_score = score
+                        except Exception:
+                            continue
+
                     reid_result["matched"] = best_score >= REID_THRESHOLD
                     reid_result["score"] = round(best_score, 4)
-                    # Save best matching crop if enabled
-                    if SAVE_REID_BEST_CROP and best_crop is not None:
+
+                    # Select up to REID_TOP_K diverse top crops
+                    selected = []
+                    if scored:
+                        scored.sort(key=lambda x: x["score"], reverse=True)
+                        for cand in scored:
+                            if len(selected) >= max(1, int(REID_TOP_K)):
+                                break
+                            ok = True
+                            for s in selected:
+                                # cosine distance between normalized embeddings
+                                try:
+                                    sim = float(np.dot(cand["emb"], s["emb"]))
+                                except Exception:
+                                    sim = 1.0
+                                if (1.0 - sim) < REID_DIVERSITY_MIN_DIST:
+                                    ok = False
+                                    break
+                            if ok:
+                                selected.append(cand)
+                        # If couldn't reach K due to diversity, backfill from remaining best
+                        if len(selected) < max(1, int(REID_TOP_K)):
+                            for cand in scored:
+                                if cand in selected:
+                                    continue
+                                selected.append(cand)
+                                if len(selected) >= max(1, int(REID_TOP_K)):
+                                    break
+
+                    # Save selected crops (indexed only, no legacy duplicate)
+                    if SAVE_REID_BEST_CROP and selected:
                         try:
                             date_folder = datetime.now().strftime("%Y%m%d")
                             daily_dir = os.path.join(output_dir, date_folder)
                             os.makedirs(daily_dir, exist_ok=True)
                             cam_prefix = input_video_path.split(os.path.sep)[-2][-2:] if len(input_video_path.split(os.path.sep)) >= 2 else ""
-                            fname = f"{cam_prefix}H{os.path.splitext(file_basename)[0]}_reid_best.jpg"
-                            save_path = os.path.join(daily_dir, fname)
-                            cv2.imwrite(save_path, best_crop, [cv2.IMWRITE_JPEG_QUALITY, 90])
-                            reid_result["best_path"] = save_path
-                            logger.debug(f"[{file_basename}] ReID score={best_score:.3f}. Saved best crop to {save_path}.")
+
+                            saved_paths = []
+                            for idx, item in enumerate(selected, start=1):
+                                fname_idxed = f"{cam_prefix}H{os.path.splitext(file_basename)[0]}_reid_best{idx}.jpg"
+                                save_path_idxed = os.path.join(daily_dir, fname_idxed)
+                                cv2.imwrite(save_path_idxed, item["crop"], [cv2.IMWRITE_JPEG_QUALITY, 90])
+                                saved_paths.append(save_path_idxed)
+                            # best_path points to the highest-score indexed file
+                            reid_result["best_path"] = saved_paths[0] if saved_paths else None
+                            logger.debug(f"[{file_basename}] ReID topK saved {len(selected)} crops.")
                         except Exception as e:
-                            logger.warning(f"[{file_basename}] Failed to save best ReID crop: {e}")
+                            logger.warning(f"[{file_basename}] Failed to save ReID crops: {e}")
+
                     logger.info(f"[{file_basename}] ReID result: matched={reid_result['matched']}, best_score={best_score:.3f}, threshold={REID_THRESHOLD}.")
                 else:
                     logger.info(f"[{file_basename}] No ReID candidate crops collected.")
