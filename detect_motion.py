@@ -88,6 +88,8 @@ REID_CROP_PADDING = 12 # pixels to expand crop around detected person box
 SAVE_REID_BEST_CROP = True
 REID_TOP_K = 3  # save up to K best, diverse crops per event
 REID_DIVERSITY_MIN_DIST = 0.2  # min cosine distance between selected embeddings
+REID_NEGATIVE_GALLERY_PATH = os.getenv("REID_NEGATIVE_GALLERY_PATH", os.path.join(SCRIPT_DIR, "person_of_interest_negative"))
+REID_NEGATIVE_MARGIN = 0.08  # match must exceed negatives by at least this cosine margin
 
 # --- Load Object Detection Model ---
 try:
@@ -1265,7 +1267,14 @@ def detect_motion(input_video_path, output_dir):
                 reid_result["samples"] = len(samples)
                 if len(samples) > 0:
                     logger.info(f"[{file_basename}] Running person ReID on {len(samples)} crop(s) with stride={REID_SAMPLING_STRIDE}.")
-                    reid = PersonReID(REID_MODEL_PATH, REID_GALLERY_PATH, threshold=REID_THRESHOLD, file_basename=file_basename)
+                    reid = PersonReID(
+                        REID_MODEL_PATH,
+                        REID_GALLERY_PATH,
+                        threshold=REID_THRESHOLD,
+                        file_basename=file_basename,
+                        negative_gallery_path=REID_NEGATIVE_GALLERY_PATH,
+                        negative_margin=REID_NEGATIVE_MARGIN,
+                    )
 
                     # Score each sample vs gallery and compute embeddings for diversity filtering
                     scored = []
@@ -1274,20 +1283,35 @@ def detect_motion(input_video_path, output_dir):
                         try:
                             emb = reid.get_embedding(crop)
                             score = 0.0
+                            neg_score = 0.0
                             if len(reid.gallery_vectors) > 0:
                                 # compute max cosine similarity to gallery
                                 for ref_vec in reid.gallery_vectors:
                                     s = float(np.dot(emb, ref_vec))
                                     if s > score:
                                         score = s
-                            scored.append({"crop": crop, "score": float(score), "emb": emb})
+                            if len(reid.negative_vectors) > 0:
+                                for neg_vec in reid.negative_vectors:
+                                    s = float(np.dot(emb, neg_vec))
+                                    if s > neg_score:
+                                        neg_score = s
+                            scored.append({"crop": crop, "score": float(score), "neg": float(neg_score), "emb": emb})
                             if score > best_score:
                                 best_score = score
                         except Exception:
                             continue
 
-                    reid_result["matched"] = best_score >= REID_THRESHOLD
+                    # Margin-based decision vs negatives (if present)
+                    best_neg = 0.0
+                    if scored:
+                        try:
+                            best_neg = max(item.get("neg", 0.0) for item in scored)
+                        except Exception:
+                            best_neg = 0.0
+                    reid_result["matched"] = (best_score >= REID_THRESHOLD) and ((best_score - best_neg) >= REID_NEGATIVE_MARGIN)
                     reid_result["score"] = round(best_score, 4)
+                    reid_result["neg_score"] = round(best_neg, 4)
+                    reid_result["margin"] = REID_NEGATIVE_MARGIN
 
                     # Select up to REID_TOP_K diverse top crops
                     selected = []

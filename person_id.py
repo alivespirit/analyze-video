@@ -21,10 +21,13 @@ class PersonReID:
     against the gallery using cosine similarity of normalized embeddings.
     """
 
-    def __init__(self, model_path: str, gallery_path: str, threshold: float = 0.65, file_basename: str | None = None):
+    def __init__(self, model_path: str, gallery_path: str, threshold: float = 0.65, file_basename: str | None = None,
+                 negative_gallery_path: str | None = None, negative_margin: float = 0.0):
         self.threshold = float(threshold)
         self.gallery_vectors: list[np.ndarray] = []
+        self.negative_vectors: list[np.ndarray] = []
         self.file_basename = file_basename
+        self.negative_margin = float(negative_margin or 0.0)
 
         def _lp():
             return f"[{self.file_basename}] " if self.file_basename else ""
@@ -37,6 +40,13 @@ class PersonReID:
         self.output_layer = self.compiled_model.output(0)
 
         self.load_gallery(gallery_path)
+        # Load optional negative gallery
+        if negative_gallery_path:
+            try:
+                self.negative_vectors = self.load_gallery_vectors(negative_gallery_path)
+                logger.debug(f"{self._lp()}ReID: Loaded {len(self.negative_vectors)} negative vector(s) from {negative_gallery_path}.")
+            except Exception as e:
+                logger.debug(f"{self._lp()}ReID: Failed to load negative gallery {negative_gallery_path}: {e}")
 
     def preprocess(self, img: np.ndarray) -> np.ndarray:
         # Model expects 128x256 resolution, BGR input
@@ -60,15 +70,20 @@ class PersonReID:
         if not os.path.exists(gallery_path):
             logger.warning(f"{self._lp()}ReID: Gallery not found at {gallery_path}.")
             return
+        # Delegate to the generic loader and assign to instance state
+        vectors = self.load_gallery_vectors(gallery_path)
+        self.gallery_vectors = vectors
+        logger.debug(f"{self._lp()}ReID: Loaded {len(vectors)} reference image(s) from {gallery_path}.")
 
-        # Use cached embeddings if available
+    def load_gallery_vectors(self, gallery_path: str) -> list[np.ndarray]:
+        """Loader returning embedding vectors list for a gallery path (used for negatives too)."""
+        if not os.path.exists(gallery_path):
+            return []
+
         cached = _GALLERY_CACHE.get(gallery_path)
         if cached is not None:
-            self.gallery_vectors = cached
-            logger.debug(f"{self._lp()}ReID: Using cached gallery with {len(cached)} vector(s) from {gallery_path}.")
-            return
+            return cached
 
-        # Prepare disk cache paths (per-gallery, per-absolute path)
         try:
             os.makedirs(_CACHE_DIR, exist_ok=True)
         except Exception:
@@ -76,7 +91,6 @@ class PersonReID:
         gallery_key = hashlib.sha1(os.path.abspath(gallery_path).encode("utf-8")).hexdigest()[:16]
         cache_npz = os.path.join(_CACHE_DIR, f"reid_gallery_cache_{gallery_key}.npz")
 
-        # Scan gallery files and compute freshness indicators
         files = [f for f in os.listdir(gallery_path) if f.lower().endswith((".jpg", ".jpeg", ".png"))]
         current_count = len(files)
         latest_mtime = 0.0
@@ -86,7 +100,6 @@ class PersonReID:
             except Exception:
                 continue
 
-        # Try loading disk cache if up-to-date and counts match
         if os.path.exists(cache_npz):
             try:
                 npz_mtime = os.path.getmtime(cache_npz)
@@ -94,43 +107,31 @@ class PersonReID:
                     vectors = data["vectors"] if "vectors" in data.files else None
                     saved_count = int(data["count"]) if "count" in data.files else (vectors.shape[0] if vectors is not None else 0)
                 if vectors is not None and npz_mtime >= latest_mtime and saved_count == current_count:
-                    # Convert to list of 1D arrays
-                    self.gallery_vectors = [vectors[i] for i in range(vectors.shape[0])]
-                    _GALLERY_CACHE[gallery_path] = self.gallery_vectors
-                    logger.debug(f"{self._lp()}ReID: Loaded {saved_count} vector(s) from disk cache {cache_npz}.")
-                    return
-                else:
-                    logger.debug(f"{self._lp()}ReID: Disk cache outdated or count mismatch (cache_mtime={npz_mtime:.0f}, latest_mtime={latest_mtime:.0f}, count={current_count}). Recomputing.")
-            except Exception as e:
-                logger.debug(f"{self._lp()}ReID: Failed to use disk cache {cache_npz}: {e}. Recomputing.")
+                    vectors_list = [vectors[i] for i in range(vectors.shape[0])]
+                    _GALLERY_CACHE[gallery_path] = vectors_list
+                    return vectors_list
+            except Exception:
+                pass
 
-        logger.debug(f"{self._lp()}ReID: Loading reference gallery from {gallery_path}...")
-        count = 0
-        for filename in os.listdir(gallery_path):
-            if not filename.lower().endswith((".jpg", ".jpeg", ".png")):
-                continue
+        vectors_list: list[np.ndarray] = []
+        for filename in files:
             path = os.path.join(gallery_path, filename)
             img = cv2.imread(path)
             if img is None:
-                logger.warning(f"{self._lp()}ReID: Failed to read gallery image: {path}")
                 continue
             try:
                 vec = self.get_embedding(img)
-                self.gallery_vectors.append(vec)
-                count += 1
-            except Exception as e:
-                logger.warning(f"{self._lp()}ReID: Embedding failed for {path}: {e}")
-        logger.debug(f"{self._lp()}ReID: Loaded {count} reference image(s).")
-        _GALLERY_CACHE[gallery_path] = self.gallery_vectors
-
-        # Persist to disk cache for reuse across worker processes
-        if count > 0:
+                vectors_list.append(vec)
+            except Exception:
+                continue
+        _GALLERY_CACHE[gallery_path] = vectors_list
+        if len(vectors_list) > 0:
             try:
-                vectors_array = np.stack(self.gallery_vectors)
-                np.savez(cache_npz, vectors=vectors_array, count=count)
-                logger.debug(f"{self._lp()}ReID: Saved {count} vector(s) to disk cache {cache_npz}.")
-            except Exception as e:
-                logger.debug(f"{self._lp()}ReID: Failed to save disk cache {cache_npz}: {e}")
+                vectors_array = np.stack(vectors_list)
+                np.savez(cache_npz, vectors=vectors_array, count=len(vectors_list))
+            except Exception:
+                pass
+        return vectors_list
 
     def identify(self, person_crop: np.ndarray) -> tuple[bool, float]:
         """Return (is_match, max_score) against loaded gallery."""
@@ -147,3 +148,23 @@ class PersonReID:
 
         is_match = max_score >= self.threshold
         return is_match, max_score
+
+    def identify_with_negatives(self, person_crop: np.ndarray) -> tuple[bool, float, float]:
+        """Return (is_match, pos_score, neg_score) using margin vs negatives (if available)."""
+        if len(self.gallery_vectors) == 0:
+            return False, 0.0, 0.0
+
+        target_vec = self.get_embedding(person_crop)
+        pos_score = 0.0
+        for ref_vec in self.gallery_vectors:
+            s = float(np.dot(target_vec, ref_vec))
+            if s > pos_score:
+                pos_score = s
+        neg_score = 0.0
+        if len(self.negative_vectors) > 0:
+            for neg_vec in self.negative_vectors:
+                s = float(np.dot(target_vec, neg_vec))
+                if s > neg_score:
+                    neg_score = s
+        is_match = (pos_score >= self.threshold) and ((pos_score - neg_score) >= self.negative_margin)
+        return is_match, pos_score, neg_score

@@ -36,11 +36,13 @@ _GROUP_FILE_PATH = os.path.join(_TEMP_DIR, "no_motion_group.json")
 
 # REID gallery destination path
 REID_GALLERY_PATH = os.getenv("REID_GALLERY_PATH", os.path.join(_SCRIPT_DIR, "person_of_interest"))
+REID_NEGATIVE_GALLERY_PATH = os.getenv("REID_NEGATIVE_GALLERY_PATH", os.path.join(_SCRIPT_DIR, "person_of_interest_negative"))
 
-def compute_reid_paths_multi(video_path: str, file_basename: str, k: int = 3, include_legacy: bool = True):
-    """Compute all candidate REID best paths (src,dst) for indices 1..k and optional legacy single file.
+def compute_reid_paths_multi(video_path: str, file_basename: str, k: int = 3, include_legacy: bool = False, gallery_path: str | None = None):
+    """Compute (src,dst) pairs for bestN crops to copy/remove.
 
-    Returns a list of (src, dst) tuples for files that should be considered for copy/remove.
+    Supports both positive and negative galleries via `gallery_path`.
+    If `gallery_path` is None, defaults to REID_GALLERY_PATH.
     """
     results = []
     try:
@@ -57,13 +59,13 @@ def compute_reid_paths_multi(video_path: str, file_basename: str, k: int = 3, in
         # Indexed files
         for idx in range(1, max(1, int(k)) + 1):
             src_file = os.path.join(_TEMP_DIR, yyyymmdd, f"{hh}H{base}_reid_best{idx}.jpg")
-            dst_file = os.path.join(REID_GALLERY_PATH, os.path.basename(src_file))
+            dst_file = os.path.join(gallery_path or REID_GALLERY_PATH, os.path.basename(src_file))
             results.append((src_file, dst_file))
 
         # Legacy file without index (keep for backward compatibility)
         if include_legacy:
             src_legacy = os.path.join(_TEMP_DIR, yyyymmdd, f"{hh}H{base}_reid_best.jpg")
-            dst_legacy = os.path.join(REID_GALLERY_PATH, os.path.basename(src_legacy))
+            dst_legacy = os.path.join(gallery_path or REID_GALLERY_PATH, os.path.basename(src_legacy))
             results.append((src_legacy, dst_legacy))
     except Exception:
         return results
@@ -160,19 +162,24 @@ async def reaction_callback(update, context):
 
     # Determine reaction types present
     has_thinking = False
+    has_shrug = False
     has_up = False
     has_down = False
     for r in new_reactions:
         emoji = getattr(r, "emoji", None)
         if emoji == "🤔":
             has_thinking = True
+        elif isinstance(emoji, str) and emoji.startswith("🤷"):
+            # Covers man/woman shrugging variations
+            has_shrug = True
         elif emoji == "👍":
             has_up = True
         elif emoji == "👎":
             has_down = True
-    # Detect removal of thumbs up/down
+    # Detect removal of thumbs up/down/shrug
     removed_up = any(getattr(r, "emoji", None) == "👍" for r in old_reactions)
     removed_down = any(getattr(r, "emoji", None) == "👎" for r in old_reactions)
+    removed_shrug = any(isinstance(getattr(r, "emoji", None), str) and getattr(r, "emoji", None).startswith("🤷") for r in old_reactions)
 
     message_id = getattr(mr, "message_id", None)
     chat = getattr(mr, "chat", None)
@@ -253,6 +260,35 @@ async def reaction_callback(update, context):
                             logger.debug(f"[{file_basename}] REID source not found: {src}")
                     except Exception as e:
                         logger.warning(f"[{file_basename}] Failed to copy REID frame to gallery: {e}")
+        # Remove from negative gallery on shrug removal
+        if removed_shrug:
+            try:
+                neg_pairs_rm = compute_reid_paths_multi(video_path, file_basename, k=3, include_legacy=False, gallery_path=REID_NEGATIVE_GALLERY_PATH)
+                for _src, dst in neg_pairs_rm:
+                    try:
+                        if os.path.exists(dst):
+                            os.remove(dst)
+                            logger.info(f"[{file_basename}] NEGATIVE gallery frame removed: {dst}")
+                    except Exception as e:
+                        logger.warning(f"[{file_basename}] Failed to remove NEGATIVE gallery frame: {e}")
+            except Exception as e:
+                logger.warning(f"[{file_basename}] Unexpected error preparing NEGATIVE gallery removal: {e}")
+        # Copy to negative gallery on shrug reaction
+        if has_shrug:
+            try:
+                os.makedirs(REID_NEGATIVE_GALLERY_PATH, exist_ok=True)
+            except Exception:
+                pass
+            neg_pairs = compute_reid_paths_multi(video_path, file_basename, k=3, include_legacy=False, gallery_path=REID_NEGATIVE_GALLERY_PATH)
+            for src, dst in neg_pairs:
+                try:
+                    if os.path.exists(src):
+                        shutil.copy2(src, dst)
+                        logger.info(f"[{file_basename}] REID frame copied to NEGATIVE gallery: {dst}")
+                    else:
+                        logger.debug(f"[{file_basename}] REID source not found for negative copy: {src}")
+                except Exception as e:
+                    logger.warning(f"[{file_basename}] Failed to copy REID frame to negative gallery: {e}")
     except Exception as e:
         logger.warning(f"[{file_basename}] Unexpected error during REID gallery sync: {e}")
 

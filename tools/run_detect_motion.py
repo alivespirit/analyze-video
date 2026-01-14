@@ -56,7 +56,9 @@ def main():
             {
                 "matched": reid.get("matched"),
                 "score": reid.get("score"),
+                "neg_score": reid.get("neg_score"),
                 "threshold": reid.get("threshold"),
+                "margin": reid.get("margin"),
                 "samples": reid.get("samples"),
                 "best_path": reid.get("best_path"),
             }
