@@ -29,7 +29,10 @@ NO_ACTION_RESPONSES = [
 ]
 
 try:
-    client = genai.Client(api_key=GEMINI_API_KEY)
+    client = genai.Client(
+        api_key=GEMINI_API_KEY,
+        http_options=types.HttpOptions(timeout=120000)
+    )
     logger.info("Gemini configured successfully.")
 except Exception as e:
     logger.critical(f"Failed to configure Gemini: {e}", exc_info=True)
