@@ -328,8 +328,16 @@ async def reaction_callback(update, context):
         else:
             new_caption = (new_caption or "") + "\n_Глянемо..._"
 
-    # If a thumbs up/down was removed, append the 'Нєа...' suffix and log
-    if removed_up or removed_down:
+    # If shrug reaction added, append a note
+    if has_shrug:
+        logger.info(f"[{file_basename}] Reaction detected: crops saved to negative gallery (via 🤷 reaction).")
+        if parse_mode == 'MarkdownV2':
+            new_caption = (new_caption or "") + " \\- _Записали\\.\\.\\._"
+        else:
+            new_caption = (new_caption or "") + " - _Записали..._"
+
+    # If a thumbs up/down/shrug was removed, append the 'Нєа...' suffix and log
+    if removed_up or removed_down or removed_shrug:
         logger.info(f"[{file_basename}] Reaction removed.")
         if parse_mode == 'MarkdownV2':
             new_caption = (new_caption or "") + " \\- _Нєа\\.\\.\\._"
