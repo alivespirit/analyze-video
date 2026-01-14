@@ -46,7 +46,7 @@ REID_RESULT_RE_OLD = re.compile(
     r"ReID result:\s*matched=(?P<matched>True|False),\s*best_score=(?P<score>[0-9]*\.?[0-9]+),\s*threshold=(?P<thresh>[0-9]*\.?[0-9]+)"
 )
 REID_RESULT_RE_NEW = re.compile(
-    r"ReID result:\s*matched=(?P<matched>True|False),\s*pos=(?P<pos>[0-9]*\.?[0-9]+),\s*neg=(?P<neg>[0-9]*\.?[0-9]+),\s*delta=(?P<delta>[0-9]*\.?[0-9]+),\s*thr=(?P<thresh>[0-9]*\.?[0-9]+),\s*margin=(?P<margin>[0-9]*\.?[0-9]+)"
+    r"ReID result:\s*matched=(?P<matched>True|False),\s*pos=(?P<pos>[0-9]*\.?[0-9]+),\s*neg=(?P<neg>[0-9]*\.?[0-9]+),\s*delta=(?P<delta>-?[0-9]*\.?[0-9]+),\s*thr=(?P<thresh>[0-9]*\.?[0-9]+),\s*margin=(?P<margin>[0-9]*\.?[0-9]+)"
 )
 
 
