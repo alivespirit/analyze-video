@@ -39,9 +39,14 @@ NEW_FILE_RE = re.compile(r"^New file detected:")
 AWAY_RE = re.compile(r"Reaction detected: object went away")
 BACK_RE = re.compile(r"Reaction detected: object came back")
 REACTION_REMOVED_RE = re.compile(r"Reaction removed\.")
-# ReID result pattern: "ReID result: matched=True/False, best_score=0.xxx, threshold=..."
-REID_RESULT_RE = re.compile(
+# ReID result patterns (old and new)
+# Old:  "ReID result: matched=True/False, best_score=0.xxx, threshold=..."
+# New:  "ReID result: matched=True/False, pos=0.xxx, neg=0.xxx, delta=0.xxx, thr=0.xxx, margin=0.xxx."
+REID_RESULT_RE_OLD = re.compile(
     r"ReID result:\s*matched=(?P<matched>True|False),\s*best_score=(?P<score>[0-9]*\.?[0-9]+),\s*threshold=(?P<thresh>[0-9]*\.?[0-9]+)"
+)
+REID_RESULT_RE_NEW = re.compile(
+    r"ReID result:\s*matched=(?P<matched>True|False),\s*pos=(?P<pos>[0-9]*\.?[0-9]+),\s*neg=(?P<neg>[0-9]*\.?[0-9]+),\s*delta=(?P<delta>[0-9]*\.?[0-9]+),\s*thr=(?P<thresh>[0-9]*\.?[0-9]+),\s*margin=(?P<margin>[0-9]*\.?[0-9]+)"
 )
 
 
@@ -143,6 +148,8 @@ def collect_metrics(entries: List[Dict]) -> Dict:
     reaction_state_per_video: Dict[str, Optional[str]] = {}
     # ReID results per video
     reid_best_score_per_video: Dict[str, float] = {}
+    reid_neg_score_per_video: Dict[str, float] = {}
+    reid_delta_per_video: Dict[str, float] = {}
     reid_matched_per_video: Dict[str, bool] = {}
 
     for e in entries:
@@ -184,12 +191,21 @@ def collect_metrics(entries: List[Dict]) -> Dict:
                 reaction_state_per_video[vid] = None
 
             # ReID result parsing
-            m = REID_RESULT_RE.search(content)
+            m = REID_RESULT_RE_NEW.search(content) or REID_RESULT_RE_OLD.search(content)
             if m:
                 try:
                     matched = True if m.group("matched") == "True" else False
-                    score = float(m.group("score"))
-                    reid_best_score_per_video[vid] = score
+                    # Prefer new fields if present
+                    if m.re is REID_RESULT_RE_NEW:
+                        pos = float(m.group("pos"))
+                        neg = float(m.group("neg"))
+                        delta = float(m.group("delta"))
+                        reid_best_score_per_video[vid] = pos
+                        reid_neg_score_per_video[vid] = neg
+                        reid_delta_per_video[vid] = delta
+                    else:
+                        score = float(m.group("score"))
+                        reid_best_score_per_video[vid] = score
                     reid_matched_per_video[vid] = matched
                 except Exception:
                     pass
@@ -279,6 +295,8 @@ def collect_metrics(entries: List[Dict]) -> Dict:
         "back_videos": sorted([v for v, st in reaction_state_per_video.items() if st == "back"]),
         # ReID metrics
         "reid_best_score_per_video": reid_best_score_per_video,
+        "reid_neg_score_per_video": reid_neg_score_per_video,
+        "reid_delta_per_video": reid_delta_per_video,
         "reid_matched_per_video": reid_matched_per_video,
     }
 
@@ -480,6 +498,10 @@ REID_COLORS = {
 }
 REID_TEXT_COLORS = {k: text_color_on_bg(v) for k, v in REID_COLORS.items()}
 
+# Neg chip color (violet) and readable text color
+NEG_CHIP_COLOR = "#8b5cf6"  # violet
+NEG_CHIP_TEXT_COLOR = text_color_on_bg(NEG_CHIP_COLOR)
+
 
 # (moved helper functions above)
 
@@ -633,6 +655,8 @@ def today_view(
         severity_text_colors=SEVERITY_TEXT_COLORS,
         reid_colors=REID_COLORS,
         reid_text_colors=REID_TEXT_COLORS,
+        neg_chip_color=NEG_CHIP_COLOR,
+        neg_chip_text_color=NEG_CHIP_TEXT_COLOR,
         statuses_present=sorted(metrics["status_counts"].keys()),
         total_videos_all=metrics_all.get("videos_total", 0),
         log_dir=LOG_DIR,
@@ -725,6 +749,8 @@ def day_view(
         severity_text_colors=SEVERITY_TEXT_COLORS,
         reid_colors=REID_COLORS,
         reid_text_colors=REID_TEXT_COLORS,
+        neg_chip_color=NEG_CHIP_COLOR,
+        neg_chip_text_color=NEG_CHIP_TEXT_COLOR,
         statuses_present=sorted(metrics["status_counts"].keys()),
         total_videos_all=metrics_all.get("videos_total", 0),
         log_dir=LOG_DIR,

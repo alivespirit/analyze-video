@@ -331,6 +331,11 @@
                   {% set rtcol = reid_text_colors.get(rkey, '#ffffff') %}
                   <span class="tag aux-chip" style="background: {{ rcol }}; color: {{ rtcol }}" title="ReID score">{{ '%.0f'|format(rscore * 100.0) }}%</span>
                 {% endif %}
+                {# ReID neg chip (violet) #}
+                {% set rneg = metrics.reid_neg_score_per_video.get(vid) %}
+                {% if rneg is not none %}
+                  <span class="tag aux-chip" style="background: {{ neg_chip_color }}; color: {{ neg_chip_text_color }}" title="ReID neg">{{ '%.0f'|format(rneg * 100.0) }}%</span>
+                {% endif %}
                 {% if metrics.away_videos and (vid in metrics.away_videos) %}
                   <span class="tag aux-chip" title="Away reaction">away</span>
                 {% endif %}

@@ -1358,11 +1358,11 @@ def detect_motion(input_video_path, output_dir):
                                 saved_paths.append(save_path_idxed)
                             # best_path points to the highest-score indexed file
                             reid_result["best_path"] = saved_paths[0] if saved_paths else None
-                            logger.debug(f"[{file_basename}] ReID topK saved {len(selected)} crops.")
+                            logger.info(f"[{file_basename}] ReID topK saved {len(selected)} crops.")
                         except Exception as e:
                             logger.warning(f"[{file_basename}] Failed to save ReID crops: {e}")
 
-                    logger.info(f"[{file_basename}] ReID result: matched={reid_result['matched']}, best_score={best_score:.3f}, threshold={REID_THRESHOLD}.")
+                    logger.info(f"[{file_basename}] ReID result: matched={reid_result['matched']}, pos={best_score:.3f}, neg={best_neg:.3f}, delta={(best_score - best_neg):.3f}, thr={REID_THRESHOLD:.3f}, margin={REID_NEGATIVE_MARGIN:.3f}.")
                 else:
                     logger.info(f"[{file_basename}] No ReID candidate crops collected.")
             except Exception as e:
