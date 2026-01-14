@@ -1368,7 +1368,7 @@ def detect_motion(input_video_path, output_dir):
             except Exception as e:
                 logger.warning(f"[{file_basename}] ReID evaluation failed: {e}")
         else:
-            logger.debug(f"[{file_basename}] ReID is disabled (REID_ENABLED=False). Skipping identification.")
+            logger.debug("[%s] ReID is disabled (REID_ENABLED=False). Skipping identification.", file_basename)
 
     elapsed_time = time.time() - start_time
     logger.info(f"[{file_basename}] Full processing took {elapsed_time:.2f} seconds. Detected: {num_persons} persons, {num_cars} cars.")

@@ -217,7 +217,7 @@ def analyze_video(motion_result, video_path):
         try:
             with open(prompt_file_path, "r", encoding="utf-8") as prompt_file:
                 prompt = prompt_file.read().strip()
-            logger.debug(f"[{file_basename}] Prompt loaded successfully from {prompt_file_path}.")
+            logger.debug("[%s] Prompt loaded successfully from %s.", file_basename, prompt_file_path)
         except FileNotFoundError:
             logger.error(f"[{file_basename}] Prompt file not found: {prompt_file_path}")
             return {'response': timestamp + "Prompt file not found.", 'insignificant_frames': motion_result['insignificant_frames'], 'clip_path': motion_result.get('clip_path')}

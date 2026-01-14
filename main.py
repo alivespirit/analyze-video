@@ -446,7 +446,7 @@ class FileHandler(FileSystemEventHandler):
         Raises:
             FileNotFoundError: If the file disappears during the check.
         """
-        self.logger.debug(f"[{file_basename}] Checking file stability for: {file_path}")
+        self.logger.debug("[%s] Checking file stability for: %s", file_basename, file_path)
         last_size = -1
         stable_checks = 0
         while stable_checks < checks:
@@ -454,10 +454,10 @@ class FileHandler(FileSystemEventHandler):
                 current_size = os.path.getsize(file_path)
                 if current_size == last_size and current_size > 0: # Ensure size is not zero
                     stable_checks += 1
-                    self.logger.debug(f"[{file_basename}] File size stable ({current_size} bytes), check {stable_checks}/{checks}.")
+                    self.logger.debug("[%s] File size stable (%d bytes), check %d/%d.", file_basename, current_size, stable_checks, checks)
                 else:
                     stable_checks = 0 # Reset if size changes or is zero
-                    self.logger.debug(f"[{file_basename}] File size changed/zero ({last_size} -> {current_size} bytes). Resetting stability check.")
+                    self.logger.debug("[%s] File size changed/zero (%d -> %d bytes). Resetting stability check.", file_basename, last_size, current_size)
                 last_size = current_size
             except FileNotFoundError:
                 self.logger.warning(f"[{file_basename}] File not found during stability check: {file_path}")

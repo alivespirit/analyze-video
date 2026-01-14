@@ -257,7 +257,7 @@ async def reaction_callback(update, context):
                             logger.info(f"[{file_basename}] REID frame copied to gallery: {dst}")
                         else:
                             # Don't warn for every missing index; a subset may exist
-                            logger.debug(f"[{file_basename}] REID source not found: {src}")
+                            logger.debug("[%s] REID source not found: %s", file_basename, src)
                     except Exception as e:
                         logger.warning(f"[{file_basename}] Failed to copy REID frame to gallery: {e}")
         # Remove from negative gallery on shrug removal
@@ -286,7 +286,7 @@ async def reaction_callback(update, context):
                         shutil.copy2(src, dst)
                         logger.info(f"[{file_basename}] REID frame copied to NEGATIVE gallery: {dst}")
                     else:
-                        logger.debug(f"[{file_basename}] REID source not found for negative copy: {src}")
+                        logger.debug("[%s] REID source not found for negative copy: %s", file_basename, src)
                 except Exception as e:
                     logger.warning(f"[{file_basename}] Failed to copy REID frame to negative gallery: {e}")
     except Exception as e:

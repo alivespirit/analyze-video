@@ -33,7 +33,7 @@ class PersonReID:
             return f"[{self.file_basename}] " if self.file_basename else ""
         self._lp = _lp
 
-        logger.debug(f"{self._lp()}ReID: Initializing model from {model_path}")
+        logger.debug("%sReID: Initializing model from %s", self._lp(), model_path)
         self.core = Core()
         self.model = self.core.read_model(model_path)
         self.compiled_model = self.core.compile_model(self.model, "CPU")
@@ -44,9 +44,9 @@ class PersonReID:
         if negative_gallery_path:
             try:
                 self.negative_vectors = self.load_gallery_vectors(negative_gallery_path)
-                logger.debug(f"{self._lp()}ReID: Loaded {len(self.negative_vectors)} negative vector(s) from {negative_gallery_path}.")
+                logger.debug("%sReID: Loaded %d negative vector(s) from %s.", self._lp(), len(self.negative_vectors), negative_gallery_path)
             except Exception as e:
-                logger.debug(f"{self._lp()}ReID: Failed to load negative gallery {negative_gallery_path}: {e}")
+                logger.debug("%sReID: Failed to load negative gallery %s: %s", self._lp(), negative_gallery_path, e)
 
     def preprocess(self, img: np.ndarray) -> np.ndarray:
         # Model expects 128x256 resolution, BGR input
@@ -73,7 +73,7 @@ class PersonReID:
         # Delegate to the generic loader and assign to instance state
         vectors = self.load_gallery_vectors(gallery_path)
         self.gallery_vectors = vectors
-        logger.debug(f"{self._lp()}ReID: Loaded {len(vectors)} reference image(s) from {gallery_path}.")
+        logger.debug("%sReID: Loaded %d reference image(s) from %s.", self._lp(), len(vectors), gallery_path)
 
     def load_gallery_vectors(self, gallery_path: str) -> list[np.ndarray]:
         """Loader returning embedding vectors list for a gallery path (used for negatives too)."""
