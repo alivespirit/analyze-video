@@ -441,7 +441,7 @@ STATUS_COLORS = {
     "no_motion": "#64748b",            # slate
     "no_significant_motion": "#eb980a", # amber
     "no_person": "#f8e805",             # yellow
-    "significant_motion": "#8b5cf6",    # violet
+    "significant_motion": "#6b52fa",    # blue
     "gate_crossing": "#22c55e",        # green
     "error": "#ef4444",               # red
 }
@@ -493,13 +493,13 @@ SEVERITY_TEXT_COLORS = {k: text_color_on_bg(v) for k, v in SEVERITY_COLORS.items
 
 # ReID chip colors: light blue for matched=True, dark blue for matched=False
 REID_COLORS = {
-    "true": "#93c5fd",   # light blue 300
+    "true": "#65e0ff",   # light blue 300
     "false": "#1e3a8a",  # dark blue 900
 }
 REID_TEXT_COLORS = {k: text_color_on_bg(v) for k, v in REID_COLORS.items()}
 
 # Neg chip color (violet) and readable text color
-NEG_CHIP_COLOR = "#8b5cf6"  # violet
+NEG_CHIP_COLOR = "#602085"  # violet
 NEG_CHIP_TEXT_COLOR = text_color_on_bg(NEG_CHIP_COLOR)
 
 

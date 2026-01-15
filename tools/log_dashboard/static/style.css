@@ -52,9 +52,15 @@ main{max-width:1200px;margin:0 auto;padding:20px}
 .away-list .away-chip{white-space:nowrap}
 .muted{color:var(--muted);margin:0 0 8px}
 .tag{display:inline-block;padding:2px 8px;border-radius:999px;background:#2a2f40;font-size:12px;color:var(--muted)}
+.chip-row{display:inline}
+
 .table{width:100%;border-collapse:collapse}
 .table{table-layout:fixed}
 .table th,.table td{padding:8px;border-bottom:1px solid #222;text-align:left;word-break:break-word;overflow-wrap:anywhere}
+.table th.start-col, .table td.start-col {width:80px;max-width:90px;white-space:nowrap;}
+.table th.time-events-col, .table td.time-events-col {width:100px;max-width:120px}
+.table th.status-col, .table td.status-col {width:28%}
+.table td.time-events-col {white-space:nowrap}
 .times-table td .sec{font-style:italic}
 .table.times-table th,.table.times-table td{border-bottom:1px dashed #2a2f40}
 .times-table thead th + th,.times-table tbody td + td{border-left:1px dashed #2a2f40}
@@ -64,6 +70,14 @@ main{max-width:1200px;margin:0 auto;padding:20px}
 .table{min-width:540px}
 .table.times-table{min-width:unset;width:100%}
 .table tr.playing{background:#1a2030;outline:2px solid #9fb0ff}
+/* Dimmed separator in Time / Events column */
+.time-events-col .sep{opacity:.6;padding:0 4px}
+
+/* Equal column widths for desktop summary table */
+.summary-table th, .summary-table td{width:25%}
+.summary-table th.start-col, .summary-table td.start-col{width:25%;max-width:none}
+.summary-table th.status-col, .summary-table td.status-col{width:25%;max-width:none}
+.summary-table th.time-events-col, .summary-table td.time-events-col{width:25%;max-width:none}
 .link-log{color:#9fb0ff;text-decoration:none}
 .link-log:hover{text-decoration:underline}
 .card summary{cursor:pointer;font-weight:700;margin-bottom:10px;list-style:none;font-size:1.5em;line-height:1.25;margin:0 0 4px 0}
@@ -191,10 +205,24 @@ header nav .nav-btn{white-space:nowrap}
   .log .meta .video-inline{margin-top:0}
   .log .msg{margin-top:2px}
 
-  /* Table: full width and wrap content */
-  .table{min-width:unset;width:100%;table-layout:fixed}
+    /* Table: full width; use auto layout on mobile to avoid narrow columns
+      when rows contain colspan and rich content */
+    .table{min-width:unset;width:100%;table-layout:auto}
   .table th,.table td{word-break:break-word;overflow-wrap:anywhere}
   .table th,.table td{padding:6px}
+  /* Force chips to break into rows on mobile */
+  .status-chip{display:block}
+  .chip-row{display:block;margin-top:4px}
+  .chip-row .tag{display:block;margin:4px 0 0 0}
+  .reid-row{display:block}
+  .reid-row .tag{white-space:normal;word-break:normal;overflow-wrap:anywhere}
+  /* Allow header wrapping; keep cell inline */
+  .table th.time-events-col {white-space:normal}
+  .table td.time-events-col {white-space:nowrap}
+  /* Preserve fixed layout for the Times table only */
+  .table.times-table{table-layout:fixed}
+  /* Mobile: remove padding around the slash to eliminate spaces visually */
+  .time-events-col .sep{padding:0}
   .times-table td .sec{font-style:italic}
   /* Ensure dashed lines persist on mobile for Times table */
   .table.times-table th,.table.times-table td{border-bottom:1px dashed #2a2f40}
@@ -213,4 +241,7 @@ header nav .nav-btn{white-space:nowrap}
   .table .status-chip .arrow-mobile{display:inline;font-size:14px;line-height:1;font-weight:700}
   .table .gate-chip{display:none}
   .clear-filter{width:18px;height:18px;font-size:12px;margin-left:4px}
+  /* Override: make status chip full-width, center arrow, hide text on mobile */
+  .table .status-chip{display:flex;align-items:center;justify-content:center;width:100%;min-height:20px;padding:4px 0;font-size:0;border-radius:999px}
+  .chip-row .tag{width:100%;text-align:center}
 }

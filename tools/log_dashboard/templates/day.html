@@ -274,21 +274,20 @@
       <summary>Per-Video Summary</summary>
       {% if metrics.status_per_video %}
         <div class="table-wrap">
-        <table class="table">
+        <table class="table summary-table">
           <thead>
             <tr>
-              <th>Start</th>
+              <th class="start-col">Start</th>
               <th>Video</th>
-              <th>Status</th>
-              <th>Raw Events</th>
-              <th>Processing Time</th>
+              <th class="status-col">Status</th>
+              <th class="time-events-col">Time / Events</th>
             </tr>
           </thead>
           <tbody>
             {% set status_filter = status %}
             {% for vid, st in metrics.status_per_video.items() %}
             <tr class="{% if play == vid %}playing{% endif %}">
-              <td>
+              <td class="start-col">
                 {% set t = metrics.first_seen_ts_per_video.get(vid) %}
                 {% if t %}
                   <a href="#log-{{ vid }}" class="link-log">{{ t.strftime('%H:%M:%S') }}</a>
@@ -296,7 +295,7 @@
                   —
                 {% endif %}
               </td>
-              <td>
+              <td class="status-col">
                 {% if is_today_route %}{% set base = '/today' %}{% else %}{% set base = '/day/' ~ day %}{% endif %}
                 {# Build query with existing filters, keeping multi-status selections #}
                 {% set qs = 'play=' ~ vid %}
@@ -306,7 +305,10 @@
                   {% set qs = qs ~ '&status=' ~ status_csv %}
                 {% endif %}
                 {% if gate %}{% set qs = qs ~ '&gate=' ~ gate %}{% endif %}
-                <a href="{{ base }}?{{ qs }}" class="link-log" title="Open video player" data-vid="{{ vid }}" data-stream="/video/{{ vid }}" data-base="{{ base }}" data-query="{{ qs }}">{{ vid }}</a>
+                <a href="{{ base }}?{{ qs }}" class="link-log" title="Open video player" data-vid="{{ vid }}" data-stream="/video/{{ vid }}" data-base="{{ base }}" data-query="{{ qs }}">
+                  <span class="label-desktop">{{ vid }}</span>
+                  <span class="label-mobile">{{ vid.split('_')[0] }}</span>
+                </a>
               </td>
               {% set col = status_colors.get(st, '#3b82f6') %}
               {% set tcol = status_text_colors.get(st, '#ffffff') %}
@@ -322,40 +324,58 @@
                 {% if gdir %}
                   <span class="tag gate-chip" title="Gate: {{ gdir }}" aria-label="Gate: {{ gdir }}">{{ arrow }}</span>
                 {% endif %}
-                {# ReID score chip #}
+                {# ReID chips row #}
                 {% set rscore = metrics.reid_best_score_per_video.get(vid) %}
                 {% set rmatch = metrics.reid_matched_per_video.get(vid) %}
-                {% if (rscore is not none) and (rmatch is not none) %}
-                  {% set rkey = 'true' if rmatch else 'false' %}
-                  {% set rcol = reid_colors.get(rkey, '#3b82f6') %}
-                  {% set rtcol = reid_text_colors.get(rkey, '#ffffff') %}
-                  <span class="tag aux-chip" style="background: {{ rcol }}; color: {{ rtcol }}" title="ReID score">{{ '%.0f'|format(rscore * 100.0) }}%</span>
-                {% endif %}
-                {# ReID neg chip (violet) #}
                 {% set rneg = metrics.reid_neg_score_per_video.get(vid) %}
-                {% if rneg is not none %}
-                  <span class="tag aux-chip" style="background: {{ neg_chip_color }}; color: {{ neg_chip_text_color }}" title="ReID neg">{{ '%.0f'|format(rneg * 100.0) }}%</span>
+                {% if (rscore is not none and rmatch is not none) or (rneg is not none) %}
+                <div class="chip-row reid-row">
+                  {% if (rscore is not none) and (rmatch is not none) %}
+                    {% set rkey = 'true' if rmatch else 'false' %}
+                    {% set rcol = reid_colors.get(rkey, '#3b82f6') %}
+                    {% set rtcol = reid_text_colors.get(rkey, '#ffffff') %}
+                    <span class="tag aux-chip" style="background: {{ rcol }}; color: {{ rtcol }}" title="ReID score">{{ '%.0f'|format(rscore * 100.0) }}%</span>
+                  {% endif %}
+                  {% if rneg is not none %}
+                    <span class="tag aux-chip" style="background: {{ neg_chip_color }}; color: {{ neg_chip_text_color }}" title="ReID neg">{{ '%.0f'|format(rneg * 100.0) }}%</span>
+                  {% endif %}
+                </div>
                 {% endif %}
-                {% if metrics.away_videos and (vid in metrics.away_videos) %}
-                  <span class="tag aux-chip" title="Away reaction">away</span>
-                {% endif %}
-                {% if metrics.back_videos and (vid in metrics.back_videos) %}
-                  <span class="tag aux-chip" title="Back reaction">back</span>
+                {# Away/Back chips row #}
+                {% if (metrics.away_videos and (vid in metrics.away_videos)) or (metrics.back_videos and (vid in metrics.back_videos)) %}
+                <div class="chip-row state-row">
+                  {% if metrics.away_videos and (vid in metrics.away_videos) %}
+                    <span class="tag aux-chip" title="Away reaction">away</span>
+                  {% endif %}
+                  {% if metrics.back_videos and (vid in metrics.back_videos) %}
+                    <span class="tag aux-chip" title="Back reaction">back</span>
+                  {% endif %}
+                </div>
                 {% endif %}
               </td>
-              <td>{{ metrics.raw_events_per_video.get(vid, 0) }}</td>
-              <td>
+              <td class="time-events-col">
                 {% set p = metrics.processing_time_per_video.get(vid) %}
-                {% if p %}
-                  {{ '%.2f'|format(p) }}
+                {% set events = metrics.raw_events_per_video.get(vid, 0) %}
+                {% if events and (events > 0) %}
+                  {% if p %}
+                    <span class="label-desktop">{{ '%.2f'|format(p) }} <span class="sep">/</span> {{ events }}</span>
+                    <span class="label-mobile">{{ '%.2f'|format(p) }}<span class="sep">/</span>{{ events }}</span>
+                  {% else %}
+                    <span class="label-desktop">— <span class="sep">/</span> {{ events }}</span>
+                    <span class="label-mobile">—<span class="sep">/</span>{{ events }}</span>
+                  {% endif %}
                 {% else %}
-                  —
+                  {% if p %}
+                    {{ '%.2f'|format(p) }}
+                  {% else %}
+                    —
+                  {% endif %}
                 {% endif %}
               </td>
             </tr>
             {% if play == vid and video_src %}
             <tr class="player-row">
-              <td colspan="5">
+              <td colspan="4">
                 <div id="player" class="inline-player">
                   <div class="video-wrap">
                     <video class="video-embed" controls preload="metadata" src="{{ video_src }}">
