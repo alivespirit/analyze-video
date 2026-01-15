@@ -5,3 +5,4 @@ __pycache__/
 debug/
 validation/
 person_of_interest/
+person_of_interest_negative/
