@@ -214,8 +214,9 @@ header nav .nav-btn{white-space:nowrap}
   .status-chip{display:block}
   .chip-row{display:block;margin-top:4px}
   .chip-row .tag{display:block;margin:4px 0 0 0}
-  .reid-row{display:block}
-  .reid-row .tag{white-space:normal;word-break:normal;overflow-wrap:anywhere}
+  /* ReID chips: inline side-by-side on one line */
+  .reid-row{display:flex;gap:4px;flex-wrap:nowrap;align-items:center}
+  .reid-row .tag{display:inline-flex;width:auto;white-space:nowrap;word-break:normal;overflow-wrap:normal;margin:4px 0 0 0}
   /* Allow header wrapping; keep cell inline */
   .table th.time-events-col {white-space:normal}
   .table td.time-events-col {white-space:nowrap}
