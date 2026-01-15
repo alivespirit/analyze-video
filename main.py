@@ -410,8 +410,8 @@ class FileHandler(FileSystemEventHandler):
             battery_time_left = time.strftime("%H:%M", time.gmtime(battery.secsleft))
             if battery.percent <= 50:
                 video_response += f"\n\U0001FAAB *{battery.percent}% ~{battery_time_left}*"
-                if battery.percent <= 5:
-                    video_response += "\n_I don't feel so good, Mr. Stark. I don't want to go..._ \U0001F622"
+                if battery.percent <= 10:
+                    video_response += "\n_I don't feel so good, Mr.Stark. I don't want to go..._ \U0001F622"
             else:
                 video_response += f"\n\U0001F50B *{battery.percent}% ~{battery_time_left}*"
 
