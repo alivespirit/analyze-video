@@ -250,16 +250,57 @@ async def reaction_callback(update, context):
                     except Exception as e:
                         logger.warning(f"[{file_basename}] Failed to remove REID gallery frame: {e}")
             if has_up or has_down:
-                for src, dst in pairs:
+                # Instead of immediate copy, send crops for review and a confirm button
+                try:
+                    media_group = []
+                    for src, _dst in pairs:
+                        try:
+                            if os.path.exists(src):
+                                with open(src, 'rb') as photo_file:
+                                    media_group.append(InputMediaPhoto(media=photo_file.read()))
+                            else:
+                                logger.debug("[%s] REID source not found for review: %s", file_basename, src)
+                        except Exception as e:
+                            logger.warning(f"[{file_basename}] Failed to read REID crop {src}: {e}")
+
+                    reply_target_message_id = message_id
+                    if media_group:
+                        try:
+                            media_msgs = await context.bot.send_media_group(
+                                chat_id=chat_id,
+                                media=media_group,
+                                reply_to_message_id=message_id
+                            )
+                            try:
+                                if isinstance(media_msgs, list) and media_msgs:
+                                    reply_target_message_id = getattr(media_msgs[0], 'message_id', message_id)
+                            except Exception:
+                                reply_target_message_id = message_id
+                            logger.info(f"[{file_basename}] Sent {len(media_group)} REID crops for review.")
+                        except Exception as e:
+                            logger.warning(f"[{file_basename}] Failed to send review crops: {e}")
+
+                    # Build confirm button referencing the video path
                     try:
-                        if os.path.exists(src):
-                            shutil.copy2(src, dst)
-                            logger.info(f"[{file_basename}] REID frame copied to gallery: {dst}")
+                        safe_video_folder = os.path.join(VIDEO_FOLDER, '') if VIDEO_FOLDER else None
+                        if safe_video_folder and video_path.startswith(safe_video_folder):
+                            callback_file = video_path[len(safe_video_folder):].replace(os.path.sep, '/')
                         else:
-                            # Don't warn for every missing index; a subset may exist
-                            logger.debug("[%s] REID source not found: %s", file_basename, src)
+                            callback_file = os.path.basename(video_path)
+                        confirm_markup = InlineKeyboardMarkup(
+                            [[InlineKeyboardButton("100%", callback_data=f"CONFIRM:{callback_file}")]]
+                        )
+                        await context.bot.send_message(
+                            chat_id=chat_id,
+                            text="Точняк?",
+                            reply_markup=confirm_markup,
+                            reply_to_message_id=reply_target_message_id
+                        )
+                        logger.info(f"[{file_basename}] Sent confirmation prompt for REID crops.")
                     except Exception as e:
-                        logger.warning(f"[{file_basename}] Failed to copy REID frame to gallery: {e}")
+                        logger.warning(f"[{file_basename}] Failed to send confirmation prompt: {e}")
+                except Exception as e:
+                    logger.warning(f"[{file_basename}] Unexpected error preparing review step: {e}")
         # Remove from negative gallery on shrug removal
         if removed_shrug:
             try:
@@ -432,8 +473,61 @@ async def button_callback(update, context):
     query = update.callback_query
     await query.answer() # Acknowledge callback quickly
 
-    # Parse callback data (view only)
+    # Parse callback data
     raw = query.data
+
+    # Handle confirm action for REID crops
+    if isinstance(raw, str) and raw.startswith("CONFIRM:"):
+        try:
+            callback_file_rel = raw[len("CONFIRM:"):].replace('/', os.path.sep)
+            file_path = os.path.join(VIDEO_FOLDER, callback_file_rel)
+            file_basename = os.path.basename(file_path)
+            logger.info(f"[{file_basename}] Confirm callback received.")
+            pairs = compute_reid_paths_multi(file_path, file_basename, k=3, include_legacy=True)
+            for src, dst in pairs:
+                try:
+                    if os.path.exists(src):
+                        shutil.copy2(src, dst)
+                        logger.info(f"[{file_basename}] REID frame copied to gallery: {dst}")
+                except Exception as e:
+                    logger.warning(f"[{file_basename}] Failed to copy REID frame to gallery on confirm: {e}")
+            # Update prompt message to 'Записали...' with revert button
+            try:
+                revert_markup = InlineKeyboardMarkup(
+                    [[InlineKeyboardButton("Нє-нє-нє", callback_data=f"REVERT:{callback_file_rel.replace(os.path.sep, '/')}")]]
+                )
+                await query.edit_message_text(text="Записали...", reply_markup=revert_markup)
+            except Exception as e:
+                logger.warning(f"[{file_basename}] Failed to edit message to 'Записали...': {e}")
+        except Exception as e:
+            logger.warning(f"Confirm action failed: {e}")
+        return
+
+    # Handle revert action to remove copied crops
+    if isinstance(raw, str) and raw.startswith("REVERT:"):
+        try:
+            callback_file_rel = raw[len("REVERT:"):].replace('/', os.path.sep)
+            file_path = os.path.join(VIDEO_FOLDER, callback_file_rel)
+            file_basename = os.path.basename(file_path)
+            logger.info(f"[{file_basename}] Revert callback received.")
+            pairs = compute_reid_paths_multi(file_path, file_basename, k=3, include_legacy=True)
+            for _src, dst in pairs:
+                try:
+                    if os.path.exists(dst):
+                        os.remove(dst)
+                        logger.info(f"[{file_basename}] REID gallery frame removed on revert: {dst}")
+                except Exception as e:
+                    logger.warning(f"[{file_basename}] Failed to remove REID frame on revert: {e}")
+            # Update prompt message to final state without button
+            try:
+                await query.edit_message_text(text="ну нє то нє...")
+            except Exception as e:
+                logger.warning(f"[{file_basename}] Failed to edit message to final state: {e}")
+        except Exception as e:
+            logger.warning(f"Revert action failed: {e}")
+        return
+
+    # Default: view video action
     callback_file_rel = raw.replace('/', os.path.sep)
     # Precompute safe caption path to avoid backslashes in f-string expressions
     safe_rel = raw.replace('\\', '/')
