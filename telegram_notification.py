@@ -263,7 +263,8 @@ async def reaction_callback(update, context):
                         except Exception as e:
                             logger.warning(f"[{file_basename}] Failed to read REID crop {src}: {e}")
 
-                    reply_target_message_id = message_id
+                    reply_target_message_id = None
+                    sent_media_group = False
                     if media_group:
                         try:
                             media_msgs = await context.bot.send_media_group(
@@ -272,10 +273,15 @@ async def reaction_callback(update, context):
                                 reply_to_message_id=message_id
                             )
                             try:
-                                if isinstance(media_msgs, list) and media_msgs:
-                                    reply_target_message_id = getattr(media_msgs[0], 'message_id', message_id)
-                            except Exception:
-                                reply_target_message_id = message_id
+                                if (isinstance(media_msgs, (list, tuple)) and len(media_msgs) > 0):
+                                    reply_target_message_id = getattr(media_msgs[-1], 'message_id', None)
+                                    sent_media_group = reply_target_message_id is not None
+                                    logger.info(f"[{file_basename}] Will reply to media group message_id={reply_target_message_id} (original={message_id}).")
+                                else:
+                                    logger.info(f"[{file_basename}] media_msgs is not a non-empty list/tuple; skipping reply.")
+                            except Exception as e:
+                                logger.warning(f"[{file_basename}] Exception extracting reply_target_message_id: {e}")
+                                reply_target_message_id = None
                             logger.info(f"[{file_basename}] Sent {len(media_group)} REID crops for review.")
                         except Exception as e:
                             logger.warning(f"[{file_basename}] Failed to send review crops: {e}")
@@ -293,13 +299,16 @@ async def reaction_callback(update, context):
                                     InlineKeyboardButton("Та нє", callback_data=f"DECLINE:{callback_file}")
                                 ]]
                             )
-                            await context.bot.send_message(
-                                chat_id=chat_id,
-                                text="Точняк?",
-                                reply_markup=confirm_markup,
-                                reply_to_message_id=reply_target_message_id
-                            )
-                            logger.info(f"[{file_basename}] Sent confirmation prompt for REID crops.")
+                            if sent_media_group and reply_target_message_id:
+                                await context.bot.send_message(
+                                    chat_id=chat_id,
+                                    text="Точняк?",
+                                    reply_markup=confirm_markup,
+                                    reply_to_message_id=reply_target_message_id
+                                )
+                                logger.info(f"[{file_basename}] Sent confirmation prompt for REID crops.")
+                            else:
+                                logger.info(f"[{file_basename}] Skipping confirmation prompt: no crops sent.")
                         except Exception as e:
                             logger.warning(f"[{file_basename}] Failed to send confirmation prompt: {e}")
                 except Exception as e:
