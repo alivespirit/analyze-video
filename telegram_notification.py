@@ -288,7 +288,10 @@ async def reaction_callback(update, context):
                         else:
                             callback_file = os.path.basename(video_path)
                         confirm_markup = InlineKeyboardMarkup(
-                            [[InlineKeyboardButton("100%", callback_data=f"CONFIRM:{callback_file}")]]
+                            [[
+                                InlineKeyboardButton("100%", callback_data=f"CONFIRM:{callback_file}"),
+                                InlineKeyboardButton("Та нє", callback_data=f"DECLINE:{callback_file}")
+                            ]]
                         )
                         await context.bot.send_message(
                             chat_id=chat_id,
@@ -525,6 +528,21 @@ async def button_callback(update, context):
                 logger.warning(f"[{file_basename}] Failed to edit message to final state: {e}")
         except Exception as e:
             logger.warning(f"Revert action failed: {e}")
+        return
+
+    # Handle decline action: finalize without copying crops
+    if isinstance(raw, str) and raw.startswith("DECLINE:"):
+        try:
+            callback_file_rel = raw[len("DECLINE:"):].replace('/', os.path.sep)
+            file_path = os.path.join(VIDEO_FOLDER, callback_file_rel)
+            file_basename = os.path.basename(file_path)
+            logger.info(f"[{file_basename}] Decline callback received.")
+            try:
+                await query.edit_message_text(text="ну нє то нє")
+            except Exception as e:
+                logger.warning(f"[{file_basename}] Failed to edit message to decline state: {e}")
+        except Exception as e:
+            logger.warning(f"Decline action failed: {e}")
         return
 
     # Default: view video action
