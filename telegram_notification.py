@@ -280,28 +280,28 @@ async def reaction_callback(update, context):
                         except Exception as e:
                             logger.warning(f"[{file_basename}] Failed to send review crops: {e}")
 
-                    # Build confirm button referencing the video path
-                    try:
-                        safe_video_folder = os.path.join(VIDEO_FOLDER, '') if VIDEO_FOLDER else None
-                        if safe_video_folder and video_path.startswith(safe_video_folder):
-                            callback_file = video_path[len(safe_video_folder):].replace(os.path.sep, '/')
-                        else:
-                            callback_file = os.path.basename(video_path)
-                        confirm_markup = InlineKeyboardMarkup(
-                            [[
-                                InlineKeyboardButton("100%", callback_data=f"CONFIRM:{callback_file}"),
-                                InlineKeyboardButton("Та нє", callback_data=f"DECLINE:{callback_file}")
-                            ]]
-                        )
-                        await context.bot.send_message(
-                            chat_id=chat_id,
-                            text="Точняк?",
-                            reply_markup=confirm_markup,
-                            reply_to_message_id=reply_target_message_id
-                        )
-                        logger.info(f"[{file_basename}] Sent confirmation prompt for REID crops.")
-                    except Exception as e:
-                        logger.warning(f"[{file_basename}] Failed to send confirmation prompt: {e}")
+                        # Build confirm button referencing the video path
+                        try:
+                            safe_video_folder = os.path.join(VIDEO_FOLDER, '') if VIDEO_FOLDER else None
+                            if safe_video_folder and video_path.startswith(safe_video_folder):
+                                callback_file = video_path[len(safe_video_folder):].replace(os.path.sep, '/')
+                            else:
+                                callback_file = os.path.basename(video_path)
+                            confirm_markup = InlineKeyboardMarkup(
+                                [[
+                                    InlineKeyboardButton("100%", callback_data=f"CONFIRM:{callback_file}"),
+                                    InlineKeyboardButton("Та нє", callback_data=f"DECLINE:{callback_file}")
+                                ]]
+                            )
+                            await context.bot.send_message(
+                                chat_id=chat_id,
+                                text="Точняк?",
+                                reply_markup=confirm_markup,
+                                reply_to_message_id=reply_target_message_id
+                            )
+                            logger.info(f"[{file_basename}] Sent confirmation prompt for REID crops.")
+                        except Exception as e:
+                            logger.warning(f"[{file_basename}] Failed to send confirmation prompt: {e}")
                 except Exception as e:
                     logger.warning(f"[{file_basename}] Unexpected error preparing review step: {e}")
         # Remove from negative gallery on shrug removal
