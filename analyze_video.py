@@ -69,6 +69,14 @@ def analyze_video(motion_result, video_path):
         logger.warning(f"[{file_basename}] Motion detection returned an unexpected value: {motion_result}. Analyzing full video.")
         motion_result = {'status': 'error', 'clip_path': None, 'insignificant_frames': []}
 
+    # Append ReID result if available and positive
+    reid = motion_result.get('reid')
+    reid_text = ""
+    if isinstance(reid, dict) and reid.get('matched'):
+        score = float(reid.get('score', 0.0))
+        percent = int(round(score * 100))
+        reid_text = f" / \U0001FAC6 *{percent}%*\n{USERNAME}"
+
     detected_motion_status = motion_result['status']
     
     # --- Skip Gemini analysis for no motion events ---
@@ -91,17 +99,8 @@ def analyze_video(motion_result, video_path):
         elif direction == 'both':
             direction_text = "\U0001F6B6\u200D\u27A1\uFE0F" * persons_down + " \U0001F6A7" + "\U0001F6B6\u200D\u27A1\uFE0F" * persons_up
 
-        # Append ReID result if available and positive
-        reid = motion_result.get('reid')
-        reid_text = ""
-        if isinstance(reid, dict) and reid.get('matched'):
-            score = float(reid.get('score', 0.0))
-            percent = int(round(score * 100))
-            reid_text = f" / \U0001FAC6 *{percent}%*\n{USERNAME}"
-
         analysis_result = direction_text + reid_text
-        #if 9 <= now.hour <= 13:
-        #    analysis_result += f"\n{USERNAME}"
+
         return {
             'response': timestamp + analysis_result,
             'insignificant_frames': motion_result.get('insignificant_frames', []),
@@ -129,9 +128,9 @@ def analyze_video(motion_result, video_path):
                 details.append(f"{cars} \U0001F699")
 
             if details:
-                return {'response': timestamp + f"\u2611\uFE0F Шось там {', '.join(details)}", 'insignificant_frames': motion_result['insignificant_frames'], 'clip_path': motion_result.get('clip_path')}
+                return {'response': timestamp + f"\u2611\uFE0F Шось там {', '.join(details)}" + reid_text, 'insignificant_frames': motion_result['insignificant_frames'], 'clip_path': motion_result.get('clip_path')}
             else:
-                return {'response': timestamp + "\u2611\uFE0F Виявлено капець рух.", 'insignificant_frames': motion_result['insignificant_frames'], 'clip_path': motion_result.get('clip_path')}
+                return {'response': timestamp + "\u2611\uFE0F Виявлено капець рух." + reid_text, 'insignificant_frames': motion_result['insignificant_frames'], 'clip_path': motion_result.get('clip_path')}
 
     video_to_process = None
     video_bytes_obj = None
@@ -305,7 +304,7 @@ def analyze_video(motion_result, video_path):
 
         logger.info(f"[{file_basename}] Response: {analysis_result}")
 
-        # --- MODIFIED: Append detected object counts to the Gemini result ---
+        # Append detected object counts to the Gemini result
         persons = motion_result.get('persons_detected', 0)
         cars = motion_result.get('cars_detected', 0)
         details = []
@@ -316,14 +315,10 @@ def analyze_video(motion_result, video_path):
 
         if details:
             analysis_result += f" ({', '.join(details)})"
-        # ----------------------------------------------------------------
-
-        # Notify username if needed (disabled to have notifications only on gate crossings)
-        #if detected_motion_status == "significant_motion" and (9 <= now.hour <= 13):
-        #    additional_text += f"\n{USERNAME}"
 
         if detected_motion_status == "significant_motion":
             timestamp += "\u2705 *Отакої!* "
+            analysis_result += reid_text
         elif detected_motion_status == "no_person":
             timestamp += "\u274E "
         else:

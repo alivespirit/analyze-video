@@ -1258,117 +1258,117 @@ def detect_motion(input_video_path, output_dir):
             crossing_direction = 'down'
         logger.info(f"[{file_basename}] Gate crossing detected! Direction: {crossing_direction}. Persons Up: {persons_up}, Down: {persons_down}.")
 
-        # Person ReID run: evaluate collected crops against gallery
-        reid_result = None
-        if REID_ENABLED:
-            reid_result = {"matched": False, "score": 0.0, "threshold": REID_THRESHOLD, "samples": 0, "best_path": None}
-            try:
-                samples = reid_candidate_crops
-                reid_result["samples"] = len(samples)
-                if len(samples) > 0:
-                    logger.info(f"[{file_basename}] Running person ReID on {len(samples)} crop(s) with stride={REID_SAMPLING_STRIDE}.")
-                    reid = PersonReID(
-                        REID_MODEL_PATH,
-                        REID_GALLERY_PATH,
-                        threshold=REID_THRESHOLD,
-                        file_basename=file_basename,
-                        negative_gallery_path=REID_NEGATIVE_GALLERY_PATH,
-                        negative_margin=REID_NEGATIVE_MARGIN,
-                    )
+    # Person ReID run: evaluate collected crops against gallery
+    reid_result = None
+    if REID_ENABLED:
+        reid_result = {"matched": False, "score": 0.0, "threshold": REID_THRESHOLD, "samples": 0, "best_path": None}
+        try:
+            samples = reid_candidate_crops
+            reid_result["samples"] = len(samples)
+            if len(samples) > 0:
+                logger.info(f"[{file_basename}] Running person ReID on {len(samples)} crop(s) with stride={REID_SAMPLING_STRIDE}.")
+                reid = PersonReID(
+                    REID_MODEL_PATH,
+                    REID_GALLERY_PATH,
+                    threshold=REID_THRESHOLD,
+                    file_basename=file_basename,
+                    negative_gallery_path=REID_NEGATIVE_GALLERY_PATH,
+                    negative_margin=REID_NEGATIVE_MARGIN,
+                )
 
-                    # Score each sample vs gallery and compute embeddings for diversity filtering
-                    scored = []
-                    best_score = 0.0
-                    for crop in samples:
-                        try:
-                            emb = reid.get_embedding(crop)
-                            score = 0.0
-                            neg_score = 0.0
-                            if len(reid.gallery_vectors) > 0:
-                                # compute max cosine similarity to gallery
-                                for ref_vec in reid.gallery_vectors:
-                                    s = float(np.dot(emb, ref_vec))
-                                    if s > score:
-                                        score = s
-                            if len(reid.negative_vectors) > 0:
-                                for neg_vec in reid.negative_vectors:
-                                    s = float(np.dot(emb, neg_vec))
-                                    if s > neg_score:
-                                        neg_score = s
-                            scored.append({"crop": crop, "score": float(score), "neg": float(neg_score), "emb": emb})
-                            if score > best_score:
-                                best_score = score
-                        except Exception:
-                            continue
+                # Score each sample vs gallery and compute embeddings for diversity filtering
+                scored = []
+                best_score = 0.0
+                for crop in samples:
+                    try:
+                        emb = reid.get_embedding(crop)
+                        score = 0.0
+                        neg_score = 0.0
+                        if len(reid.gallery_vectors) > 0:
+                            # compute max cosine similarity to gallery
+                            for ref_vec in reid.gallery_vectors:
+                                s = float(np.dot(emb, ref_vec))
+                                if s > score:
+                                    score = s
+                        if len(reid.negative_vectors) > 0:
+                            for neg_vec in reid.negative_vectors:
+                                s = float(np.dot(emb, neg_vec))
+                                if s > neg_score:
+                                    neg_score = s
+                        scored.append({"crop": crop, "score": float(score), "neg": float(neg_score), "emb": emb})
+                        if score > best_score:
+                            best_score = score
+                    except Exception:
+                        continue
 
-                    # Margin-based decision vs negatives (if present)
-                    best_neg = 0.0
-                    if scored:
-                        try:
-                            best_neg = max(item.get("neg", 0.0) for item in scored)
-                        except Exception:
-                            best_neg = 0.0
-                    reid_result["matched"] = (best_score >= REID_THRESHOLD) and ((best_score - best_neg) >= REID_NEGATIVE_MARGIN)
-                    reid_result["score"] = round(best_score, 4)
-                    reid_result["neg_score"] = round(best_neg, 4)
-                    reid_result["margin"] = REID_NEGATIVE_MARGIN
+                # Margin-based decision vs negatives (if present)
+                best_neg = 0.0
+                if scored:
+                    try:
+                        best_neg = max(item.get("neg", 0.0) for item in scored)
+                    except Exception:
+                        best_neg = 0.0
+                reid_result["matched"] = (best_score >= REID_THRESHOLD) and ((best_score - best_neg) >= REID_NEGATIVE_MARGIN)
+                reid_result["score"] = round(best_score, 4)
+                reid_result["neg_score"] = round(best_neg, 4)
+                reid_result["margin"] = REID_NEGATIVE_MARGIN
 
-                    # Select up to REID_TOP_K diverse top crops
-                    selected = []
-                    if scored:
-                        scored.sort(key=lambda x: x["score"], reverse=True)
+                # Select up to REID_TOP_K diverse top crops
+                selected = []
+                if scored:
+                    scored.sort(key=lambda x: x["score"], reverse=True)
+                    for cand in scored:
+                        if len(selected) >= max(1, int(REID_TOP_K)):
+                            break
+                        ok = True
+                        for s in selected:
+                            # cosine distance between normalized embeddings
+                            try:
+                                sim = float(np.dot(cand["emb"], s["emb"]))
+                            except Exception:
+                                sim = 1.0
+                            if (1.0 - sim) < REID_DIVERSITY_MIN_DIST:
+                                ok = False
+                                break
+                        if ok:
+                            selected.append(cand)
+                    # If couldn't reach K due to diversity, backfill from remaining best
+                    if len(selected) < max(1, int(REID_TOP_K)):
                         for cand in scored:
+                            # Avoid Numpy array equality on dicts; use identity
+                            if any(cand is s for s in selected):
+                                continue
+                            selected.append(cand)
                             if len(selected) >= max(1, int(REID_TOP_K)):
                                 break
-                            ok = True
-                            for s in selected:
-                                # cosine distance between normalized embeddings
-                                try:
-                                    sim = float(np.dot(cand["emb"], s["emb"]))
-                                except Exception:
-                                    sim = 1.0
-                                if (1.0 - sim) < REID_DIVERSITY_MIN_DIST:
-                                    ok = False
-                                    break
-                            if ok:
-                                selected.append(cand)
-                        # If couldn't reach K due to diversity, backfill from remaining best
-                        if len(selected) < max(1, int(REID_TOP_K)):
-                            for cand in scored:
-                                # Avoid Numpy array equality on dicts; use identity
-                                if any(cand is s for s in selected):
-                                    continue
-                                selected.append(cand)
-                                if len(selected) >= max(1, int(REID_TOP_K)):
-                                    break
 
-                    # Save selected crops (indexed only, no legacy duplicate)
-                    if SAVE_REID_BEST_CROP and selected:
-                        try:
-                            date_folder = datetime.now().strftime("%Y%m%d")
-                            daily_dir = os.path.join(output_dir, date_folder)
-                            os.makedirs(daily_dir, exist_ok=True)
-                            cam_prefix = input_video_path.split(os.path.sep)[-2][-2:] if len(input_video_path.split(os.path.sep)) >= 2 else ""
+                # Save selected crops (indexed only, no legacy duplicate)
+                if SAVE_REID_BEST_CROP and selected:
+                    try:
+                        date_folder = datetime.now().strftime("%Y%m%d")
+                        daily_dir = os.path.join(output_dir, date_folder)
+                        os.makedirs(daily_dir, exist_ok=True)
+                        cam_prefix = input_video_path.split(os.path.sep)[-2][-2:] if len(input_video_path.split(os.path.sep)) >= 2 else ""
 
-                            saved_paths = []
-                            for idx, item in enumerate(selected, start=1):
-                                fname_idxed = f"{cam_prefix}H{os.path.splitext(file_basename)[0]}_reid_best{idx}.jpg"
-                                save_path_idxed = os.path.join(daily_dir, fname_idxed)
-                                cv2.imwrite(save_path_idxed, item["crop"], [cv2.IMWRITE_JPEG_QUALITY, 90])
-                                saved_paths.append(save_path_idxed)
-                            # best_path points to the highest-score indexed file
-                            reid_result["best_path"] = saved_paths[0] if saved_paths else None
-                            logger.info(f"[{file_basename}] ReID topK saved {len(selected)} crops.")
-                        except Exception as e:
-                            logger.warning(f"[{file_basename}] Failed to save ReID crops: {e}")
+                        saved_paths = []
+                        for idx, item in enumerate(selected, start=1):
+                            fname_idxed = f"{cam_prefix}H{os.path.splitext(file_basename)[0]}_reid_best{idx}.jpg"
+                            save_path_idxed = os.path.join(daily_dir, fname_idxed)
+                            cv2.imwrite(save_path_idxed, item["crop"], [cv2.IMWRITE_JPEG_QUALITY, 90])
+                            saved_paths.append(save_path_idxed)
+                        # best_path points to the highest-score indexed file
+                        reid_result["best_path"] = saved_paths[0] if saved_paths else None
+                        logger.info(f"[{file_basename}] ReID topK saved {len(selected)} crops.")
+                    except Exception as e:
+                        logger.warning(f"[{file_basename}] Failed to save ReID crops: {e}")
 
-                    logger.info(f"[{file_basename}] ReID result: matched={reid_result['matched']}, pos={best_score:.3f}, neg={best_neg:.3f}, delta={(best_score - best_neg):.3f}, thr={REID_THRESHOLD:.3f}, margin={REID_NEGATIVE_MARGIN:.3f}.")
-                else:
-                    logger.info(f"[{file_basename}] No ReID candidate crops collected.")
-            except Exception as e:
-                logger.warning(f"[{file_basename}] ReID evaluation failed: {e}")
-        else:
-            logger.debug("[%s] ReID is disabled (REID_ENABLED=False). Skipping identification.", file_basename)
+                logger.info(f"[{file_basename}] ReID result: matched={reid_result['matched']}, pos={best_score:.3f}, neg={best_neg:.3f}, delta={(best_score - best_neg):.3f}, thr={REID_THRESHOLD:.3f}, margin={REID_NEGATIVE_MARGIN:.3f}.")
+            else:
+                logger.info(f"[{file_basename}] No ReID candidate crops collected.")
+        except Exception as e:
+            logger.warning(f"[{file_basename}] ReID evaluation failed: {e}")
+    else:
+        logger.debug("[%s] ReID is disabled (REID_ENABLED=False). Skipping identification.", file_basename)
 
     elapsed_time = time.time() - start_time
     logger.info(f"[{file_basename}] Full processing took {elapsed_time:.2f} seconds. Detected: {num_persons} persons, {num_cars} cars.")
@@ -1382,5 +1382,5 @@ def detect_motion(input_video_path, output_dir):
         'crossing_direction': crossing_direction,
         'persons_up': persons_up,
         'persons_down': persons_down,
-        'reid': reid_result if (crossing_detected and REID_ENABLED) else None,
+        'reid': reid_result,
     }
