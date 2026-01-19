@@ -94,8 +94,14 @@ def analyze_video(motion_result, video_path):
         direction_text = ""
         if direction == 'up':
             direction_text = "\U0001F6A7" +"\U0001F6B6\u200D\u27A1\uFE0F" * persons_up
+            if reid_text:
+                reid_text += " - *Юху!*"
+                logger.info(f"[{file_basename}] AUTO Reaction detected: object went away.")
         elif direction == 'down':
             direction_text = "\U0001F6B6\u200D\u27A1\uFE0F" * persons_down + " \U0001F6A7"
+            if reid_text:
+                reid_text += " - *Ех...*"
+                logger.info(f"[{file_basename}] AUTO Reaction detected: object came back.")
         elif direction == 'both':
             direction_text = "\U0001F6B6\u200D\u27A1\uFE0F" * persons_down + " \U0001F6A7" + "\U0001F6B6\u200D\u27A1\uFE0F" * persons_up
 
@@ -242,8 +248,6 @@ def analyze_video(motion_result, video_path):
         gen_config = types.GenerateContentConfig(automatic_function_calling=types.AutomaticFunctionCallingConfig(disable=True))
 
         analysis_result = ""
-        additional_text = ""
-
 
         for attempt in range(max_retries):
             try:
@@ -324,7 +328,7 @@ def analyze_video(motion_result, video_path):
         else:
             timestamp += "\u2747\uFE0F "
 
-        return {'response': timestamp + analysis_result + additional_text, 'insignificant_frames': motion_result['insignificant_frames'], 'clip_path': motion_result.get('clip_path')}
+        return {'response': timestamp + analysis_result, 'insignificant_frames': motion_result['insignificant_frames'], 'clip_path': motion_result.get('clip_path')}
 
     except Exception as e_analysis:
         logger.error(f"[{file_basename}] Video analysis failed: {e_analysis}", exc_info=False)

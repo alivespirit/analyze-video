@@ -276,7 +276,7 @@ async def reaction_callback(update, context):
                                 if (isinstance(media_msgs, (list, tuple)) and len(media_msgs) > 0):
                                     reply_target_message_id = getattr(media_msgs[-1], 'message_id', None)
                                     sent_media_group = reply_target_message_id is not None
-                                    logger.info(f"[{file_basename}] Will reply to media group message_id={reply_target_message_id} (original={message_id}).")
+                                    logger.debug(f"[{file_basename}] Will reply to media group message_id={reply_target_message_id} (original={message_id}).")
                                 else:
                                     logger.info(f"[{file_basename}] media_msgs is not a non-empty list/tuple; skipping reply.")
                             except Exception as e:
@@ -515,6 +515,197 @@ async def button_callback(update, context):
             logger.warning(f"Confirm action failed: {e}")
         return
 
+    # Handle confirm-to-negative action for REID crops
+    if isinstance(raw, str) and raw.startswith("CONFIRM_NEG:"):
+        try:
+            callback_file_rel = raw[len("CONFIRM_NEG:"):].replace('/', os.path.sep)
+            file_path = os.path.join(VIDEO_FOLDER, callback_file_rel)
+            file_basename = os.path.basename(file_path)
+            logger.info(f"[{file_basename}] Negative confirm callback received.")
+            try:
+                neg_pairs = compute_reid_paths_multi(file_path, file_basename, k=3, include_legacy=False, gallery_path=REID_NEGATIVE_GALLERY_PATH)
+                for src, dst in neg_pairs:
+                    try:
+                        if os.path.exists(src):
+                            shutil.copy2(src, dst)
+                            logger.info(f"[{file_basename}] REID frame copied to NEGATIVE gallery: {dst}")
+                    except Exception as e:
+                        logger.warning(f"[{file_basename}] Failed to copy REID frame to negative gallery on confirm: {e}")
+            except Exception as e:
+                logger.warning(f"[{file_basename}] Unexpected error preparing NEGATIVE confirm copy: {e}")
+            # Update prompt message to 'Записали...' with revert button (negative)
+            try:
+                revert_markup = InlineKeyboardMarkup(
+                    [[InlineKeyboardButton("Нє-нє-нє", callback_data=f"REVERT_NEG:{callback_file_rel.replace(os.path.sep, '/')}")]]
+                )
+                await query.edit_message_text(text="Записали...", reply_markup=revert_markup)
+            except Exception as e:
+                logger.warning(f"[{file_basename}] Failed to edit message to 'Записали...' (negative): {e}")
+        except Exception as e:
+            logger.warning(f"Negative confirm action failed: {e}")
+        return
+
+    # Auto confirm action: edit caption/text, keep only 'Глянути', send crops + standard confirm prompt
+    if isinstance(raw, str) and raw.startswith("AUTO_CONFIRM:"):
+        try:
+            callback_file_rel = raw[len("AUTO_CONFIRM:"):].replace('/', os.path.sep)
+            file_path = os.path.join(VIDEO_FOLDER, callback_file_rel)
+            file_basename = os.path.basename(file_path)
+            logger.info(f"[{file_basename}] Auto confirm button received.")
+
+            # Build single-button markup with only 'Глянути'
+            single_row = [[InlineKeyboardButton("Глянути", callback_data=callback_file_rel.replace(os.path.sep, '/'))]]
+            single_markup = InlineKeyboardMarkup(single_row)
+
+            # Edit the original message to append ' ✅' and remove extra buttons
+            try:
+                base_text = getattr(query.message, 'caption', None) or getattr(query.message, 'text', '') or ''
+                new_text = (base_text or '') + " \u2705"
+                if getattr(query.message, 'caption', None):
+                    await query.edit_message_caption(caption=new_text, reply_markup=single_markup, parse_mode='Markdown')
+                else:
+                    await query.edit_message_text(text=new_text, reply_markup=single_markup, parse_mode='Markdown')
+            except Exception as e:
+                logger.warning(f"[{file_basename}] Failed to edit message on auto confirm: {e}")
+
+            # Send REID crops for review (standard 'Точняк?' prompt)
+            try:
+                pairs = compute_reid_paths_multi(file_path, file_basename, k=3, include_legacy=True)
+                media_group = []
+                for src, _dst in pairs:
+                    try:
+                        if os.path.exists(src):
+                            with open(src, 'rb') as photo_file:
+                                media_group.append(InputMediaPhoto(media=photo_file.read()))
+                    except Exception as e:
+                        logger.warning(f"[{file_basename}] Failed to read REID crop {src}: {e}")
+
+                reply_target_message_id = None
+                sent_media_group = False
+                if media_group:
+                    try:
+                        media_msgs = await context.bot.send_media_group(
+                            chat_id=query.message.chat_id,
+                            media=media_group,
+                            reply_to_message_id=query.message.message_id
+                        )
+                        try:
+                            if (isinstance(media_msgs, (list, tuple)) and len(media_msgs) > 0):
+                                reply_target_message_id = getattr(media_msgs[-1], 'message_id', None)
+                                sent_media_group = reply_target_message_id is not None
+                                logger.debug(f"[{file_basename}] Will reply to media group message_id={reply_target_message_id} (original={query.message.message_id}).")
+                        except Exception as e:
+                            logger.warning(f"[{file_basename}] Exception extracting reply_target_message_id: {e}")
+                            reply_target_message_id = None
+                        logger.info(f"[{file_basename}] Sent {len(media_group)} REID crops for review (auto confirm).")
+                    except Exception as e:
+                        logger.warning(f"[{file_basename}] Failed to send review crops (auto confirm): {e}")
+
+                # Build confirm prompt with standard positive confirm
+                try:
+                    confirm_markup = InlineKeyboardMarkup(
+                        [[
+                            InlineKeyboardButton("100%", callback_data=f"CONFIRM:{callback_file_rel.replace(os.path.sep, '/')}"),
+                            InlineKeyboardButton("Та нє", callback_data=f"DECLINE:{callback_file_rel.replace(os.path.sep, '/')}" )
+                        ]]
+                    )
+                    if sent_media_group and reply_target_message_id:
+                        await context.bot.send_message(
+                            chat_id=query.message.chat_id,
+                            text="Точняк?",
+                            reply_markup=confirm_markup,
+                            reply_to_message_id=reply_target_message_id
+                        )
+                        logger.info(f"[{file_basename}] Sent confirmation prompt for REID crops (auto confirm).")
+                except Exception as e:
+                    logger.warning(f"[{file_basename}] Failed to send confirmation prompt (auto confirm): {e}")
+            except Exception as e:
+                logger.warning(f"[{file_basename}] Unexpected error preparing review step (auto confirm): {e}")
+        except Exception as e:
+            logger.warning(f"Auto confirm action failed: {e}")
+        return
+
+    # Auto decline action: edit caption/text, keep only 'Глянути', log and send crops + negative confirm prompt
+    if isinstance(raw, str) and raw.startswith("AUTO_DECLINE:"):
+        try:
+            callback_file_rel = raw[len("AUTO_DECLINE:"):].replace('/', os.path.sep)
+            file_path = os.path.join(VIDEO_FOLDER, callback_file_rel)
+            file_basename = os.path.basename(file_path)
+            logger.info("AUTO Reaction removed.")
+            logger.info(f"[{file_basename}] Auto decline button received.")
+
+            # Build single-button markup with only 'Глянути'
+            single_row = [[InlineKeyboardButton("Глянути", callback_data=callback_file_rel.replace(os.path.sep, '/'))]]
+            single_markup = InlineKeyboardMarkup(single_row)
+
+            # Edit the original message to append ' ❌' and remove extra buttons
+            try:
+                base_text = getattr(query.message, 'caption', None) or getattr(query.message, 'text', '') or ''
+                new_text = (base_text or '') + " \u274C"
+                if getattr(query.message, 'caption', None):
+                    await query.edit_message_caption(caption=new_text, reply_markup=single_markup, parse_mode='Markdown')
+                else:
+                    await query.edit_message_text(text=new_text, reply_markup=single_markup, parse_mode='Markdown')
+            except Exception as e:
+                logger.warning(f"[{file_basename}] Failed to edit message on auto decline: {e}")
+
+            # Send REID crops for review with negative confirmation prompt
+            try:
+                pairs = compute_reid_paths_multi(file_path, file_basename, k=3, include_legacy=False)
+                media_group = []
+                for src, _dst in pairs:
+                    try:
+                        if os.path.exists(src):
+                            with open(src, 'rb') as photo_file:
+                                media_group.append(InputMediaPhoto(media=photo_file.read()))
+                    except Exception as e:
+                        logger.warning(f"[{file_basename}] Failed to read REID crop {src}: {e}")
+
+                reply_target_message_id = None
+                sent_media_group = False
+                if media_group:
+                    try:
+                        media_msgs = await context.bot.send_media_group(
+                            chat_id=query.message.chat_id,
+                            media=media_group,
+                            reply_to_message_id=query.message.message_id
+                        )
+                        try:
+                            if (isinstance(media_msgs, (list, tuple)) and len(media_msgs) > 0):
+                                reply_target_message_id = getattr(media_msgs[-1], 'message_id', None)
+                                sent_media_group = reply_target_message_id is not None
+                                logger.debug(f"[{file_basename}] Will reply to media group message_id={reply_target_message_id} (original={query.message.message_id}).")
+                        except Exception as e:
+                            logger.warning(f"[{file_basename}] Exception extracting reply_target_message_id: {e}")
+                            reply_target_message_id = None
+                        logger.info(f"[{file_basename}] Sent {len(media_group)} REID crops for review (auto decline).")
+                    except Exception as e:
+                        logger.warning(f"[{file_basename}] Failed to send review crops (auto decline): {e}")
+
+                # Build confirm prompt with negative confirm
+                try:
+                    confirm_markup = InlineKeyboardMarkup(
+                        [[
+                            InlineKeyboardButton("100%", callback_data=f"CONFIRM_NEG:{callback_file_rel.replace(os.path.sep, '/')}"),
+                            InlineKeyboardButton("Та нє", callback_data=f"DECLINE:{callback_file_rel.replace(os.path.sep, '/')}" )
+                        ]]
+                    )
+                    if sent_media_group and reply_target_message_id:
+                        await context.bot.send_message(
+                            chat_id=query.message.chat_id,
+                            text="Хіба нє?",
+                            reply_markup=confirm_markup,
+                            reply_to_message_id=reply_target_message_id
+                        )
+                        logger.info(f"[{file_basename}] Sent negative confirmation prompt for REID crops (auto decline).")
+                except Exception as e:
+                    logger.warning(f"[{file_basename}] Failed to send negative confirmation prompt (auto decline): {e}")
+            except Exception as e:
+                logger.warning(f"[{file_basename}] Unexpected error preparing review step (auto decline): {e}")
+        except Exception as e:
+            logger.warning(f"Auto decline action failed: {e}")
+        return
+
     # Handle revert action to remove copied crops
     if isinstance(raw, str) and raw.startswith("REVERT:"):
         try:
@@ -537,6 +728,33 @@ async def button_callback(update, context):
                 logger.warning(f"[{file_basename}] Failed to edit message to final state: {e}")
         except Exception as e:
             logger.warning(f"Revert action failed: {e}")
+        return
+
+    # Handle revert negative action to remove copied negative crops
+    if isinstance(raw, str) and raw.startswith("REVERT_NEG:"):
+        try:
+            callback_file_rel = raw[len("REVERT_NEG:"):].replace('/', os.path.sep)
+            file_path = os.path.join(VIDEO_FOLDER, callback_file_rel)
+            file_basename = os.path.basename(file_path)
+            logger.info(f"[{file_basename}] Revert NEGATIVE callback received.")
+            try:
+                neg_pairs_rm = compute_reid_paths_multi(file_path, file_basename, k=3, include_legacy=False, gallery_path=REID_NEGATIVE_GALLERY_PATH)
+                for _src, dst in neg_pairs_rm:
+                    try:
+                        if os.path.exists(dst):
+                            os.remove(dst)
+                            logger.info(f"[{file_basename}] NEGATIVE gallery frame removed on revert: {dst}")
+                    except Exception as e:
+                        logger.warning(f"[{file_basename}] Failed to remove NEGATIVE frame on revert: {e}")
+            except Exception as e:
+                logger.warning(f"[{file_basename}] Unexpected error preparing NEGATIVE revert removal: {e}")
+            # Update prompt message to final state without button
+            try:
+                await query.edit_message_text(text="ну нє то нє...")
+            except Exception as e:
+                logger.warning(f"[{file_basename}] Failed to edit message to final state (negative): {e}")
+        except Exception as e:
+            logger.warning(f"Revert NEGATIVE action failed: {e}")
         return
 
     # Handle decline action: finalize without copying crops
@@ -643,6 +861,13 @@ async def send_notifications(app, video_response, insignificant_frames, clip_pat
             send_success = False
             # Single button row: only "Глянути"
             keyboard = [[InlineKeyboardButton("Глянути", callback_data=callback_file)]]
+            # If message contains celebratory/sad suffix, add auto confirm/decline buttons
+            try:
+                if ("*Юху!*" in video_response) or ("*Ех...*" in video_response):
+                    keyboard[0].append(InlineKeyboardButton("\u2705", callback_data=f"AUTO_CONFIRM:{callback_file}"))
+                    keyboard[0].append(InlineKeyboardButton("\u274C", callback_data=f"AUTO_DECLINE:{callback_file}"))
+            except Exception:
+                pass
             reply_markup = InlineKeyboardMarkup(keyboard)
             try:
                 with open(media_path, 'rb') as animation_file:
