@@ -557,14 +557,33 @@ async def button_callback(update, context):
             single_row = [[InlineKeyboardButton("Глянути", callback_data=callback_file_rel.replace(os.path.sep, '/'))]]
             single_markup = InlineKeyboardMarkup(single_row)
 
+            # Preserve original parse mode if available
+            try:
+                msg_key = f"{query.message.chat_id}:{query.message.message_id}"
+                original_entry = video_message_map.get(msg_key)
+                original_mode = (original_entry.get("mode") if isinstance(original_entry, dict) else None) or 'Markdown'
+            except Exception:
+                original_mode = 'Markdown'
+
             # Edit the original message to append ' ✅' and remove extra buttons
             try:
-                base_text = getattr(query.message, 'caption', None) or getattr(query.message, 'text', '') or ''
+                # Prefer stored caption to preserve formatting
+                try:
+                    base_text = (original_entry.get("caption") if isinstance(original_entry, dict) else None) or getattr(query.message, 'caption', None) or getattr(query.message, 'text', '') or ''
+                except Exception:
+                    base_text = getattr(query.message, 'caption', None) or getattr(query.message, 'text', '') or ''
                 new_text = (base_text or '') + " \u2705"
                 if getattr(query.message, 'caption', None):
-                    await query.edit_message_caption(caption=new_text, reply_markup=single_markup, parse_mode='Markdown')
+                    await query.edit_message_caption(caption=new_text, reply_markup=single_markup, parse_mode=original_mode)
                 else:
-                    await query.edit_message_text(text=new_text, reply_markup=single_markup, parse_mode='Markdown')
+                    await query.edit_message_text(text=new_text, reply_markup=single_markup, parse_mode=original_mode)
+                # Persist updated caption
+                try:
+                    async with message_map_lock:
+                        video_message_map[msg_key] = {"path": (original_entry.get("path") if isinstance(original_entry, dict) else file_path), "caption": new_text, "mode": original_mode}
+                        save_message_map_to_disk()
+                except Exception:
+                    pass
             except Exception as e:
                 logger.warning(f"[{file_basename}] Failed to edit message on auto confirm: {e}")
 
@@ -638,14 +657,33 @@ async def button_callback(update, context):
             single_row = [[InlineKeyboardButton("Глянути", callback_data=callback_file_rel.replace(os.path.sep, '/'))]]
             single_markup = InlineKeyboardMarkup(single_row)
 
+            # Preserve original parse mode if available
+            try:
+                msg_key = f"{query.message.chat_id}:{query.message.message_id}"
+                original_entry = video_message_map.get(msg_key)
+                original_mode = (original_entry.get("mode") if isinstance(original_entry, dict) else None) or 'Markdown'
+            except Exception:
+                original_mode = 'Markdown'
+
             # Edit the original message to append ' ❌' and remove extra buttons
             try:
-                base_text = getattr(query.message, 'caption', None) or getattr(query.message, 'text', '') or ''
+                # Prefer stored caption to preserve formatting
+                try:
+                    base_text = (original_entry.get("caption") if isinstance(original_entry, dict) else None) or getattr(query.message, 'caption', None) or getattr(query.message, 'text', '') or ''
+                except Exception:
+                    base_text = getattr(query.message, 'caption', None) or getattr(query.message, 'text', '') or ''
                 new_text = (base_text or '') + " \u274C"
                 if getattr(query.message, 'caption', None):
-                    await query.edit_message_caption(caption=new_text, reply_markup=single_markup, parse_mode='Markdown')
+                    await query.edit_message_caption(caption=new_text, reply_markup=single_markup, parse_mode=original_mode)
                 else:
-                    await query.edit_message_text(text=new_text, reply_markup=single_markup, parse_mode='Markdown')
+                    await query.edit_message_text(text=new_text, reply_markup=single_markup, parse_mode=original_mode)
+                # Persist updated caption
+                try:
+                    async with message_map_lock:
+                        video_message_map[msg_key] = {"path": (original_entry.get("path") if isinstance(original_entry, dict) else file_path), "caption": new_text, "mode": original_mode}
+                        save_message_map_to_disk()
+                except Exception:
+                    pass
             except Exception as e:
                 logger.warning(f"[{file_basename}] Failed to edit message on auto decline: {e}")
 
