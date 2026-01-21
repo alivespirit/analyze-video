@@ -650,7 +650,7 @@ async def button_callback(update, context):
             callback_file_rel = raw[len("AUTO_DECLINE:"):].replace('/', os.path.sep)
             file_path = os.path.join(VIDEO_FOLDER, callback_file_rel)
             file_basename = os.path.basename(file_path)
-            logger.info("AUTO Reaction removed.")
+            logger.info(f"[{file_basename}] AUTO Reaction removed.")
             logger.info(f"[{file_basename}] Auto decline button received.")
 
             # Build single-button markup with only 'Глянути'
