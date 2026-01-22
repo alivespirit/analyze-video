@@ -327,9 +327,10 @@ def _hhmm_from_video_path(basename: str, fallback_ts: Optional[datetime] = None)
 def build_away_intervals(entries: List[Dict]) -> List[Dict[str, Optional[str]]]:
     """Build list of intervals for 'object went away' → 'object came back'.
     Pair events by chronological video time (HH:MM derived from path, fallback to log TS).
-    Returns dicts with keys: start, end, dur (duration string like '1h14m').
-    Missing start/end produce 'dur' as None and indicate open intervals only when a counterpart
-    does not exist earlier/later in the day's events.
+    Supports stacked openings: multiple consecutive 'away' events create multiple open intervals;
+    each subsequent 'back' closes only the most recent open interval. Returns dicts with keys:
+    start, end, dur (duration string like '1h14m'). Missing start/end produce 'dur' as None and
+    indicate open intervals only when a counterpart does not exist earlier/later in the day's events.
     """
     # Collect events with derived HH:MM and sortable minute index
     # Store minute index, original timestamp, type, hhmm, and video for stable ordering and cancellations
@@ -384,26 +385,20 @@ def build_away_intervals(entries: List[Dict]) -> List[Dict[str, Optional[str]]]:
             continue
         filtered.append((minutes, ts, typ, hhmm, vid))
 
-    # Original global pairing with pending back-only and open-away handling
+    # Original global pairing updated to support stacked openings
     filtered.sort(key=lambda t: (t[0], t[1]))
     intervals: List[Dict[str, Optional[str]]] = []
-    current_start: Optional[str] = None
-    pending_back_only: Dict[str, str] = {}
-    for _minutes, _ts, typ, hhmm, vid in filtered:
+    open_starts: List[str] = []  # stack of open 'away' HH:MM values (LIFO)
+    for _minutes, _ts, typ, hhmm, _vid in filtered:
         if typ == "away":
-            if current_start is None:
-                current_start = hhmm
-            else:
-                # Duplicate away without intervening back → keep earliest
-                pass
+            # Push a new open interval start
+            open_starts.append(hhmm)
         elif typ == "back":
-            if current_start is None:
-                # Back without prior away in this day → track open-start pending for this video
-                pending_back_only[vid] = hhmm
-            else:
-                # Compute duration between current_start and this back
+            if open_starts:
+                # Close the most recent open interval
+                start_hhmm = open_starts.pop()
                 try:
-                    sh, sm = [int(x) for x in current_start.split(":", 1)]
+                    sh, sm = [int(x) for x in start_hhmm.split(":", 1)]
                     eh, em = [int(x) for x in hhmm.split(":", 1)]
                     start_min = sh * 60 + sm
                     end_min = eh * 60 + em
@@ -412,23 +407,23 @@ def build_away_intervals(entries: List[Dict]) -> List[Dict[str, Optional[str]]]:
                         dh = total // 60
                         dm = total % 60
                         dur = (f"{dh}h" if dh else "") + (f"{dm}m" if dm or not dh else "")
-                        intervals.append({"start": current_start, "end": hhmm, "dur": dur})
-                        current_start = None
+                        intervals.append({"start": start_hhmm, "end": hhmm, "dur": dur})
                     else:
-                        # Ignore invalid or zero-length closure; wait for a later valid 'back'
-                        pass
+                        # Invalid or zero-length closure; keep the start for a later valid 'back'
+                        open_starts.append(start_hhmm)
                 except Exception:
-                    # If parsing fails, do not close; keep current_start for a valid later 'back'
-                    pass
-        else:  # remove (normally filtered out; safety no-op)
+                    # Parsing failed; keep the start for a later valid 'back'
+                    open_starts.append(start_hhmm)
+            else:
+                # Back without prior away in this day → open-start interval
+                intervals.append({"start": None, "end": hhmm, "dur": None})
+        else:
+            # 'remove' already filtered out; no-op for safety
             pass
 
-    # Emit any remaining pending back-only intervals as open-start intervals
-    for _vid, end_hhmm in pending_back_only.items():
-        intervals.append({"start": None, "end": end_hhmm, "dur": None})
-    # If we ended with an open "away" without a later back, emit open-ended interval
-    if current_start is not None:
-        intervals.append({"start": current_start, "end": None, "dur": None})
+    # Emit any remaining open intervals as open-ended
+    for s in open_starts:
+        intervals.append({"start": s, "end": None, "dur": None})
 
     return intervals
 
