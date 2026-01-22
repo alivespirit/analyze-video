@@ -425,6 +425,25 @@ def build_away_intervals(entries: List[Dict]) -> List[Dict[str, Optional[str]]]:
     for s in open_starts:
         intervals.append({"start": s, "end": None, "dur": None})
 
+    # Sort intervals chronologically by earliest known time (prefer start, else end)
+    def _minutes(hhmm: Optional[str]) -> Optional[int]:
+        if not hhmm:
+            return None
+        try:
+            h_str, m_str = hhmm.split(":", 1)
+            return int(h_str) * 60 + int(m_str)
+        except Exception:
+            return None
+
+    def _sort_key(iv: Dict[str, Optional[str]]) -> int:
+        s = _minutes(iv.get("start"))
+        if s is not None:
+            return s
+        e = _minutes(iv.get("end"))
+        return e if e is not None else 10**9
+
+    intervals.sort(key=_sort_key)
+
     return intervals
 
 
