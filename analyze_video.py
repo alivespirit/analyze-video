@@ -98,12 +98,12 @@ def analyze_video(motion_result, video_path):
         direction_text = ""
         if direction == 'up':
             direction_text = "\U0001F6A7" +"\U0001F6B6\u200D\u27A1\uFE0F" * persons_up
-            if reid_text:
+            if USERNAME in reid_text:
                 reid_text += " - *Юху!*"
                 logger.info(f"[{file_basename}] AUTO Reaction detected: object went away.")
         elif direction == 'down':
             direction_text = "\U0001F6B6\u200D\u27A1\uFE0F" * persons_down + " \U0001F6A7"
-            if reid_text:
+            if USERNAME in reid_text:
                 reid_text += " - *Ех...*"
                 logger.info(f"[{file_basename}] AUTO Reaction detected: object came back.")
         elif direction == 'both':
