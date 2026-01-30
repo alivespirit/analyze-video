@@ -72,10 +72,14 @@ def analyze_video(motion_result, video_path):
     # Append ReID result if available and positive
     reid = motion_result.get('reid')
     reid_text = ""
-    if isinstance(reid, dict) and reid.get('matched'):
+    if isinstance(reid, dict):
         score = float(reid.get('score', 0.0))
         percent = int(round(score * 100))
-        reid_text = f" / \U0001FAC6 *{percent}%*\n{USERNAME}"
+        reid_matched = reid.get('matched')
+        if reid_matched is True:
+            reid_text = f" / \U0001FAC6 *{percent}%*\n{USERNAME}"
+        elif reid_matched is False:
+            reid_text = f" / \U0001FAC6 {percent}%"
 
     detected_motion_status = motion_result['status']
     
