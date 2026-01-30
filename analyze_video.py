@@ -78,7 +78,7 @@ def analyze_video(motion_result, video_path):
         reid_matched = reid.get('matched')
         if reid_matched is True:
             reid_text = f" / \U0001FAC6 *{percent}%*\n{USERNAME}"
-        elif reid_matched is False:
+        elif reid_matched is False and percent != 0:
             reid_text = f" / \U0001FAC6 {percent}%"
 
     detected_motion_status = motion_result['status']
