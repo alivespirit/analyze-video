@@ -167,11 +167,20 @@
       <h2>Processing Times Chart</h2>
       {% if chart_pairs and chart_pairs|length > 0 %}
         {% set pairs = chart_pairs %}
-        {% set values = pairs|map(attribute=1)|list %}
-        {% set maxv = (values|max) %}
-        {% set minv = (values|min) %}
-        {% set avgv = (values|sum / values|length) %}
+        {% set cap = 300.0 %}
         {% set n = pairs|length %}
+        {# Aggregate capped stats: max/min/avg computed over capped values #}
+        {% set ns = namespace(maxv=0.0, minv=None, sumv=0.0) %}
+        {% for p in pairs %}
+          {% set v = p[1] %}
+          {% set vc = (cap if v > cap else v) %}
+          {% if ns.minv is none or vc < ns.minv %}{% set ns.minv = vc %}{% endif %}
+          {% if vc > ns.maxv %}{% set ns.maxv = vc %}{% endif %}
+          {% set ns.sumv = ns.sumv + vc %}
+        {% endfor %}
+        {% set maxv = ns.maxv %}
+        {% set minv = (ns.minv if ns.minv is not none else 0.0) %}
+        {% set avgv = (ns.sumv / n) %}
         <!-- Normalize to a fixed viewBox and space bars across full width -->
         {% set vbw = 1000 %}
         {% set vbh = 240 %}
@@ -207,11 +216,16 @@
               {% set st = metrics.status_per_video.get(vid, 'unknown') %}
               {% set col = status_colors.get(st, '#3b82f6') %}
               {% set x = left + i * step + (step - barW) / 2 %}
-              {% set h = (val / denom) * plotH %}
+              {% set valc = (cap if val > cap else val) %}
+              {% set h = (valc / denom) * plotH %}
               {% set y = yBottom - h %}
               <a href="#log-{{ vid }}">
                 <rect x="{{ x }}" y="{{ y }}" width="{{ barW }}" height="{{ h }}" fill="{{ col }}">
-                  <title>{{ vid }} ({{ '%.2f'|format(val) }}s)</title>
+                  {% if val > cap %}
+                    <title>{{ vid }} ({{ '%.2f'|format(val) }}s, capped {{ '%.0f'|format(cap) }}s)</title>
+                  {% else %}
+                    <title>{{ vid }} ({{ '%.2f'|format(val) }}s)</title>
+                  {% endif %}
                 </rect>
               </a>
               <line x1="{{ left + i * step + step / 2 }}" y1="{{ yBottom }}" x2="{{ left + i * step + step / 2 }}" y2="{{ yBottom + 4 }}" stroke="#444" />

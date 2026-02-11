@@ -57,6 +57,9 @@ env = Environment(
 
 app = FastAPI(title="Analyze-Video Log Dashboard")
 
+# Cap very large durations when computing averages to reduce outlier skew
+CAP_PROCESSING_SECONDS: float = 300.0
+
 
 def list_log_files() -> Dict[str, str]:
     """Return map of date (YYYY-MM-DD) to file path.
@@ -256,10 +259,19 @@ def collect_metrics(entries: List[Dict]) -> Dict:
     def stats(values: List[float]) -> Optional[Dict[str, float]]:
         if not values:
             return None
+        # Compute average on capped values to avoid skew from sleep/wake outliers
+        capped_sum = 0.0
+        for v in values:
+            try:
+                capped_sum += v if v <= CAP_PROCESSING_SECONDS else CAP_PROCESSING_SECONDS
+            except Exception:
+                # On parse issues, treat as zero contribution
+                pass
+        avg_val = capped_sum / len(values)
         return {
             "min": min(values),
             "max": max(values),
-            "avg": sum(values) / len(values),
+            "avg": avg_val,
         }
 
     # Combine global MD times and per-video MD times for summary tile
