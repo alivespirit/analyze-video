@@ -339,8 +339,9 @@ def _hhmm_from_video_path(basename: str, fallback_ts: Optional[datetime] = None)
 def build_away_intervals(entries: List[Dict]) -> List[Dict[str, Optional[str]]]:
     """Build list of intervals for 'object went away' → 'object came back'.
     Pair events by chronological video time (HH:MM derived from path, fallback to log TS).
-    Supports stacked openings: multiple consecutive 'away' events create multiple open intervals;
-    each subsequent 'back' closes only the most recent open interval. Returns dicts with keys:
+    If a video has multiple consecutive 'Reaction detected' messages of the same type (e.g., multiple
+    'object went away' without a 'Reaction removed' in between), only the latest of that run is considered
+    for pairing. This prevents creating stacked open intervals from duplicate messages. Returns dicts with keys:
     start, end, dur (duration string like '1h14m'). Missing start/end produce 'dur' as None and
     indicate open intervals only when a counterpart does not exist earlier/later in the day's events.
     """
@@ -397,8 +398,37 @@ def build_away_intervals(entries: List[Dict]) -> List[Dict[str, Optional[str]]]:
             continue
         filtered.append((minutes, ts, typ, hhmm, vid))
 
-    # Original global pairing updated to support stacked openings
-    filtered.sort(key=lambda t: (t[0], t[1]))
+    # Collapse consecutive duplicate reaction types per video (keep only the latest in each run)
+    events_by_video: Dict[str, List[Tuple[int, datetime, str, str]]] = {}
+    for minutes, ts, typ, hhmm, vid in filtered:
+        events_by_video.setdefault(vid, []).append((minutes, ts, typ, hhmm))
+
+    condensed: List[Tuple[int, datetime, str, str, str]] = []
+    for vid, evs in events_by_video.items():
+        # Ensure per-video chronological order
+        evs.sort(key=lambda t: (t[0], t[1]))
+        last_typ: Optional[str] = None
+        buffer_ev: Optional[Tuple[int, datetime, str, str]] = None
+        for minutes, ts, typ, hhmm in evs:
+            if typ == last_typ:
+                # Replace buffered event with the latest of the same type
+                buffer_ev = (minutes, ts, typ, hhmm)
+            else:
+                # Flush previous buffered event when type changes
+                if buffer_ev is not None:
+                    m, t, ty, h = buffer_ev
+                    condensed.append((m, t, ty, h, vid))
+                last_typ = typ
+                buffer_ev = (minutes, ts, typ, hhmm)
+        # Flush the final buffered event for this video
+        if buffer_ev is not None:
+            m, t, ty, h = buffer_ev
+            condensed.append((m, t, ty, h, vid))
+
+    # Use condensed events for pairing
+    filtered = sorted(condensed, key=lambda t: (t[0], t[1]))
+    
+    # Original global pairing
     intervals: List[Dict[str, Optional[str]]] = []
     open_starts: List[str] = []  # stack of open 'away' HH:MM values (LIFO)
     for _minutes, _ts, typ, hhmm, _vid in filtered:
