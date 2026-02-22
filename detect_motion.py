@@ -735,6 +735,7 @@ def detect_motion(input_video_path, output_dir):
     TESLA_TX, TESLA_TY = cfg.get("TESLA_HOTSPOT", (TESLA_TX, TESLA_TY))
     # Motion-only downscale factor for 4K (keeps tracking at full-res)
     md_scale = float(cfg.get("MOTION_DOWNSCALE", 1.0))
+    md_resize_interpolation = cv2.INTER_LINEAR if is_4k else cv2.INTER_AREA
     # Motion scan stride for the background-subtraction stage only
     motion_stride = int(cfg.get("MOTION_STRIDE", 1))
     # Output highlight clip size (always 1080p)
@@ -950,7 +951,11 @@ def detect_motion(input_video_path, output_dir):
                 if prof.enabled:
                     t0 = time.perf_counter()
                 if md_scale != 1.0:
-                    cropped_small = cv2.resize(cropped_frame, (roi_mask_small.shape[1], roi_mask_small.shape[0]), interpolation=cv2.INTER_AREA)
+                    cropped_small = cv2.resize(
+                        cropped_frame,
+                        (roi_mask_small.shape[1], roi_mask_small.shape[0]),
+                        interpolation=md_resize_interpolation,
+                    )
                 else:
                     cropped_small = cropped_frame
                 gray = cv2.cvtColor(cropped_small, cv2.COLOR_BGR2GRAY)
@@ -1042,7 +1047,11 @@ def detect_motion(input_video_path, output_dir):
             # Motion detection operates on downscaled ROI when md_scale != 1.0.
             # Optimize: resize first, then apply the (already-resized) ROI mask.
             if md_scale != 1.0:
-                cropped_small = cv2.resize(cropped_frame, (roi_mask_small.shape[1], roi_mask_small.shape[0]), interpolation=cv2.INTER_AREA)
+                cropped_small = cv2.resize(
+                    cropped_frame,
+                    (roi_mask_small.shape[1], roi_mask_small.shape[0]),
+                    interpolation=md_resize_interpolation,
+                )
                 roi_frame_small = cv2.bitwise_and(cropped_small, cropped_small, mask=roi_mask_small)
                 fg_mask = temp_backSub.apply(roi_frame_small)
                 mask_area = roi_mask_small.size
@@ -1090,7 +1099,11 @@ def detect_motion(input_video_path, output_dir):
                     t_ops = time.perf_counter()
                 cropped_frame = frame[crop_y1:crop_y2, crop_x1:crop_x2]
                 if md_scale != 1.0:
-                    cropped_small = cv2.resize(cropped_frame, (roi_mask_small.shape[1], roi_mask_small.shape[0]), interpolation=cv2.INTER_AREA)
+                    cropped_small = cv2.resize(
+                        cropped_frame,
+                        (roi_mask_small.shape[1], roi_mask_small.shape[0]),
+                        interpolation=md_resize_interpolation,
+                    )
                     roi_frame_small = cv2.bitwise_and(cropped_small, cropped_small, mask=roi_mask_small)
                     backSub.apply(roi_frame_small)
                 else:
@@ -1144,7 +1157,7 @@ def detect_motion(input_video_path, output_dir):
                 cropped_small = cv2.resize(
                     cropped_frame,
                     (roi_mask_small.shape[1], roi_mask_small.shape[0]),
-                    interpolation=cv2.INTER_AREA,
+                    interpolation=md_resize_interpolation,
                 )
                 roi_frame_small = cv2.bitwise_and(cropped_small, cropped_small, mask=roi_mask_small)
                 backSub.apply(roi_frame_small)
@@ -1193,7 +1206,11 @@ def detect_motion(input_video_path, output_dir):
             t_ops = time.perf_counter()
         cropped_frame = frame[crop_y1:crop_y2, crop_x1:crop_x2]
         if md_scale != 1.0:
-            cropped_small = cv2.resize(cropped_frame, (roi_mask_small.shape[1], roi_mask_small.shape[0]), interpolation=cv2.INTER_AREA)
+            cropped_small = cv2.resize(
+                cropped_frame,
+                (roi_mask_small.shape[1], roi_mask_small.shape[0]),
+                interpolation=md_resize_interpolation,
+            )
             roi_frame_small = cv2.bitwise_and(cropped_small, cropped_small, mask=roi_mask_small)
             fg_mask = backSub.apply(roi_frame_small)
             # Kernel is in the downscaled pixel space.
@@ -1521,13 +1538,21 @@ def detect_motion(input_video_path, output_dir):
             frame_idx += 1
             if not ret or frame is None:
                 continue
-            # Keep a clean copy for ReID crops (avoid overlay artifacts)
-            if prof.enabled:
-                t0 = time.perf_counter()
-                frame_for_reid = frame.copy()
-                prof.add("track.frame_copy", time.perf_counter() - t0)
-            else:
-                frame_for_reid = frame.copy()
+            processed_offset = (frame_idx - 1) - padded_start
+            needs_reid = (
+                REID_ENABLED
+                and REID_SAMPLING_STRIDE > 0
+                and (processed_offset % REID_SAMPLING_STRIDE == 0)
+            )
+            frame_for_reid = None
+            if needs_reid:
+                # Keep a clean copy for ReID crops (avoid overlay artifacts)
+                if prof.enabled:
+                    t0 = time.perf_counter()
+                    frame_for_reid = frame.copy()
+                    prof.add("track.frame_copy", time.perf_counter() - t0)
+                else:
+                    frame_for_reid = frame.copy()
 
             # Apply tracker ROI crop if available
             if track_roi_bbox is not None:
@@ -1887,7 +1912,6 @@ def detect_motion(input_video_path, output_dir):
 
             # Append frames to output based on output_stride to speed up render without
             # sacrificing tracking continuity (for moderate-length events)
-            processed_offset = (frame_idx - 1) - padded_start
             append_current_frame = (processed_offset % output_stride == 0) or frame_has_crossing or frame_has_highlight
             if append_current_frame:
                 if prof.enabled:
@@ -1897,7 +1921,8 @@ def detect_motion(input_video_path, output_dir):
                 h_out, w_out = output_size[1], output_size[0]
                 frame_out = frame
                 if frame.shape[0] != h_out or frame.shape[1] != w_out:
-                    frame_out = cv2.resize(frame, (w_out, h_out), interpolation=cv2.INTER_AREA)
+                    render_resize_interpolation = cv2.INTER_LINEAR if is_4k else cv2.INTER_AREA
+                    frame_out = cv2.resize(frame, (w_out, h_out), interpolation=render_resize_interpolation)
                 rgb_frame = cv2.cvtColor(frame_out, cv2.COLOR_BGR2RGB)
                 event_frames_rgb.append(rgb_frame)
                 if prof.enabled:
@@ -1906,7 +1931,7 @@ def detect_motion(input_video_path, output_dir):
 
             # Collect ReID candidate crops near line tolerance every REID_SAMPLING_STRIDE
             # Use clean frame copy to avoid drawn overlays in crops
-            if REID_ENABLED and REID_SAMPLING_STRIDE > 0 and (processed_offset % REID_SAMPLING_STRIDE == 0):
+            if needs_reid and frame_for_reid is not None:
                 if prof.enabled:
                     t0 = time.perf_counter()
                 if len(reid_candidate_crops) < REID_MAX_SAMPLES and accepted_persons:
