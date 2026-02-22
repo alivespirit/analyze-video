@@ -1,5 +1,6 @@
 import os
 import re
+import sys
 import colorsys
 from datetime import datetime, date
 from typing import List, Dict, Optional, Tuple
@@ -314,26 +315,82 @@ def collect_metrics(entries: List[Dict]) -> Dict:
 
 
 def _hhmm_from_video_path(basename: str, fallback_ts: Optional[datetime] = None) -> Optional[str]:
-    """Derive HH:MM from the video file path: parent folder name is YYYYMMDDHH (take HH),
-    and the first two digits of the filename are minutes. Fallback to provided timestamp if path is unavailable.
+    """Derive HH:MM quickly from basename.
+    - New format: parse 14-digit timestamp in basename → HH:MM
+    - Legacy format: basename starts with MMSS or MM M SS S; combine MM from basename with hour from fallback timestamp.
+      This avoids disk scans while honoring filename minute.
     """
     try:
-        vp = find_video_path(basename)
-        if vp:
-            parent = os.path.basename(os.path.dirname(vp))
-            # Hour: last two digits from YYYYMMDDHH
-            hour = parent[-2:] if len(parent) >= 2 and parent[-2:].isdigit() else None
-            fname = os.path.basename(vp)
-            mm = re.match(r"^(\d{2})", fname)
-            minute = mm.group(1) if mm else None
-            if hour and minute:
-                return f"{hour}:{minute}"
-        if fallback_ts is not None:
-            return fallback_ts.strftime("%H:%M")
+        name = os.path.basename(basename)
+        # Legacy MM/SS at start
+        m = re.match(r"^(?P<mm>\d{2})M(?P<ss>\d{2})S", name)
+        if not m:
+            m = re.match(r"^(?P<mm>\d{2})(?P<ss>\d{2})", name)
+        if m and fallback_ts:
+            hour = fallback_ts.strftime('%H')
+            mm = m.group('mm')
+            return f"{hour}:{mm}"
+        # New format: parse datetime from basename
+        root_dir = os.path.dirname(os.path.dirname(os.path.dirname(__file__)))
+        if root_dir not in sys.path:
+            sys.path.insert(0, root_dir)
+        from path_utils import parse_datetime_from_path
+        dt = parse_datetime_from_path(name)
+        if dt:
+            return dt.strftime('%H:%M')
+        return fallback_ts.strftime('%H:%M') if fallback_ts else None
     except Exception:
-        if fallback_ts is not None:
-            return fallback_ts.strftime("%H:%M")
-    return None
+        return fallback_ts.strftime('%H:%M') if fallback_ts else None
+
+
+def _hhmmss_from_video_path(basename: str, fallback_ts: Optional[datetime] = None) -> Optional[str]:
+    """Derive HH:MM:SS using filename-only parsing when possible; avoid disk scans.
+    """
+    try:
+        root_dir = os.path.dirname(os.path.dirname(os.path.dirname(__file__)))
+        if root_dir not in sys.path:
+            sys.path.insert(0, root_dir)
+        from path_utils import parse_datetime_from_path
+        dt = parse_datetime_from_path(os.path.basename(basename))
+        if dt:
+            return dt.strftime('%H:%M:%S')
+        return fallback_ts.strftime('%H:%M:%S') if fallback_ts else None
+    except Exception:
+        return fallback_ts.strftime('%H:%M:%S') if fallback_ts else None
+
+
+def _mmMssS_from_video_path(basename: str, fallback_ts: Optional[datetime] = None) -> Optional[str]:
+    """Derive <MM>M<SS>S compact label.
+    Prefer parsing minutes/seconds directly from basename for legacy files (e.g., 05M04S_... or 0504_...).
+    For new format with 14-digit timestamp, use parsed datetime for MM/SS.
+    Fall back to provided timestamp when parsing fails.
+    """
+    try:
+        name = os.path.basename(basename)
+        # Try legacy patterns at start of basename
+        m = re.match(r"^(?P<mm>\d{2})M(?P<ss>\d{2})S", name)
+        if not m:
+            m = re.match(r"^(?P<mm>\d{2})(?P<ss>\d{2})", name)
+        if m:
+            mm = m.group("mm")
+            ss = m.group("ss")
+            return f"{mm}M{ss}S"
+        # Else, attempt to parse new format timestamp from basename
+        root_dir = os.path.dirname(os.path.dirname(os.path.dirname(__file__)))
+        if root_dir not in sys.path:
+            sys.path.insert(0, root_dir)
+        from path_utils import parse_datetime_from_path
+        dt = parse_datetime_from_path(name)
+        if dt:
+            return f"{dt.strftime('%M')}M{dt.strftime('%S')}S"
+        # Final fallback to provided timestamp
+        if fallback_ts:
+            return f"{fallback_ts.strftime('%M')}M{fallback_ts.strftime('%S')}S"
+        return None
+    except Exception:
+        if fallback_ts:
+            return f"{fallback_ts.strftime('%M')}M{fallback_ts.strftime('%S')}S"
+        return None
 
 
 def build_away_intervals(entries: List[Dict]) -> List[Dict[str, Optional[str]]]:
@@ -359,7 +416,23 @@ def build_away_intervals(entries: List[Dict]) -> List[Dict[str, Optional[str]]]:
         if not (is_away or is_back or is_removed):
             continue
         ts = e.get("ts")
-        hhmm = _hhmm_from_video_path(vid, fallback_ts=ts)
+        # Prefer parsing from full path via disk scan to derive hour from legacy folders
+        hhmm = None
+        try:
+            vp = find_video_path(vid)
+            if vp:
+                # Import parser lazily to avoid global import issues
+                root_dir = os.path.dirname(os.path.dirname(os.path.dirname(__file__)))
+                if root_dir not in sys.path:
+                    sys.path.insert(0, root_dir)
+                from path_utils import parse_datetime_from_path
+                dt = parse_datetime_from_path(vp)
+                if dt:
+                    hhmm = dt.strftime("%H:%M")
+        except Exception:
+            hhmm = None
+        if not hhmm:
+            hhmm = _hhmm_from_video_path(vid, fallback_ts=ts)
         if not hhmm and ts:
             hhmm = ts.strftime("%H:%M")
         if not hhmm:
@@ -683,6 +756,13 @@ def today_view(
     ordered_videos = sorted(ptpv.keys(), key=lambda v: (fst.get(v) or datetime.min, v))
     chart_pairs = [(v, ptpv[v]) for v in ordered_videos]
 
+    # Filename-derived HH:MM:SS per video (fallback to first-seen TS)
+    # Build labels for all videos referenced in this page to minimize lookups
+    videos_for_labels = set(metrics.get("status_per_video", {}).keys()) | videos_present
+    hhmmss_per_video = {v: _hhmmss_from_video_path(v, fallback_ts=fst.get(v)) for v in videos_for_labels}
+    # Filename-derived <MM>M<SS>S per video (fallback to first-seen TS)
+    mmss_per_video = {v: _mmMssS_from_video_path(v, fallback_ts=fst.get(v)) for v in videos_for_labels}
+
     # Resolve video source if requested
     video_src = None
     if play:
@@ -720,6 +800,8 @@ def today_view(
         video_src=video_src,
             status_counts_all=metrics_all.get("status_counts", {}),
         away_intervals=away_intervals,
+        hhmmss_per_video=hhmmss_per_video,
+        mmss_per_video=mmss_per_video,
     )
 
 
@@ -777,6 +859,11 @@ def day_view(
     fst = metrics.get("first_seen_ts_per_video", {})
     ordered_videos = sorted(ptpv.keys(), key=lambda v: (fst.get(v) or datetime.min, v))
     chart_pairs = [(v, ptpv[v]) for v in ordered_videos]
+    # Filename-derived HH:MM:SS per video (fallback to first-seen TS)
+    videos_for_labels = set(metrics.get("status_per_video", {}).keys()) | videos_present
+    hhmmss_per_video = {v: _hhmmss_from_video_path(v, fallback_ts=fst.get(v)) for v in videos_for_labels}
+    # Filename-derived <MM>M<SS>S per video (fallback to first-seen TS)
+    mmss_per_video = {v: _mmMssS_from_video_path(v, fallback_ts=fst.get(v)) for v in videos_for_labels}
     # Resolve video source if requested
     video_src = None
     if play:
@@ -814,6 +901,8 @@ def day_view(
         video_src=video_src,
             status_counts_all=metrics_all.get("status_counts", {}),
         away_intervals=away_intervals,
+        hhmmss_per_video=hhmmss_per_video,
+        mmss_per_video=mmss_per_video,
     )
 
 

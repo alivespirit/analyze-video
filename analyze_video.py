@@ -11,6 +11,7 @@ from dotenv import dotenv_values
 logger = logging.getLogger()
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+from path_utils import parse_datetime_from_path, format_timestamp_for_caption
 
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 USERNAME = os.getenv("TELEGRAM_NOTIFY_USERNAME")
@@ -61,7 +62,8 @@ def analyze_video(motion_result, video_path):
               and the path to the highlight clip if one was generated.
     """
     file_basename = os.path.basename(video_path)
-    timestamp = f"_{video_path.split(os.path.sep)[-2][-2:]}H{file_basename[:3]}:_ "
+    dt = parse_datetime_from_path(video_path)
+    timestamp = format_timestamp_for_caption(dt) if dt else f"_{video_path.split(os.path.sep)[-2][-2:]}H{file_basename[:3]}:_ "
     use_files_api = False
     now = datetime.datetime.now()
 
@@ -86,7 +88,12 @@ def analyze_video(motion_result, video_path):
     # --- Skip Gemini analysis for no motion events ---
     if detected_motion_status == "no_motion":
         logger.info(f"[{file_basename}] Skipping Gemini analysis (no motion).")
-        return {'response': timestamp + "\u2714\uFE0F " + random.choice(NO_ACTION_RESPONSES), 'insignificant_frames': [], 'clip_path': None}
+        low_res_prefix = "\U0001F52C" if motion_result.get('low_res_clip') else ""
+        return {
+            'response': timestamp + f"\u2714\uFE0F{low_res_prefix} " + random.choice(NO_ACTION_RESPONSES),
+            'insignificant_frames': [],
+            'clip_path': None
+        }
 
     # --- Skip Gemini analysis for gate crossing events ---
     if detected_motion_status == "gate_crossing":
@@ -137,10 +144,11 @@ def analyze_video(motion_result, video_path):
             if cars > 0:
                 details.append(f"{cars} \U0001F699")
 
+            low_res_prefix = "\U0001F52C" if motion_result.get('low_res_clip') else ""
             if details:
-                return {'response': timestamp + f"\u2611\uFE0F Шось там {', '.join(details)}" + reid_text, 'insignificant_frames': motion_result['insignificant_frames'], 'clip_path': motion_result.get('clip_path')}
+                return {'response': timestamp + f"\u2611\uFE0F{low_res_prefix} Шось там {', '.join(details)}" + reid_text, 'insignificant_frames': motion_result['insignificant_frames'], 'clip_path': motion_result.get('clip_path')}
             else:
-                return {'response': timestamp + "\u2611\uFE0F Виявлено капець рух." + reid_text, 'insignificant_frames': motion_result['insignificant_frames'], 'clip_path': motion_result.get('clip_path')}
+                return {'response': timestamp + f"\u2611\uFE0F{low_res_prefix} Виявлено капець рух." + reid_text, 'insignificant_frames': motion_result['insignificant_frames'], 'clip_path': motion_result.get('clip_path')}
 
     video_to_process = None
     video_bytes_obj = None
@@ -325,7 +333,8 @@ def analyze_video(motion_result, video_path):
             analysis_result += f" ({', '.join(details)})"
 
         if detected_motion_status == "significant_motion":
-            timestamp += "\u2705 *Отакої!* "
+            low_res_prefix = "\U0001F52C" if motion_result.get('low_res_clip') else ""
+            timestamp += f"\u2705{low_res_prefix} *Отакої!* "
             analysis_result += reid_text
         elif detected_motion_status == "no_person":
             timestamp += "\u274E "

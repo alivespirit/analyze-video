@@ -7,6 +7,8 @@ import time
 import json
 import psutil
 import threading
+import shutil
+import re
 from types import SimpleNamespace
 from datetime import datetime, timedelta
 
@@ -21,6 +23,24 @@ from logging.handlers import TimedRotatingFileHandler
 
 RESTART_REQUESTED = False
 MAIN_SCRIPT_PATH = os.path.abspath(__file__)
+
+# Load environment variables early, before reading any config from os.getenv.
+# Important: override=True ensures that changes to .env take effect across self-restarts
+# (os.execv inherits the parent environment). If you need a different env file, set DOTENV_PATH.
+DOTENV_LOADED_FROM = None
+try:
+    dotenv_path = os.getenv("DOTENV_PATH")
+    if not dotenv_path:
+        dotenv_path = os.path.join(os.path.dirname(MAIN_SCRIPT_PATH), ".env")
+    if dotenv_path and os.path.exists(dotenv_path):
+        DOTENV_LOADED_FROM = dotenv_path
+        load_dotenv(dotenv_path=dotenv_path, override=True)
+    else:
+        # Fallback: default search behavior (current working directory, etc.)
+        load_dotenv(override=True)
+except Exception:
+    # Never fail startup because of dotenv issues.
+    pass
 
 class MainScriptChangeHandler(FileSystemEventHandler):
     def __init__(self, stop_event_ref, watch_dir):
@@ -109,13 +129,14 @@ class DashboardRunner:
         self.stop()
         self.start()
 
-load_dotenv()  ## load all the environment variables
-
 LOG_PATH = os.getenv("LOG_PATH", default="")
 ENABLE_LOG_DASHBOARD = os.getenv("ENABLE_LOG_DASHBOARD", "false").lower() == "true"
 LOG_DASHBOARD_PORT = int(os.getenv("LOG_DASHBOARD_PORT", "8000"))
 LOG_DASHBOARD_HOST = os.getenv("LOG_DASHBOARD_HOST", "0.0.0.0")
 RESTART_RECOVERY_WINDOW_SECONDS = int(os.getenv("RESTART_RECOVERY_WINDOW_SECONDS", "180"))
+RETENTION_DAYS = int(os.getenv("RETENTION_DAYS", "8"))
+RETENTION_CLEANUP_TIME = os.getenv("RETENTION_CLEANUP_TIME", "00:10")  # HH:MM
+TEMP_RETENTION_DAYS = 30
 
 class CustomTimedRotatingFileHandler(TimedRotatingFileHandler):
     def rotation_filename(self, default_name):
@@ -234,6 +255,11 @@ logger.addHandler(file_handler)
 logger.addHandler(console_handler)
 # ---------------------
 
+if DOTENV_LOADED_FROM:
+    logger.info(f"Loaded environment variables from: {DOTENV_LOADED_FROM} (override=True)")
+else:
+    logger.info("Loaded environment variables from default dotenv search (override=True)")
+
 logging.getLogger("httpx").setLevel(logging.WARNING)
 logging.getLogger("telegram.ext").setLevel(logging.WARNING)
 logging.getLogger("moviepy").setLevel(logging.WARNING) # Keep moviepy logs quiet
@@ -266,6 +292,7 @@ except OSError as e:
 RESTART_MARKER_PATH = os.path.join(TEMP_DIR, "restart_marker.json")
 # Processing ledger to track file statuses across restarts
 PROCESSING_LEDGER_PATH = os.path.join(TEMP_DIR, "processing_ledger.json")
+PROCESSING_LEDGER_LOCK = threading.RLock()
 
 # --- Check Environment Variables ---
 if not all([GEMINI_API_KEY, TELEGRAM_TOKEN, CHAT_ID, USERNAME, VIDEO_FOLDER]):
@@ -283,6 +310,8 @@ if not os.path.exists(OBJECT_DETECTION_MODEL_PATH):
 from analyze_video import analyze_video
 from detect_motion import detect_motion
 from telegram_notification import button_callback, send_notifications, reaction_callback, cleanup_temp_media
+from path_utils import parse_datetime_from_path
+import re
 
 
 # Initialize the Application
@@ -337,6 +366,14 @@ class FileHandler(FileSystemEventHandler):
         if event.is_directory: return
         if not event.src_path.endswith('.mp4'): return
 
+        # Record the file immediately so restart recovery can pick it up even if we
+        # restart while waiting for the file to become stable (mid-write).
+        try:
+            update_processing_ledger(event.src_path, "queued", {"detected_ts": time.time()})
+        except Exception as e:
+            # Ledger write must not break the watchdog thread.
+            self.logger.warning(f"Failed to write queued ledger entry for {event.src_path}: {e}")
+
         coro = self.handle_event(event)
         if self.loop.is_running():
             asyncio.run_coroutine_threadsafe(coro, self.loop)
@@ -362,8 +399,34 @@ class FileHandler(FileSystemEventHandler):
         # This function is replaced with the new logic
         file_path = event.src_path
         file_basename = os.path.basename(file_path)
-        timestamp_text = f"{file_path.split(os.path.sep)[-2][-2:]}H{file_basename[:3]}"
+        # Build timestamp text like "HHHMM" for buttons, robust to legacy/new formats
+        dt = None
+        try:
+            dt = parse_datetime_from_path(file_path)
+        except Exception:
+            dt = None
+        if dt:
+            timestamp_text = f"{dt.strftime('%H')}H{dt.strftime('%M')}M"
+        else:
+            # Fallback for unexpected names: derive HH from parent folder, MM from basename
+            parent = file_path.split(os.path.sep)[-2] if os.path.sep in file_path else ""
+            hh = parent[-2:] if len(parent) >= 2 and parent[-2:].isdigit() else None
+            mm = None
+            m_mmss = re.match(r"^(\d{2})M(\d{2})S", file_basename)
+            if m_mmss:
+                mm = m_mmss.group(1)
+            else:
+                m_digits = re.match(r"^(\d{2})(\d{2})", file_basename)
+                if m_digits:
+                    mm = m_digits.group(1)
+            safe_hh = hh if (isinstance(hh, str) and len(hh) == 2 and hh.isdigit()) else "00"
+            safe_mm = mm if (isinstance(mm, str) and len(mm) == 2 and mm.isdigit()) else "00"
+            timestamp_text = f"{safe_hh}H{safe_mm}M"
         self.logger.info(f"[{file_basename}] New file detected: {file_path.split(os.path.sep)[-2]}/{file_basename}")
+
+        # Ensure the file is represented in the ledger even if this handler is invoked
+        # from restart recovery (which bypasses the watchdog on_created callback).
+        update_processing_ledger(file_path, "queued", {"detected_ts": time.time()})
 
         try:
             await self.wait_for_file_stable(file_path, file_basename)
@@ -499,21 +562,25 @@ def read_restart_marker(path: str):
 
 
 def read_processing_ledger(path: str):
-    try:
-        if not os.path.exists(path):
+    with PROCESSING_LEDGER_LOCK:
+        try:
+            if not os.path.exists(path):
+                return {}
+            with open(path, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except Exception:
             return {}
-        with open(path, "r", encoding="utf-8") as f:
-            return json.load(f)
-    except Exception:
-        return {}
 
 
 def write_processing_ledger(path: str, ledger: dict):
-    try:
-        with open(path, "w", encoding="utf-8") as f:
-            json.dump(ledger, f)
-    except Exception as e:
-        logger.error(f"Failed to write processing ledger '{path}': {e}")
+    with PROCESSING_LEDGER_LOCK:
+        try:
+            tmp_path = path + ".tmp"
+            with open(tmp_path, "w", encoding="utf-8") as f:
+                json.dump(ledger, f)
+            os.replace(tmp_path, path)
+        except Exception as e:
+            logger.error(f"Failed to write processing ledger '{path}': {e}")
 
 
 def prune_processing_ledger(ledger: dict, max_entries: int = 100) -> dict:
@@ -531,15 +598,149 @@ def prune_processing_ledger(ledger: dict, max_entries: int = 100) -> dict:
         return ledger
 
 
+# --- Retention Cleanup ---
+def cleanup_old_videos(root: str, days: int, logger: logging.Logger) -> int:
+    """Delete .mp4 files older than `days` under `root`. Returns count deleted."""
+    cutoff = time.time() - days * 86400
+    deleted = 0
+    try:
+        for dirpath, _dirnames, filenames in os.walk(root):
+            for fn in filenames:
+                if not fn.lower().endswith('.mp4'):
+                    continue
+                fp = os.path.join(dirpath, fn)
+                try:
+                    mtime = os.path.getmtime(fp)
+                    if mtime < cutoff:
+                        os.remove(fp)
+                        deleted += 1
+                except Exception:
+                    continue
+    except Exception as e:
+        logger.warning(f"Retention cleanup failed: {e}")
+    logger.info(f"Retention cleanup done. Deleted {deleted} old video(s) (> {days}d).")
+    return deleted
+
+
+def cleanup_empty_folders(root: str, logger: logging.Logger) -> int:
+    """Remove empty directories under `root` (bottom-up). Returns count removed."""
+    removed = 0
+    try:
+        for dirpath, dirnames, filenames in os.walk(root, topdown=False):
+            # Do not remove the root folder itself
+            if os.path.abspath(dirpath) == os.path.abspath(root):
+                continue
+            try:
+                # If there are any files, not empty
+                if filenames:
+                    continue
+                # If any subdir still exists, not empty
+                if dirnames:
+                    continue
+                os.rmdir(dirpath)
+                removed += 1
+            except Exception:
+                continue
+    except Exception as e:
+        logger.warning(f"Empty folder cleanup failed: {e}")
+    if removed:
+        logger.info(f"Empty folder cleanup done. Removed {removed} empty folder(s).")
+    return removed
+
+
+def cleanup_old_temp_days(temp_root: str, days: int, logger: logging.Logger) -> int:
+    """Remove temp_root/YYYYMMDD directories older than `days` (recursive). Returns count removed."""
+    removed = 0
+    try:
+        if not os.path.isdir(temp_root):
+            return 0
+        cutoff_date = datetime.now().date() - timedelta(days=int(days))
+        for name in os.listdir(temp_root):
+            if not re.fullmatch(r"\d{8}", name):
+                continue
+            day_path = os.path.join(temp_root, name)
+            if not os.path.isdir(day_path):
+                continue
+            try:
+                day = datetime.strptime(name, "%Y%m%d").date()
+            except Exception:
+                continue
+            if day < cutoff_date:
+                try:
+                    shutil.rmtree(day_path, ignore_errors=False)
+                    removed += 1
+                except Exception:
+                    # If partial removal fails, keep going
+                    continue
+    except Exception as e:
+        logger.warning(f"Temp daily cleanup failed: {e}")
+    if removed:
+        logger.info(f"Temp daily cleanup done. Removed {removed} day folder(s) (> {days}d).")
+    return removed
+
+
+def run_retention_cleanup(video_root: str, video_days: int, temp_root: str, temp_days: int, logger: logging.Logger) -> None:
+    """Run all retention-related cleanup tasks."""
+    try:
+        cleanup_old_videos(video_root, video_days, logger)
+        cleanup_empty_folders(video_root, logger)
+        cleanup_old_temp_days(temp_root, temp_days, logger)
+    except Exception as e:
+        logger.warning(f"Retention cleanup job failed: {e}")
+
+
+async def retention_scheduler(stop_event: asyncio.Event, root: str, days: int, logger: logging.Logger):
+    """Run daily at configured time to remove old videos."""
+    # Parse HH:MM
+    try:
+        hh, mm = [int(x) for x in RETENTION_CLEANUP_TIME.split(':')]
+    except Exception:
+        hh, mm = 0, 10
+    while not stop_event.is_set():
+        now = datetime.now()
+        target = now.replace(hour=hh, minute=mm, second=0, microsecond=0)
+        if target <= now:
+            target += timedelta(days=1)
+        wait_secs = (target - now).total_seconds()
+        try:
+            await asyncio.wait_for(stop_event.wait(), timeout=wait_secs)
+            if stop_event.is_set():
+                break
+        except asyncio.TimeoutError:
+            pass
+        # Run cleanup (in thread executor to avoid blocking)
+        loop = asyncio.get_running_loop()
+        try:
+            await loop.run_in_executor(None, run_retention_cleanup, VIDEO_FOLDER, days, TEMP_DIR, TEMP_RETENTION_DAYS, logger)
+        except Exception as e:
+            logger.warning(f"Scheduled retention cleanup failed: {e}")
+
+
 def update_processing_ledger(file_path: str, status: str, extra: dict | None = None):
-    ledger = read_processing_ledger(PROCESSING_LEDGER_PATH)
-    entry = ledger.get(file_path, {})
-    entry.update({"status": status})
-    if extra:
-        entry.update(extra)
-    ledger[file_path] = entry
-    ledger = prune_processing_ledger(ledger, 100)
-    write_processing_ledger(PROCESSING_LEDGER_PATH, ledger)
+    with PROCESSING_LEDGER_LOCK:
+        ledger = read_processing_ledger(PROCESSING_LEDGER_PATH)
+        entry = ledger.get(file_path, {})
+
+        prev_status = entry.get("status")
+        # Never downgrade a completed entry; allow completed->completed updates.
+        if prev_status == "completed" and status != "completed":
+            if extra:
+                entry.update(extra)
+                ledger[file_path] = entry
+                ledger = prune_processing_ledger(ledger, 100)
+                write_processing_ledger(PROCESSING_LEDGER_PATH, ledger)
+            return
+
+        # Avoid downgrading started->queued (can happen on duplicate FS events).
+        if prev_status == "started" and status == "queued":
+            status = "started"
+
+        entry.update({"status": status})
+        if extra:
+            entry.update(extra)
+        ledger[file_path] = entry
+        ledger = prune_processing_ledger(ledger, 100)
+        write_processing_ledger(PROCESSING_LEDGER_PATH, ledger)
 
 
 def schedule_notification_retries(app,
@@ -614,7 +815,10 @@ async def recover_missed_files_since(since_ts: float):
         files_to_process = []
         seen_paths = set()
         mtime_candidates = 0
+        day_mtime_candidates = 0
+        fallback_mtime_candidates = 0
         ledger_candidates = 0
+        day_dirs_found = 0
         for hour_dir in candidate_dirs:
             dir_path = os.path.join(VIDEO_FOLDER, hour_dir)
             if not os.path.isdir(dir_path):
@@ -638,6 +842,81 @@ async def recover_missed_files_since(since_ts: float):
                             mtime_candidates += 1
             except Exception as e:
                 logger.error(f"Error scanning directory '{dir_path}': {e}")
+
+        # Primary layout scan: VIDEO_FOLDER/YYYY/MM/DD/<video>.mp4
+        # Scan only the day folders that overlap the recovery window.
+        try:
+            day_cursor = start_dt.date()
+            while day_cursor <= end_dt.date():
+                day_path = os.path.join(
+                    VIDEO_FOLDER,
+                    f"{day_cursor.year:04d}",
+                    f"{day_cursor.month:02d}",
+                    f"{day_cursor.day:02d}",
+                )
+                if os.path.isdir(day_path):
+                    day_dirs_found += 1
+                    try:
+                        for name in os.listdir(day_path):
+                            if not name.endswith(".mp4"):
+                                continue
+                            fpath = os.path.join(day_path, name)
+                            try:
+                                mtime = os.path.getmtime(fpath)
+                            except Exception:
+                                continue
+                            if not (window_start <= mtime <= window_end):
+                                continue
+                            entry = ledger.get(fpath)
+                            if entry and entry.get("status") == "completed":
+                                continue
+                            if fpath in seen_paths:
+                                continue
+                            files_to_process.append((mtime, fpath))
+                            seen_paths.add(fpath)
+                            day_mtime_candidates += 1
+                    except Exception as e:
+                        logger.error(f"Error scanning directory '{day_path}': {e}")
+                day_cursor += timedelta(days=1)
+        except Exception as e:
+            logger.error(f"Restart recovery day-scan failed: {e}")
+
+        # Fallback: if the storage layout isn't VIDEO_FOLDER/YYYYMMDDHH/, the hour-dir scan
+        # can miss everything (e.g., VIDEO_FOLDER/<DD>/file.mp4). Do a bounded recursive scan
+        # under VIDEO_FOLDER to catch recent files by mtime.
+        # IMPORTANT: do NOT do this just because the window is quiet; only do it if we
+        # couldn't find any expected day directories at all (layout mismatch).
+        if mtime_candidates == 0 and day_mtime_candidates == 0 and day_dirs_found == 0:
+            try:
+                max_depth = 3
+                root_parts = os.path.abspath(VIDEO_FOLDER).rstrip(os.path.sep).split(os.path.sep)
+                for dirpath, dirnames, filenames in os.walk(VIDEO_FOLDER, topdown=True):
+                    abs_dirpath = os.path.abspath(dirpath)
+                    parts = abs_dirpath.rstrip(os.path.sep).split(os.path.sep)
+                    depth = max(0, len(parts) - len(root_parts))
+                    if depth >= max_depth:
+                        dirnames[:] = []
+
+                    for name in filenames:
+                        if not name.endswith(".mp4"):
+                            continue
+                        fpath = os.path.join(dirpath, name)
+                        try:
+                            mtime = os.path.getmtime(fpath)
+                        except Exception:
+                            continue
+                        if not (window_start <= mtime <= window_end):
+                            continue
+                        entry = ledger.get(fpath)
+                        if entry and entry.get("status") == "completed":
+                            continue
+                        if fpath in seen_paths:
+                            continue
+                        files_to_process.append((mtime, fpath))
+                        seen_paths.add(fpath)
+                        fallback_mtime_candidates += 1
+            except Exception as e:
+                logger.error(f"Restart recovery fallback scan failed: {e}")
 
         # Include ALL files that are started/failed in the ledger (regardless of start_ts), as long as they exist.
         # This ensures we don't miss in-progress items that began before the recovery window.
@@ -680,7 +959,7 @@ async def recover_missed_files_since(since_ts: float):
                 failed_count += 1
 
         logger.info(
-            f"Restart recovery summary: candidates={len(files_to_process)} (mtime={mtime_candidates}, ledger={ledger_candidates}), "
+            f"Restart recovery summary: candidates={len(files_to_process)} (mtime={mtime_candidates}, day_mtime={day_mtime_candidates}, fallback_mtime={fallback_mtime_candidates}, ledger={ledger_candidates}), "
             f"processed={processed_count}, failed={failed_count}"
         )
     except Exception as e:
@@ -841,6 +1120,8 @@ async def main():
     global RESTART_REQUESTED # Allow main to modify it if needed, though not strictly necessary here
     RESTART_REQUESTED = False # Ensure it's reset if main is somehow called again in same process (unlikely)
 
+    # Schedule daily retention cleanup
+    asyncio.create_task(retention_scheduler(stop_event, VIDEO_FOLDER, RETENTION_DAYS, logger))
     # Use task names for better debugging if needed
     telegram_task = asyncio.create_task(run_telegram_bot(stop_event), name="TelegramBotTask")
     watcher_task = asyncio.create_task(run_file_watcher(stop_event), name="FileWatcherTask")

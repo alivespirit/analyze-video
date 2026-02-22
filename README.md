@@ -1,6 +1,6 @@
 # Analyze Video Bot
 
-This project is a Python-based application that monitors a folder for new video files, analyzes them for motion and objects, generates descriptions with the Gemini AI platform, and sends results to a Telegram chat. It's optimized for surveillance footage, featuring intelligent object detection with YOLOv12, gate crossing alerts, optional Tesla integration, dynamic AI model selection, and robust performance management.
+This project is a Python-based application that monitors a folder for new video files, analyzes them for motion and objects, generates descriptions with the Gemini AI platform, and sends results to a Telegram chat. It's designed for surveillance footage, featuring object detection/tracking with a custom-trained YOLOv12 model (exported to OpenVINO), gate crossing alerts, optional Tesla integration, dynamic AI model selection, and restart recovery.
 
 ---
 
@@ -8,12 +8,14 @@ This project is a Python-based application that monitors a folder for new video 
 
 - **Folder Monitoring**: Automatically processes new `.mp4` files in a specified folder using `watchdog`.
 - **Intelligent Video Analysis (OpenCV & YOLOv12)**:
-  - **Object Detection & Tracking**: Uses a YOLOv12 model (optimized with OpenVINO) to detect and track objects like people and cars, assigning them stable IDs. The model has been pre-trained on footage from a wide-angle camera located on a second floor, enabling it to accurately identify distorted objects.
+   - **Object Detection & Tracking**: Uses a custom-trained YOLOv12 model exported to OpenVINO (loaded via the Ultralytics `YOLO` wrapper) to detect and track objects like people and cars, assigning them stable IDs. The model has been trained on footage from a wide-angle camera located on a second floor, enabling it to more accurately identify distorted objects.
   - **Gate Crossing Detection**: Identifies and sends a special notification when a person crosses a predefined horizontal line in the frame, indicating entry or exit.
   - **Cropped ROI Analysis**: Performs analysis on a smaller, padded region around the ROI for better performance.
   - **Smart Event Filtering**: Differentiates between significant, insignificant, and noisy motion events based on duration.
-  - **Highlight Clips**: Generates clips for significant motions with tracked objects and bounding boxes. Uses a CRF-based H.264 writer (libx264, preset=medium, CRF=28, yuv420p, faststart). Frames are streamed to disk during processing, lowering RAM usage. Long events are automatically sped up (2x).
-  - **Insignificant Motion Snapshots**: Extracts and sends a single frame for brief motion events, now with object detection boxes drawn on them.
+   - **Highlight Clips**: Generates clips for significant motions with tracked objects and bounding boxes. Uses a CRF-based H.264 writer (libx264, preset=faster, CRF=28, yuv420p, faststart). For 1080p/4K sources, highlight output is written at 1080p.
+   - **Long-Event Speed-Up**: Long events are rendered faster by writing fewer frames (frame skipping) while keeping the output FPS unchanged.
+   - **Insignificant Motion Snapshots**: Can extract a representative frame for brief motion events; sending snapshots to Telegram is optional.
+   - **Low-Resolution Clips (Motion-Only Mode)**: For specific low-res sources (640×360 and 896×512), runs ROI motion detection and generates a highlight at the source resolution (no tracking/ReID).
 - **Dynamic Gemini AI Analysis**:
   - **Time-Based Model Selection**: Automatically switches between different Gemini models (e.g., Pro vs. Flash) based on the time of day for cost optimization.
   - **Fallback Models**: Includes logic to fall back to secondary and final models if the primary one fails.
@@ -21,7 +23,7 @@ This project is a Python-based application that monitors a folder for new video 
 - **Robust Telegram Integration**:
   - **Grouped Notifications**: Combines multiple insignificant/no-motion events into a single, editable Telegram message to reduce clutter.
   - **Interactive Callbacks**: Allows users to request the full original video via inline buttons.
-  - **Media Handling**: Sends highlight clips as animations and insignificant motion as photos.
+  - **Media Handling**: Sends highlight clips as animations; can also send photos for insignificant motion if enabled.
 - **Tesla Integration (Optional)**:
   - **State of Charge (SoC) Display**: If a car is detected in a predefined location, the bot fetches the Tesla's SoC and displays it directly on the video highlight clip.
   - **Efficient Caching**: Caches the SoC in `tesla_soc.txt` and only queries the API periodically or when the cache is stale to avoid waking the vehicle unnecessarily.
@@ -29,7 +31,7 @@ This project is a Python-based application that monitors a folder for new video 
   - **Who Crossed?** On gate crossings, the system optionally runs person re-identification using Intel's `person-reidentification-retail-0288` (OpenVINO) against a gallery in `person_of_interest/`.
   - **Line-Centered Sampling**: Samples person crops near the gate line tolerance every N frames and compares normalized embeddings via cosine similarity.
   - **Disk Cache**: Embeddings are cached to `temp/` so separate worker processes reuse precomputed vectors.
-  - **Readable Output**: When a match exceeds the threshold, the Telegram gate message includes `XX%`. Optionally saves the best matching crop to the daily folder for manual review.
+  - **Readable Output**: ReID score is appended to the Telegram message, and USERNAME is mentioned when a match exceeds the threshold. Optionally saves the best matching crop to the daily folder for manual review.
 - **Performance & Stability**:
   - **Dual-Executor Design**: Uses separate, single-worker thread pools for CPU-bound (video analysis) and I/O-bound (API calls) tasks to prevent system overload.
   - **Graceful Shutdown & Auto-Restart**: Automatically restarts the script if any of the Python files is modified, with robust shutdown logic.
@@ -98,6 +100,12 @@ pip install -r requirements.txt
    VIDEO_FOLDER=/path/to/your/video/folder
    LOG_PATH=logs/
 
+   # Optional: explicitly point to a dotenv file (otherwise ./.env is used)
+   # DOTENV_PATH=/path/to/analyze-video/.env
+
+   # Optional: enable motion profiler logs
+   # ANALYZE_VIDEO_PROFILE=0
+
    # --- Object Detection (Optional) ---
    # Path to the exported OpenVINO model directory
    OBJECT_DETECTION_MODEL_PATH=models/best_openvino_model
@@ -106,15 +114,22 @@ pip install -r requirements.txt
    # Path to a folder with reference images of the person of interest
    REID_GALLERY_PATH=/path/to/person_of_interest
 
+   # Optional: negative gallery (reject look-alikes)
+   # REID_NEGATIVE_GALLERY_PATH=/path/to/person_of_interest_negative
+   # REID_NEGATIVE_MARGIN=0.04
+
    # --- Tesla Integration (Optional) ---
    TESLA_EMAIL=your_tesla_account_email
    TESLA_REFRESH_TOKEN=your_tesla_api_refresh_token
    ```
 
 5. **Configure Regions of Interest (ROI):**
-   - Generate a `roi.json` file defining the coordinates of the area you want to monitor for initial motion.
-   - You can use the script in `tools/gate_motion_detector.py` as a starting point to select an ROI for your video.
-   - Single `roi.json` consolidates ROIs with clear purposes:
+    - Create resolution-specific ROI files in the project directory:
+       - `roi-4k.json`: ROI authored for 4K sources (baseline).
+       - `roi-1080p.json`: ROI authored for 1080p sources (optional).
+       - `roi.json`: legacy fallback if the resolution-specific file is not present.
+    - You can use the script in `tools/gate_motion_detector.py` as a starting point to select an ROI for your video.
+    - Each ROI file consolidates ROIs with clear purposes:
      - `motion_detection_roi`: polygon used for initial motion detection and for deriving the cropped analysis region baseline.
      - `tracker_roi` (optional): polygon defining the tracker’s working area; a padded bounding box around it is used to crop frames for faster tracking (falls back to `motion_detection_roi` if absent).
      - `person_tracker_roi` (optional): polygon filter for person detections; only persons whose bounding-box center lies inside this polygon are counted/tracked.
@@ -144,6 +159,7 @@ pip install -r requirements.txt
 
 2. **Place `.mp4` video files in the folder specified by the `VIDEO_FOLDER` environment variable.**
    The application will automatically detect, process, and send a notification to your Telegram chat.
+   - Recommended layout under `VIDEO_FOLDER` is `YYYY/MM/DD/<video>.mp4`.
 
 3. **Interact with the bot in Telegram.**
    - View highlight clips and insignificant motion snapshots.
@@ -165,9 +181,9 @@ pip install -r requirements.txt
 2. **Processing Pipeline:**
    - **Video Analysis (CPU-Bound Task):** The video is passed to the `motion_executor`.
      - **Motion Detection:** OpenCV analyzes frames within a cropped ROI to find initial motion, filtering out noise.
-     - **Object Tracking:** If significant motion is found, the `ultralytics` pretrained YOLO model tracks objects (people, cars) across frames.
+     - **Object Tracking:** If significant motion is found, the custom-trained YOLOv12 model tracks objects (people, cars) across frames.
        - **Event Classification:** The script determines the event type: `gate_crossing`, `significant_motion`, `no_significant_motion`, `no_person`, or `no_motion`.
-     - **Artifact Generation:** A highlight clip (.mp4) or insignificant motion snapshots (.jpg) are created in the `temp/` directory.
+     - **Artifact Generation:** A highlight clip (.mp4) and optional snapshots (.jpg) may be created in the `temp/` directory.
      - **Person ReID (Gate Crossings):**
        - During tracking, the analyzer samples person crops near the line tolerance band every `REID_SAMPLING_STRIDE` frames.
        - After a gate crossing is confirmed, these crops are compared against gallery embeddings using Intel's `person-reidentification-retail-0288` model.
@@ -190,11 +206,11 @@ pip install -r requirements.txt
 5. **Self-Monitoring & Auto-Restart:**
    - A separate `watchdog` instance monitors `*.py`. If any Python file is modified, it triggers a graceful shutdown and restarts the script.
    - Restart Recovery: To avoid losing files that appear during the restart window, the app writes a restart marker and, on startup, performs a short recovery pass:
-     - It scans recent `YYYYMMDDHH` directories for new `.mp4` files and also consults a small processing ledger in `temp/processing_ledger.json`.
+       - It scans the `YYYY/MM/DD` day folder(s) that overlap the recovery window for new `.mp4` files and also consults a small processing ledger in `temp/processing_ledger.json`.
      - Files marked as `completed` in the ledger are skipped to prevent duplicates.
-     - Files marked as `started` or `failed` within the window are re-queued even if their file `mtime` falls outside the window, ensuring in-progress items are not missed.
+       - Files recorded as `queued`/`started`/`failed` are included in recovery as long as they still exist on disk.
      - The recovery window is controlled by `RESTART_RECOVERY_WINDOW_SECONDS` (default 180 seconds).
-     - The ledger is pruned to the last 20 entries (most recent by `end_ts`/`start_ts`) to keep it small.
+       - The ledger is pruned to the last 100 entries (most recent by `end_ts`/`start_ts`) to keep it small.
      - A concise summary is logged at the end of recovery with counts of candidates (by source), processed, and failures.
 
 ---
@@ -225,8 +241,8 @@ pip install -r requirements.txt
   - `REID_MAX_SAMPLES`: cap on crops per video to keep inference snappy (default: 128)
   - `SAVE_REID_BEST_CROP`: save the best matching crop when matched (default: True)
   - `REID_GALLERY_PATH` (env): folder with reference images (default: `person_of_interest/`)
-- **ReID Model Location:** By default, the Intel model XML is expected at `model/reid/intel/person-reidentification-retail-0288/FP16/person-reidentification-retail-0288.xml`. Adjust if your model path differs.
-- **ROI:** Modify `roi.json` to change the monitored area.
+- **ReID Model Location:** By default, the Intel model XML is expected at `models/reid/intel/person-reidentification-retail-0288/FP16/person-reidentification-retail-0288.xml`. Adjust if your model path differs.
+- **ROI:** Modify `roi-4k.json` / `roi-1080p.json` (or legacy `roi.json`) to change the monitored area.
 - **Object Detection Model:** Replace the contents of the `best_openvino_model` directory with your own exported YOLOv12 OpenVINO model.
   - Follow instructions in [tools/finetuning/](tools/finetuning/) to train your own model if needed.
 

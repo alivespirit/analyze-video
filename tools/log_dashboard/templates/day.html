@@ -321,7 +321,16 @@
                 {% if gate %}{% set qs = qs ~ '&gate=' ~ gate %}{% endif %}
                 <a href="{{ base }}?{{ qs }}" class="link-log" title="Open video player" data-vid="{{ vid }}" data-stream="/video/{{ vid }}" data-base="{{ base }}" data-query="{{ qs }}">
                   <span class="label-desktop">{{ vid }}</span>
-                  <span class="label-mobile">{{ vid.split('_')[0] }}</span>
+                  {# Mobile: show <MM>M<SS>S derived from filename timestamp #}
+                  {% set v_mmss = mmss_per_video.get(vid) %}
+                  {% if v_mmss %}
+                    <span class="label-mobile">{{ v_mmss }}</span>
+                  {% else %}
+                    {# Fallback: filename without extension #}
+                    {% set _fname = vid.split('/')[-1] %}
+                    {% set _parts = _fname.split('.') %}
+                    <span class="label-mobile">{{ _parts[:-1] | join('.') }}</span>
+                  {% endif %}
                 </a>
               </td>
               {% set col = status_colors.get(st, '#3b82f6') %}
@@ -421,8 +430,13 @@
               <span class="lvl">{{ e.level }}</span>
               {% if e.video %}
                 {% set vc = video_colors.get(e.video, '#9fb0ff') %}
-                {% set parts = e.video.split('.') %}
-                {% set vbase = parts[:-1] | join('.') %}
+                {# Inline (mobile) video label: prefer <MM>M<SS>S, else basename #}
+                {% set vbase = mmss_per_video.get(e.video) %}
+                {% if not vbase %}
+                  {% set _fname2 = e.video.split('/')[-1] %}
+                  {% set _parts2 = _fname2.split('.') %}
+                  {% set vbase = _parts2[:-1] | join('.') %}
+                {% endif %}
                 {% set qs = '' %}
                 {% if severity %}{% set qs = qs ~ 'severity=' ~ severity %}{% endif %}
                 {% if status_list and (status_list|length > 0) %}{% set status_csv = status_list|join(',') %}{% if qs %}{% set qs = qs ~ '&' %}{% endif %}{% set qs = qs ~ 'status=' ~ status_csv %}{% endif %}
@@ -438,7 +452,12 @@
               {% if severity %}{% set qs = qs ~ 'severity=' ~ severity %}{% endif %}
               {% if status_list and (status_list|length > 0) %}{% set status_csv = status_list|join(',') %}{% if qs %}{% set qs = qs ~ '&' %}{% endif %}{% set qs = qs ~ 'status=' ~ status_csv %}{% endif %}
               {% if gate %}{% if qs %}{% set qs = qs ~ '&' %}{% endif %}{% set qs = qs ~ 'gate=' ~ gate %}{% endif %}
-              <div class="video"><a class="link-log" style="color: {{ vc }}" href="{{ base }}?video={{ e.video }}{% if qs %}&{{ qs }}{% endif %}" title="Filter by this video">{{ e.video }}</a></div>
+              {# Desktop video name: show <MM>M<SS>S label, fallback to full name #}
+              {% set vname = mmss_per_video.get(e.video) %}
+              {% if not vname %}
+                {% set vname = e.video %}
+              {% endif %}
+              <div class="video"><a class="link-log" style="color: {{ vc }}" href="{{ base }}?video={{ e.video }}{% if qs %}&{{ qs }}{% endif %}" title="Filter by this video">{{ vname }}</a></div>
             {% else %}
               <div class="video none">—</div>
             {% endif %}

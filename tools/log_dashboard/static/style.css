@@ -216,7 +216,7 @@ header nav .nav-btn{white-space:nowrap}
   .chip-row .tag{display:block;margin:4px 0 0 0}
   /* ReID chips: inline side-by-side on one line */
   .reid-row{display:flex;gap:4px;flex-wrap:nowrap;align-items:center}
-  .reid-row .tag{display:inline-flex;width:auto;white-space:nowrap;word-break:normal;overflow-wrap:normal;margin:4px 0 0 0}
+  .reid-row .tag{display:inline-flex;width:auto;white-space:nowrap;word-break:normal;overflow-wrap:normal;margin:4px 0 0 0;justify-content:center;align-items:center;text-align:center}
   /* Allow header wrapping; keep cell inline */
   .table th.time-events-col {white-space:normal}
   .table td.time-events-col {white-space:nowrap}

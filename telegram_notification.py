@@ -5,6 +5,7 @@ import time
 import shutil
 import json
 import re
+from datetime import datetime
 
 from telegram import InlineKeyboardMarkup, InlineKeyboardButton, InputMediaPhoto
 import telegram.error
@@ -37,23 +38,72 @@ _GROUP_FILE_PATH = os.path.join(_TEMP_DIR, "no_motion_group.json")
 # REID gallery destination path
 REID_GALLERY_PATH = os.getenv("REID_GALLERY_PATH", os.path.join(_SCRIPT_DIR, "person_of_interest"))
 REID_NEGATIVE_GALLERY_PATH = os.getenv("REID_NEGATIVE_GALLERY_PATH", os.path.join(_SCRIPT_DIR, "person_of_interest_negative"))
+from path_utils import parse_datetime_from_path
+
+
+def today_yyyymmdd() -> str:
+    try:
+        return datetime.now().strftime("%Y%m%d")
+    except Exception:
+        return time.strftime("%Y%m%d")
+
+
+def entry_yyyymmdd(entry: object, video_path: str | None = None) -> str | None:
+    """Best-effort date for a mapped Telegram message.
+
+    Prefer explicit sent-day stored in `video_message_map`, fall back to video timestamp.
+    """
+    try:
+        if isinstance(entry, dict):
+            sent_day = entry.get("sent_yyyymmdd") or entry.get("sent_day") or entry.get("sent_date")
+            if isinstance(sent_day, str) and re.fullmatch(r"\d{8}", sent_day):
+                return sent_day
+            sent_ts = entry.get("sent_ts") or entry.get("sent_timestamp")
+            if isinstance(sent_ts, (int, float)):
+                return datetime.fromtimestamp(sent_ts).strftime("%Y%m%d")
+            if isinstance(sent_ts, str) and sent_ts.isdigit():
+                return datetime.fromtimestamp(int(sent_ts)).strftime("%Y%m%d")
+    except Exception:
+        pass
+
+    # Backward-compatibility / best-effort fallback
+    try:
+        if video_path:
+            dt = parse_datetime_from_path(video_path)
+            if dt:
+                return dt.strftime("%Y%m%d")
+    except Exception:
+        pass
+    return None
 
 def compute_reid_paths_multi(video_path: str, file_basename: str, k: int = 3, include_legacy: bool = False, gallery_path: str | None = None):
     """Compute (src,dst) pairs for bestN crops to copy/remove.
+
+    Derives date/hour from the actual video path using `parse_datetime_from_path`,
+    supporting both legacy and new formats. Builds temp paths like:
+      temp/YYYYMMDD/HHH<basename>_reid_best{idx}.jpg
 
     Supports both positive and negative galleries via `gallery_path`.
     If `gallery_path` is None, defaults to REID_GALLERY_PATH.
     """
     results = []
     try:
-        parts = re.split(r"[\\/]", video_path)
-        if len(parts) < 2:
+        # Prefer parsing from basename timestamp; fallback to parent folder regex
+        dt = parse_datetime_from_path(video_path)
+        yyyymmdd = dt.strftime("%Y%m%d") if dt else None
+        hh = dt.strftime("%H") if dt else None
+        if not (yyyymmdd and hh):
+            try:
+                parts = re.split(r"[\\/]", video_path)
+                parent_folder = parts[-2] if len(parts) >= 2 else ""
+                m = re.search(r"(\d{8})(\d{2})", parent_folder)
+                if m:
+                    yyyymmdd, hh = m.group(1), m.group(2)
+            except Exception:
+                pass
+        if not (yyyymmdd and hh):
             return results
-        parent_folder = parts[-2]
-        m = re.search(r"(\d{8})(\d{2})", parent_folder)
-        if not m:
-            return results
-        yyyymmdd, hh = m.group(1), m.group(2)
+
         base, _ = os.path.splitext(file_basename)
 
         # Indexed files
@@ -197,7 +247,7 @@ async def reaction_callback(update, context):
         else:
             rel = os.path.basename(video_path)
         caption = f"Осьо відео `{escape_markdown(rel, version=2)}`"
-        entry = {"path": video_path, "caption": caption}
+        entry = {"path": video_path, "caption": caption, "sent_yyyymmdd": entry_yyyymmdd({}, video_path=video_path)}
         video_message_map[key] = entry
     else:
         video_path = entry.get("path") if entry else None
@@ -214,6 +264,25 @@ async def reaction_callback(update, context):
         return
 
     file_basename = os.path.basename(video_path)
+
+    # Only gate thumbs up/down actions to current-day messages.
+    # Thinking/shrug actions should still work for older messages.
+    try:
+        thumbs_action = bool(has_up or has_down or removed_up or removed_down)
+        if thumbs_action:
+            entry_day = entry_yyyymmdd(entry, video_path=video_path)
+            if entry_day != today_yyyymmdd():
+                logger.debug(f"[{file_basename}] Ignoring 👍/👎 reactions for non-today message_id={message_id} (day={entry_day}).")
+                has_up = False
+                has_down = False
+                removed_up = False
+                removed_down = False
+    except Exception:
+        # If we can't validate day, safest is to skip thumbs side-effects.
+        has_up = False
+        has_down = False
+        removed_up = False
+        removed_down = False
 
     # Determine parse mode for caption edits
     parse_mode = None
@@ -239,7 +308,9 @@ async def reaction_callback(update, context):
     new_caption = caption or ""
     # REID gallery sync: remove on thumbs removal, copy on thumbs present (supports multiple best crops)
     try:
-        pairs = compute_reid_paths_multi(video_path, file_basename, k=3, include_legacy=True)
+        pairs = []
+        if has_up or has_down or removed_up or removed_down:
+            pairs = compute_reid_paths_multi(video_path, file_basename, k=3, include_legacy=True)
         if pairs:
             if removed_up or removed_down:
                 for _src, dst in pairs:
@@ -403,7 +474,8 @@ async def reaction_callback(update, context):
             await context.bot.edit_message_caption(chat_id=chat_id, message_id=message_id, caption=new_caption, parse_mode=parse_mode, reply_markup=reply_markup)
             # Persist updated caption
             async with message_map_lock:
-                video_message_map[key] = {"path": video_path, "caption": new_caption, "mode": parse_mode}
+                sent_day = entry_yyyymmdd(entry, video_path=video_path)
+                video_message_map[key] = {"path": video_path, "caption": new_caption, "mode": parse_mode, "sent_yyyymmdd": sent_day}
                 save_message_map_to_disk()
     except telegram.error.BadRequest as e:
         # Retry with escaped base portion; preserve suffix formatting
@@ -414,7 +486,8 @@ async def reaction_callback(update, context):
             updated_text2 = escaped_base + suffix_only
             await context.bot.edit_message_caption(chat_id=chat_id, message_id=message_id, caption=updated_text2, parse_mode=parse_mode, reply_markup=reply_markup)
             async with message_map_lock:
-                video_message_map[key] = {"path": video_path, "caption": updated_text2, "mode": parse_mode}
+                sent_day = entry_yyyymmdd(entry, video_path=video_path)
+                video_message_map[key] = {"path": video_path, "caption": updated_text2, "mode": parse_mode, "sent_yyyymmdd": sent_day}
                 save_message_map_to_disk()
         except Exception as e2:
             logger.warning(f"[{file_basename}] Failed to edit caption after escape: {e2}", exc_info=True)
@@ -579,8 +652,9 @@ async def button_callback(update, context):
                     await query.edit_message_text(text=new_text, reply_markup=single_markup, parse_mode=original_mode)
                 # Persist updated caption
                 try:
+                    sent_day = (original_entry.get("sent_yyyymmdd") if isinstance(original_entry, dict) else None) or today_yyyymmdd()
                     async with message_map_lock:
-                        video_message_map[msg_key] = {"path": (original_entry.get("path") if isinstance(original_entry, dict) else file_path), "caption": new_text, "mode": original_mode}
+                        video_message_map[msg_key] = {"path": (original_entry.get("path") if isinstance(original_entry, dict) else file_path), "caption": new_text, "mode": original_mode, "sent_yyyymmdd": sent_day}
                         save_message_map_to_disk()
                 except Exception:
                     pass
@@ -679,8 +753,9 @@ async def button_callback(update, context):
                     await query.edit_message_text(text=new_text, reply_markup=single_markup, parse_mode=original_mode)
                 # Persist updated caption
                 try:
+                    sent_day = (original_entry.get("sent_yyyymmdd") if isinstance(original_entry, dict) else None) or today_yyyymmdd()
                     async with message_map_lock:
-                        video_message_map[msg_key] = {"path": (original_entry.get("path") if isinstance(original_entry, dict) else file_path), "caption": new_text, "mode": original_mode}
+                        video_message_map[msg_key] = {"path": (original_entry.get("path") if isinstance(original_entry, dict) else file_path), "caption": new_text, "mode": original_mode, "sent_yyyymmdd": sent_day}
                         save_message_map_to_disk()
                 except Exception:
                     pass
@@ -841,7 +916,7 @@ async def button_callback(update, context):
             key = f"{query.message.chat_id}:{sent_video_msg.message_id}"
             base_caption = f"Осьо відео `{escaped_rel_v2}`"
             async with message_map_lock:
-                video_message_map[key] = {"path": file_path, "caption": base_caption, "mode": "MarkdownV2"}
+                video_message_map[key] = {"path": file_path, "caption": base_caption, "mode": "MarkdownV2", "sent_yyyymmdd": today_yyyymmdd()}
                 save_message_map_to_disk()
             logger.info(f"[{file_basename}] Mapped message {sent_video_msg.message_id} to video path (persisted).")
         except Exception as map_e:
@@ -921,7 +996,7 @@ async def send_notifications(app, video_response, insignificant_frames, clip_pat
                 # Persist mapping
                 try:
                     async with message_map_lock:
-                        video_message_map[f"{CHAT_ID}:{sent_message.message_id}"] = {"path": file_path, "caption": video_response, "mode": "Markdown"}
+                        video_message_map[f"{CHAT_ID}:{sent_message.message_id}"] = {"path": file_path, "caption": video_response, "mode": "Markdown", "sent_yyyymmdd": today_yyyymmdd()}
                         save_message_map_to_disk()
                     logger.info(f"[{file_basename}] Mapped animation message {sent_message.message_id} to video path (persisted).")
                 except Exception as map_e:
@@ -942,7 +1017,7 @@ async def send_notifications(app, video_response, insignificant_frames, clip_pat
                     try:
                         escaped_caption = escape_markdown(video_response, version=1)
                         async with message_map_lock:
-                            video_message_map[f"{CHAT_ID}:{sent_message.message_id}"] = {"path": file_path, "caption": escaped_caption, "mode": "Markdown"}
+                            video_message_map[f"{CHAT_ID}:{sent_message.message_id}"] = {"path": file_path, "caption": escaped_caption, "mode": "Markdown", "sent_yyyymmdd": today_yyyymmdd()}
                             save_message_map_to_disk()
                         logger.info(f"[{file_basename}] Mapped escaped animation message {sent_message.message_id} to video path (persisted).")
                     except Exception as map_e:
@@ -962,7 +1037,7 @@ async def send_notifications(app, video_response, insignificant_frames, clip_pat
                             send_success = True
                             try:
                                 async with message_map_lock:
-                                    video_message_map[f"{CHAT_ID}:{sent_message.message_id}"] = {"path": file_path, "caption": video_response, "mode": "Markdown"}
+                                    video_message_map[f"{CHAT_ID}:{sent_message.message_id}"] = {"path": file_path, "caption": video_response, "mode": "Markdown", "sent_yyyymmdd": today_yyyymmdd()}
                                     save_message_map_to_disk()
                                 logger.info(f"[{file_basename}] Mapped plain message {sent_message.message_id} to video path (persisted).")
                             except Exception as map_e:
@@ -981,7 +1056,7 @@ async def send_notifications(app, video_response, insignificant_frames, clip_pat
                                 try:
                                     escaped_text = escape_markdown(video_response, version=1)
                                     async with message_map_lock:
-                                        video_message_map[f"{CHAT_ID}:{sent_message.message_id}"] = {"path": file_path, "caption": escaped_text, "mode": "Markdown"}
+                                        video_message_map[f"{CHAT_ID}:{sent_message.message_id}"] = {"path": file_path, "caption": escaped_text, "mode": "Markdown", "sent_yyyymmdd": today_yyyymmdd()}
                                         save_message_map_to_disk()
                                     logger.info(f"[{file_basename}] Mapped escaped plain message {sent_message.message_id} to video path (persisted).")
                                 except Exception as map_e:
