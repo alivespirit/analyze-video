@@ -2165,12 +2165,10 @@ def detect_motion(input_video_path, output_dir):
                         date_folder = datetime.now().strftime("%Y%m%d")
                         daily_dir = os.path.join(output_dir, date_folder)
                         os.makedirs(daily_dir, exist_ok=True)
-                        dt = parse_datetime_from_path(input_video_path)
-                        hour = dt.strftime('%H') if dt else (input_video_path.split(os.path.sep)[-2][-2:] if len(input_video_path.split(os.path.sep)) >= 2 else "")
 
                         saved_paths = []
                         for idx, item in enumerate(selected, start=1):
-                            fname_idxed = f"{hour}H{os.path.splitext(file_basename)[0]}_reid_best{idx}.jpg"
+                            fname_idxed = f"{os.path.splitext(file_basename)[0]}_reid_best{idx}.jpg"
                             save_path_idxed = os.path.join(daily_dir, fname_idxed)
                             cv2.imwrite(save_path_idxed, item["crop"], [cv2.IMWRITE_JPEG_QUALITY, 90])
                             saved_paths.append(save_path_idxed)

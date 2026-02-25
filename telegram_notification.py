@@ -76,12 +76,12 @@ def entry_yyyymmdd(entry: object, video_path: str | None = None) -> str | None:
         pass
     return None
 
-def compute_reid_paths_multi(video_path: str, file_basename: str, k: int = 3, include_legacy: bool = False, gallery_path: str | None = None):
+def compute_reid_paths_multi(video_path: str, file_basename: str, k: int = 3, gallery_path: str | None = None):
     """Compute (src,dst) pairs for bestN crops to copy/remove.
 
     Derives date/hour from the actual video path using `parse_datetime_from_path`,
     supporting both legacy and new formats. Builds temp paths like:
-      temp/YYYYMMDD/HHH<basename>_reid_best{idx}.jpg
+      temp/YYYYMMDD/<basename>_reid_best{idx}.jpg
 
     Supports both positive and negative galleries via `gallery_path`.
     If `gallery_path` is None, defaults to REID_GALLERY_PATH.
@@ -108,15 +108,9 @@ def compute_reid_paths_multi(video_path: str, file_basename: str, k: int = 3, in
 
         # Indexed files
         for idx in range(1, max(1, int(k)) + 1):
-            src_file = os.path.join(_TEMP_DIR, yyyymmdd, f"{hh}H{base}_reid_best{idx}.jpg")
+            src_file = os.path.join(_TEMP_DIR, yyyymmdd, f"{base}_reid_best{idx}.jpg")
             dst_file = os.path.join(gallery_path or REID_GALLERY_PATH, os.path.basename(src_file))
             results.append((src_file, dst_file))
-
-        # Legacy file without index (keep for backward compatibility)
-        if include_legacy:
-            src_legacy = os.path.join(_TEMP_DIR, yyyymmdd, f"{hh}H{base}_reid_best.jpg")
-            dst_legacy = os.path.join(gallery_path or REID_GALLERY_PATH, os.path.basename(src_legacy))
-            results.append((src_legacy, dst_legacy))
     except Exception:
         return results
     return results
@@ -310,7 +304,7 @@ async def reaction_callback(update, context):
     try:
         pairs = []
         if has_up or has_down or removed_up or removed_down:
-            pairs = compute_reid_paths_multi(video_path, file_basename, k=3, include_legacy=True)
+            pairs = compute_reid_paths_multi(video_path, file_basename, k=3)
         if pairs:
             if removed_up or removed_down:
                 for _src, dst in pairs:
@@ -387,7 +381,7 @@ async def reaction_callback(update, context):
         # Remove from negative gallery on shrug removal
         if removed_shrug:
             try:
-                neg_pairs_rm = compute_reid_paths_multi(video_path, file_basename, k=3, include_legacy=False, gallery_path=REID_NEGATIVE_GALLERY_PATH)
+                neg_pairs_rm = compute_reid_paths_multi(video_path, file_basename, k=3, gallery_path=REID_NEGATIVE_GALLERY_PATH)
                 for _src, dst in neg_pairs_rm:
                     try:
                         if os.path.exists(dst):
@@ -403,7 +397,7 @@ async def reaction_callback(update, context):
                 os.makedirs(REID_NEGATIVE_GALLERY_PATH, exist_ok=True)
             except Exception:
                 pass
-            neg_pairs = compute_reid_paths_multi(video_path, file_basename, k=3, include_legacy=False, gallery_path=REID_NEGATIVE_GALLERY_PATH)
+            neg_pairs = compute_reid_paths_multi(video_path, file_basename, k=3, gallery_path=REID_NEGATIVE_GALLERY_PATH)
             for src, dst in neg_pairs:
                 try:
                     if os.path.exists(src):
@@ -568,7 +562,7 @@ async def button_callback(update, context):
             file_path = os.path.join(VIDEO_FOLDER, callback_file_rel)
             file_basename = os.path.basename(file_path)
             logger.info(f"[{file_basename}] Confirm callback received.")
-            pairs = compute_reid_paths_multi(file_path, file_basename, k=3, include_legacy=True)
+            pairs = compute_reid_paths_multi(file_path, file_basename, k=3)
             for src, dst in pairs:
                 try:
                     if os.path.exists(src):
@@ -596,7 +590,7 @@ async def button_callback(update, context):
             file_basename = os.path.basename(file_path)
             logger.info(f"[{file_basename}] Negative confirm callback received.")
             try:
-                neg_pairs = compute_reid_paths_multi(file_path, file_basename, k=3, include_legacy=False, gallery_path=REID_NEGATIVE_GALLERY_PATH)
+                neg_pairs = compute_reid_paths_multi(file_path, file_basename, k=3, gallery_path=REID_NEGATIVE_GALLERY_PATH)
                 for src, dst in neg_pairs:
                     try:
                         if os.path.exists(src):
@@ -663,7 +657,7 @@ async def button_callback(update, context):
 
             # Send REID crops for review (standard 'Точняк?' prompt)
             try:
-                pairs = compute_reid_paths_multi(file_path, file_basename, k=3, include_legacy=True)
+                pairs = compute_reid_paths_multi(file_path, file_basename, k=3)
                 media_group = []
                 for src, _dst in pairs:
                     try:
@@ -764,7 +758,7 @@ async def button_callback(update, context):
 
             # Send REID crops for review with negative confirmation prompt
             try:
-                pairs = compute_reid_paths_multi(file_path, file_basename, k=3, include_legacy=False)
+                pairs = compute_reid_paths_multi(file_path, file_basename, k=3)
                 media_group = []
                 for src, _dst in pairs:
                     try:
@@ -826,7 +820,7 @@ async def button_callback(update, context):
             file_path = os.path.join(VIDEO_FOLDER, callback_file_rel)
             file_basename = os.path.basename(file_path)
             logger.info(f"[{file_basename}] Revert callback received.")
-            pairs = compute_reid_paths_multi(file_path, file_basename, k=3, include_legacy=True)
+            pairs = compute_reid_paths_multi(file_path, file_basename, k=3)
             for _src, dst in pairs:
                 try:
                     if os.path.exists(dst):
@@ -851,7 +845,7 @@ async def button_callback(update, context):
             file_basename = os.path.basename(file_path)
             logger.info(f"[{file_basename}] Revert NEGATIVE callback received.")
             try:
-                neg_pairs_rm = compute_reid_paths_multi(file_path, file_basename, k=3, include_legacy=False, gallery_path=REID_NEGATIVE_GALLERY_PATH)
+                neg_pairs_rm = compute_reid_paths_multi(file_path, file_basename, k=3, gallery_path=REID_NEGATIVE_GALLERY_PATH)
                 for _src, dst in neg_pairs_rm:
                     try:
                         if os.path.exists(dst):
