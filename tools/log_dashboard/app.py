@@ -62,6 +62,84 @@ app = FastAPI(title="Analyze-Video Log Dashboard")
 CAP_PROCESSING_SECONDS: float = 300.0
 
 
+def _capped_avg(values: List[float], cap: float = CAP_PROCESSING_SECONDS) -> Optional[float]:
+    if not values:
+        return None
+    capped_sum = 0.0
+    n = 0
+    for v in values:
+        try:
+            vv = float(v)
+        except Exception:
+            continue
+        capped_sum += vv if vv <= cap else cap
+        n += 1
+    if n <= 0:
+        return None
+    return capped_sum / n
+
+
+def _minutes_from_hhmmss(hhmmss: Optional[str]) -> Optional[int]:
+    if not hhmmss:
+        return None
+    try:
+        h_str, m_str, _s_str = hhmmss.split(":", 2)
+        h = int(h_str)
+        m = int(m_str)
+        if h < 0 or h > 23 or m < 0 or m > 59:
+            return None
+        return h * 60 + m
+    except Exception:
+        return None
+
+
+def collect_away_back_points(entries: List[Dict]) -> List[Dict[str, object]]:
+    """Collect away/back event points with minute-of-day.
+
+    Uses filename-derived HH:MM:SS when possible, falls back to log timestamp.
+    Returned items: {type: 'away'|'back', video: str, ts: datetime, hhmmss: str, minute: int}
+    """
+    removed_videos: set[str] = set()
+    for e in entries:
+        vid = e.get("video")
+        if not vid:
+            continue
+        content = e.get("content", "")
+        if REACTION_REMOVED_RE.search(content):
+            removed_videos.add(vid)
+
+    points: List[Dict[str, object]] = []
+    for e in entries:
+        vid = e.get("video")
+        if not vid:
+            continue
+        if vid in removed_videos:
+            continue
+        content = e.get("content", "")
+        is_away = AWAY_RE.search(content)
+        is_back = BACK_RE.search(content)
+        if not (is_away or is_back):
+            continue
+        ts = e.get("ts")
+        hhmmss = _hhmmss_from_video_path(vid, fallback_ts=ts)
+        minute = _minutes_from_hhmmss(hhmmss)
+        if minute is None and ts:
+            minute = ts.hour * 60 + ts.minute
+            hhmmss = ts.strftime("%H:%M:%S")
+        if minute is None:
+            continue
+        points.append(
+            {
+                "type": "away" if is_away else "back",
+                "video": vid,
+                "ts": ts,
+                "hhmmss": hhmmss,
+                "minute": minute,
+            }
+        )
+    return points
+
+
 def list_log_files() -> Dict[str, str]:
     """Return map of date (YYYY-MM-DD) to file path.
 
@@ -695,6 +773,274 @@ def index():
 
     tmpl = env.get_template("index.html")
     return tmpl.render(ordered_days=ordered_days, log_dir=LOG_DIR)
+
+
+@app.get("/stats", response_class=HTMLResponse)
+def stats_view():
+    """Aggregated statistics across all available log files."""
+    days = list_log_files()
+    ordered_days = sorted(days.keys())
+
+    per_day: List[Dict[str, object]] = []
+    events_all: List[Dict[str, object]] = []
+
+    statuses_seen = set()
+
+    for d in ordered_days:
+        path = days[d]
+        entries = parse_log_lines(path, d)
+        metrics = collect_metrics(entries)
+
+        videos_total = int(metrics.get("videos_total") or 0)
+
+        status_counts_raw = metrics.get("status_counts") or {}
+        status_counts: Dict[str, int] = {}
+        try:
+            for k, v in dict(status_counts_raw).items():
+                if k is None:
+                    continue
+                try:
+                    status_counts[str(k)] = int(v or 0)
+                except Exception:
+                    status_counts[str(k)] = 0
+        except Exception:
+            status_counts = {}
+
+        missing = videos_total - sum(status_counts.values())
+        if missing > 0:
+            status_counts["unknown"] = int(missing)
+
+        statuses_seen.update(status_counts.keys())
+
+        md_values_raw = list((metrics.get("md_time_per_video") or {}).values())
+        md_values: List[float] = []
+        for v in md_values_raw:
+            try:
+                if v is None:
+                    continue
+                md_values.append(float(v))
+            except Exception:
+                continue
+        md_avg = _capped_avg(md_values)
+
+        full_values_raw = list((metrics.get("full_time_per_video") or {}).values())
+        full_values: List[float] = []
+        for v in full_values_raw:
+            try:
+                if v is None:
+                    continue
+                full_values.append(float(v))
+            except Exception:
+                continue
+        full_avg = _capped_avg(full_values)
+
+        per_day.append(
+            {
+                "day": d,
+                "videos_total": videos_total,
+                "status_counts": status_counts,
+                "md_avg": md_avg,
+                "full_avg": full_avg,
+            }
+        )
+
+        pts = collect_away_back_points(entries)
+        for p in pts:
+            p2 = dict(p)
+            p2["day"] = d
+            events_all.append(p2)
+
+    # Events heatmap (alternate mode): for each 15-min bin, count how many distinct
+    # days had >=1 event in that bin (separately for away/back).
+    start_offset = 6 * 60
+    total_minutes = 18 * 60
+    bin_minutes = 15
+    bins = total_minutes // bin_minutes  # 72
+    days_count = len(ordered_days)
+    away_bin_days = {}
+    back_bin_days = {}
+    any_hour_days = {}
+    away_hour_days = {}
+    back_hour_days = {}
+    for p in events_all:
+        try:
+            minute = int(p.get("minute"))
+            day = p.get("day")
+            typ = p.get("type")
+        except Exception:
+            continue
+
+        if day is None:
+            continue
+        if minute < start_offset or minute >= (start_offset + total_minutes):
+            continue
+
+        idx = (minute - start_offset) // bin_minutes
+        if idx < 0:
+            idx = 0
+        if idx >= bins:
+            idx = bins - 1
+
+        hour_idx = (minute - start_offset) // 60
+        if hour_idx < 0:
+            hour_idx = 0
+        if hour_idx >= (total_minutes // 60):
+            hour_idx = (total_minutes // 60) - 1
+        any_hour_days.setdefault(hour_idx, set()).add(day)
+
+        if typ == "away":
+            away_bin_days.setdefault(idx, set()).add(day)
+            away_hour_days.setdefault(hour_idx, set()).add(day)
+        else:
+            back_bin_days.setdefault(idx, set()).add(day)
+            back_hour_days.setdefault(hour_idx, set()).add(day)
+
+    away_days = [len(away_bin_days.get(i, set())) for i in range(bins)]
+    back_days = [len(back_bin_days.get(i, set())) for i in range(bins)]
+    max_bin_days = 0
+    if away_days:
+        max_bin_days = max(max_bin_days, max(away_days))
+    if back_days:
+        max_bin_days = max(max_bin_days, max(back_days))
+
+    hours = total_minutes // 60  # 18
+    hour_days = [len(any_hour_days.get(i, set())) for i in range(hours)]
+    hour_away_days = [len(away_hour_days.get(i, set())) for i in range(hours)]
+    hour_back_days = [len(back_hour_days.get(i, set())) for i in range(hours)]
+    max_hour_days = max(hour_days) if hour_days else 0
+
+    events_heatmap = {
+        "start_offset": start_offset,
+        "bin_minutes": bin_minutes,
+        "bins": bins,
+        "days_count": days_count,
+        "away_days": away_days,
+        "back_days": back_days,
+        "max_bin_days": max_bin_days,
+        "hours": hours,
+        "hour_days": hour_days,
+        "hour_away_days": hour_away_days,
+        "hour_back_days": hour_back_days,
+        "max_hour_days": max_hour_days,
+    }
+
+    # Weekday heatmap (% of days per weekday that had an event in the bin)
+    # Use hourly bins to keep the visualization compact/readable.
+    wd_bin_minutes = 60
+    wd_bins = total_minutes // wd_bin_minutes  # 18
+    weekday_labels = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
+    day_to_weekday: Dict[str, int] = {}
+    weekday_day_counts: List[int] = [0] * 7
+    for d in ordered_days:
+        try:
+            wd = date.fromisoformat(d).weekday()
+        except Exception:
+            continue
+        if wd < 0 or wd > 6:
+            continue
+        day_to_weekday[d] = wd
+        weekday_day_counts[wd] += 1
+
+    away_wd_bin_days = {}
+    back_wd_bin_days = {}
+    for p in events_all:
+        try:
+            minute = int(p.get("minute"))
+            day = p.get("day")
+            typ = p.get("type")
+        except Exception:
+            continue
+
+        if not day or day not in day_to_weekday:
+            continue
+        if minute < start_offset or minute >= (start_offset + total_minutes):
+            continue
+
+        wd = day_to_weekday[day]
+        idx = (minute - start_offset) // wd_bin_minutes
+        if idx < 0:
+            idx = 0
+        if idx >= wd_bins:
+            idx = wd_bins - 1
+
+        key = (wd, idx)
+        if typ == "away":
+            away_wd_bin_days.setdefault(key, set()).add(day)
+        else:
+            back_wd_bin_days.setdefault(key, set()).add(day)
+
+    away_wd_counts: List[List[int]] = [[0 for _ in range(wd_bins)] for _ in range(7)]
+    back_wd_counts: List[List[int]] = [[0 for _ in range(wd_bins)] for _ in range(7)]
+    for (wd, idx), ds in away_wd_bin_days.items():
+        try:
+            away_wd_counts[int(wd)][int(idx)] = len(ds)
+        except Exception:
+            continue
+    for (wd, idx), ds in back_wd_bin_days.items():
+        try:
+            back_wd_counts[int(wd)][int(idx)] = len(ds)
+        except Exception:
+            continue
+
+    max_pct_away = 0.0
+    max_pct_back = 0.0
+    for wd in range(7):
+        denom = weekday_day_counts[wd]
+        if denom <= 0:
+            continue
+        for idx in range(wd_bins):
+            a = away_wd_counts[wd][idx]
+            b = back_wd_counts[wd][idx]
+            max_pct_away = max(max_pct_away, float(a) / float(denom))
+            max_pct_back = max(max_pct_back, float(b) / float(denom))
+
+    events_weekday_heatmap = {
+        "start_offset": start_offset,
+        "bin_minutes": wd_bin_minutes,
+        "bins": wd_bins,
+        "weekday_labels": weekday_labels,
+        "weekday_day_counts": weekday_day_counts,
+        "away_counts": away_wd_counts,
+        "back_counts": back_wd_counts,
+        "max_pct_away": max_pct_away,
+        "max_pct_back": max_pct_back,
+    }
+
+    preferred_statuses = list(STATUS_COLORS.keys())
+    other_statuses = sorted(
+        [s for s in statuses_seen if s not in preferred_statuses and s != "unknown"]
+    )
+    status_order = [s for s in preferred_statuses if s in statuses_seen] + other_statuses
+    if "unknown" in statuses_seen:
+        status_order.append("unknown")
+
+    videos_color = SEVERITY_COLORS.get("INFO", "#3b82f6")
+    unknown_color = SEVERITY_COLORS.get("DEBUG", "#9ca3af")
+
+    status_colors: Dict[str, str] = {}
+    for s in status_order:
+        if s == "unknown":
+            status_colors[s] = unknown_color
+        else:
+            status_colors[s] = STATUS_COLORS.get(s, videos_color)
+    status_text_colors: Dict[str, str] = {s: text_color_on_bg(c) for s, c in status_colors.items()}
+
+    tmpl = env.get_template("stats.html")
+    return tmpl.render(
+        per_day=per_day,
+        events=events_all,
+        events_heatmap=events_heatmap,
+        events_weekday_heatmap=events_weekday_heatmap,
+        log_dir=LOG_DIR,
+        away_color=STATUS_COLORS.get("gate_crossing", "#22c55e"),
+        back_color=STATUS_COLORS.get("error", "#ef4444"),
+        videos_color=videos_color,
+        md_color=SEVERITY_COLORS.get("DEBUG", "#9ca3af"),
+        full_color=SEVERITY_COLORS.get("INFO", "#3b82f6"),
+        status_order=status_order,
+        status_colors=status_colors,
+        status_text_colors=status_text_colors,
+    )
 
 
 @app.get("/today", response_class=HTMLResponse)

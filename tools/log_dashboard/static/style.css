@@ -114,6 +114,12 @@ header nav .nav-btn{white-space:nowrap}
   header nav{gap:6px}
   header nav .nav-btn{padding:6px 8px;font-size:14px;min-width:auto}
   header .inner h1{line-height:1;margin:0}
+
+  /* Stats: in-bar labels get unreadable on mobile */
+  body.stats-page .chart text.bar-label{display:none}
+
+  /* Stats: bump axis label size on mobile */
+  body.stats-page .chart text.axis-label{font-size:16px}
 }
 
 .chart-wrap{display:block}
@@ -127,6 +133,12 @@ header nav .nav-btn{white-space:nowrap}
 .legend-chip{display:inline-block;width:12px;height:12px;border-radius:2px}
 /* Legend links should look like plain text */
 .chart-legend a{color:var(--text);text-decoration:none}
+
+/* Stats page tweaks: larger labels + avoid stretched grid cards */
+body.stats-page .chart .axis-label{font-size:14px}
+/* Ensure Stats charts aren't squashed by the generic mobile max-height rule */
+body.stats-page .chart{max-height:none;background:transparent}
+body.stats-page .grid.stats-grid{grid-template-columns:repeat(2,minmax(320px,1fr));align-items:start}
 /* Badge row: single line severity chips */
 .badge-row{display:flex;gap:8px;align-items:baseline;flex-wrap:nowrap;overflow-x:auto;padding:0}
 .badge-row .link-log{display:flex;align-items:center}
@@ -157,6 +169,12 @@ header nav .nav-btn{white-space:nowrap}
 
 /* Responsive tweaks for mobile */
 @media (max-width: 720px){
+  body.stats-page .grid.stats-grid{grid-template-columns:1fr}
+  body.stats-page .chart .axis-label{font-size:16px}
+  /* Stats: weekday heatmaps need explicit height on mobile */
+  body.stats-page svg.chart.chart-weekday{height:220px;max-height:none}
+  /* Stats: Events chart benefits from slightly larger labels on mobile */
+  body.stats-page svg.chart.chart-events text.axis-label{font-size:20px !important}
   .fab{display:flex}
   .fab-top{display:flex}
   h1{font-size:20px}

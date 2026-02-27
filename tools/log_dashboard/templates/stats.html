@@ -1,0 +1,524 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Stats</title>
+  <link rel="stylesheet" href="/static/style.css" />
+</head>
+<body class="stats-page">
+  <header id="page-top">
+    <div class="inner">
+      <div class="header-left">
+        <h1>Stats</h1>
+      </div>
+      <nav>
+        <a class="nav-btn" href="/today" title="Today">Today</a>
+        <a class="nav-btn" href="/" title="All Days">All Days</a>
+      </nav>
+    </div>
+  </header>
+
+  <main>
+    {% if per_day and per_day|length > 0 %}
+
+    <section>
+      <div class="card">
+        <h2>Events (Away/Back) by Time of Day</h2>
+        {% set hm = events_heatmap or {} %}
+        {% set start_offset = (hm.start_offset if hm.start_offset is defined else 360) %}
+        {% set bins = (hm.bins if hm.bins is defined else 72) %}
+        {% set bin_minutes = (hm.bin_minutes if hm.bin_minutes is defined else 15) %}
+        {% set away_days = (hm.away_days if hm.away_days is defined else []) %}
+        {% set back_days = (hm.back_days if hm.back_days is defined else []) %}
+        {% set days_count = (hm.days_count if hm.days_count is defined else (per_day|length)) %}
+        {% set max_bin_days = (hm.max_bin_days if hm.max_bin_days is defined else 0) %}
+        {% set hours = (hm.hours if hm.hours is defined else 18) %}
+        {% set hour_days = (hm.hour_days if hm.hour_days is defined else []) %}
+        {% set hour_away_days = (hm.hour_away_days if hm.hour_away_days is defined else []) %}
+        {% set hour_back_days = (hm.hour_back_days if hm.hour_back_days is defined else []) %}
+        {% set max_hour_days = (hm.max_hour_days if hm.max_hour_days is defined else 0) %}
+
+        {% set vbw = 1000 %}
+        {% set vbh = 230 %}
+        {% set left = 80 %}
+        {% set right = 34 %}
+        {% set axisW = vbw - left - right %}
+        {% set cellW = axisW / bins %}
+        {% set cellH = 34 %}
+        {% set yAway = 60 %}
+        {% set yBack = 110 %}
+        {% set yMarg = yBack + cellH + 10 %}
+        {% set margH = 14 %}
+        {% set yAxis = 175 %}
+        {% set denom = (max_bin_days if max_bin_days > 0 else 1) %}
+        <div class="chart-wrap">
+          <svg class="chart chart-events" width="100%" height="230" viewBox="0 0 {{ vbw }} {{ vbh }}" preserveAspectRatio="none" data-unstretch-text="1">
+            <rect x="0" y="0" width="{{ vbw }}" height="{{ vbh }}" rx="8" fill="#11151d" />
+            <line x1="{{ left }}" y1="{{ yAxis }}" x2="{{ vbw - right }}" y2="{{ yAxis }}" stroke="#444" />
+            {% for h in range(6, 25) %}
+              {% set x0 = left + ((h - 6) / 18.0) * axisW %}
+              {% set x = x0 %}
+              {% set anchor = 'middle' %}
+              {% if h == 6 %}
+                {% set anchor = 'start' %}
+                {% set x = left + 2 %}
+              {% elif h == 24 %}
+                {% set anchor = 'end' %}
+                {% set x = (vbw - right - 2) %}
+              {% endif %}
+              <line x1="{{ x0 }}" y1="{{ yAxis }}" x2="{{ x0 }}" y2="{{ yAxis + 6 }}" stroke="#2a2f40" />
+              {% if (h % 2) == 0 %}
+                <text class="axis-label" x="{{ x }}" y="{{ yAxis + 22 }}" text-anchor="{{ anchor }}" fill="#a8adc0">{{ '%02d'|format(h) }}</text>
+              {% endif %}
+            {% endfor %}
+
+            <text class="axis-label" x="{{ left - 10 }}" y="{{ yAway + (cellH/2) + 4 }}" text-anchor="end" fill="#a8adc0">Away</text>
+            <text class="axis-label" x="{{ left - 10 }}" y="{{ yBack + (cellH/2) + 4 }}" text-anchor="end" fill="#a8adc0">Back</text>
+
+            {% for i in range(bins) %}
+              {% set x = left + i * cellW %}
+              {% set a = (away_days[i] if away_days and i < (away_days|length) else 0) %}
+              {% set b = (back_days[i] if back_days and i < (back_days|length) else 0) %}
+              {% set a_op = (0.10 + 0.90 * (a / denom)) if a > 0 else 0.08 %}
+              {% set b_op = (0.10 + 0.90 * (b / denom)) if b > 0 else 0.08 %}
+              {% set start_min = start_offset + i * bin_minutes %}
+              {% set end_min = start_min + bin_minutes %}
+              {% set sh = (start_min // 60) %}
+              {% set sm = (start_min % 60) %}
+              {% set eh = (end_min // 60) %}
+              {% set em = (end_min % 60) %}
+              {% set a_pct = (100.0 * a / days_count) if days_count and days_count > 0 else 0 %}
+              {% set b_pct = (100.0 * b / days_count) if days_count and days_count > 0 else 0 %}
+              <rect x="{{ x }}" y="{{ yAway }}" width="{{ cellW }}" height="{{ cellH }}" fill="{{ away_color }}" opacity="{{ '%.3f'|format(a_op) }}" stroke="#2a2f40" stroke-width="0.5">
+                <title>{{ '%02d:%02d'|format(sh, sm) }}–{{ '%02d:%02d'|format(eh, em) }} away: {{ a }}/{{ days_count }} days ({{ '%.1f'|format(a_pct) }}%)</title>
+              </rect>
+              <rect x="{{ x }}" y="{{ yBack }}" width="{{ cellW }}" height="{{ cellH }}" fill="{{ back_color }}" opacity="{{ '%.3f'|format(b_op) }}" stroke="#2a2f40" stroke-width="0.5">
+                <title>{{ '%02d:%02d'|format(sh, sm) }}–{{ '%02d:%02d'|format(eh, em) }} back: {{ b }}/{{ days_count }} days ({{ '%.1f'|format(b_pct) }}%)</title>
+              </rect>
+            {% endfor %}
+
+            {# Hourly marginal strip: how many days have ANY event in that hour #}
+            {% set hourW = axisW / hours %}
+            {% set hden = (max_hour_days if max_hour_days > 0 else 1) %}
+            {% for hi in range(hours) %}
+              {% set x = left + hi * hourW %}
+              {% set c_any = (hour_days[hi] if hour_days and hi < (hour_days|length) else 0) %}
+              {% set c_away = (hour_away_days[hi] if hour_away_days and hi < (hour_away_days|length) else 0) %}
+              {% set c_back = (hour_back_days[hi] if hour_back_days and hi < (hour_back_days|length) else 0) %}
+              {% set op = (0.10 + 0.90 * (c_any / hden)) if c_any > 0 else 0.08 %}
+              {% set h0 = 6 + hi %}
+              {% set h1 = h0 + 1 %}
+              {% set a_pct = (100.0 * c_away / days_count) if days_count and days_count > 0 else 0 %}
+              {% set b_pct = (100.0 * c_back / days_count) if days_count and days_count > 0 else 0 %}
+              <rect x="{{ x }}" y="{{ yMarg }}" width="{{ hourW }}" height="{{ margH }}" fill="{{ videos_color }}" opacity="{{ '%.3f'|format(op) }}" stroke="#2a2f40" stroke-width="0.5">
+                <title>{{ '%02d:00'|format(h0) }}–{{ '%02d:00'|format(h1) }} away: {{ c_away }}/{{ days_count }} ({{ '%.1f'|format(a_pct) }}%), back: {{ c_back }}/{{ days_count }} ({{ '%.1f'|format(b_pct) }}%)</title>
+              </rect>
+            {% endfor %}
+
+            <rect x="{{ left }}" y="{{ yMarg }}" width="{{ axisW }}" height="{{ margH }}" fill="none" stroke="#1d2030" stroke-width="1" />
+
+            <rect x="{{ left }}" y="{{ yAway }}" width="{{ axisW }}" height="{{ cellH }}" fill="none" stroke="#1d2030" stroke-width="1" />
+            <rect x="{{ left }}" y="{{ yBack }}" width="{{ axisW }}" height="{{ cellH }}" fill="none" stroke="#1d2030" stroke-width="1" />
+          </svg>
+        </div>
+        <div class="chart-legend">
+          <ul>
+            <li class="legend-item"><span class="legend-chip" style="background: var(--ok);"></span>Away</li>
+            <li class="legend-item"><span class="legend-chip" style="background: var(--error);"></span>Back</li>
+            <li class="legend-item"><span class="legend-chip" style="background: var(--info);"></span>Any (per hour)</li>
+            <li class="legend-item">Max bin: <strong>{{ max_bin_days }}</strong> / {{ days_count }} days</li>
+          </ul>
+        </div>
+        <p class="muted">15-minute heatmap across all days (06:00–24:00). Brighter = more days with at least one event in that time window.</p>
+      </div>
+
+      <div class="card">
+        <h2>Total Unique Videos</h2>
+        {% set pairs = per_day %}
+        {% set n = pairs|length %}
+        {% set vbw = 600 %}
+        {% set vbh = 240 %}
+        {% set left = 60 %}
+        {% set right = 30 %}
+        {% set topPad = 10 %}
+        {% set bottomPad = 34 %}
+        {% set yTop = topPad %}
+        {% set yBottom = vbh - bottomPad %}
+        {% set plotH = yBottom - yTop %}
+        {% set axisW = vbw - left - right %}
+        {% set step = axisW / n %}
+        {% set barW = step * 0.9 %}
+        {% set maxv = (pairs | map(attribute='videos_total') | max) %}
+        {% set denom = maxv if maxv > 0 else 1 %}
+        <div class="chart-wrap">
+          <svg class="chart" width="100%" height="240" viewBox="0 0 {{ vbw }} {{ vbh }}" preserveAspectRatio="none" data-unstretch-text="1">
+            <rect x="0" y="0" width="{{ vbw }}" height="{{ vbh }}" rx="8" fill="#11151d" />
+            <line x1="{{ left }}" y1="{{ yBottom }}" x2="{{ vbw - right }}" y2="{{ yBottom }}" stroke="#444" />
+            <line x1="{{ left }}" y1="{{ yTop }}" x2="{{ left }}" y2="{{ yBottom }}" stroke="#444" />
+            <text class="axis-label" x="{{ left - 8 }}" y="{{ yBottom }}" text-anchor="end" fill="#a8adc0">0</text>
+            <text class="axis-label" x="{{ left - 8 }}" y="{{ yTop + 12 }}" text-anchor="end" fill="#a8adc0">{{ maxv }}</text>
+            {% set label_every = 1 %}
+            {% if n > 14 %}{% set label_every = 2 %}{% endif %}
+            {% if n > 28 %}{% set label_every = 4 %}{% endif %}
+            {% for p in pairs %}
+              {% set i = loop.index0 %}
+              {% set v = p.videos_total %}
+              {% set h = (v / denom) * plotH %}
+              {% set x = left + i * step + (step - barW) / 2 %}
+              {% set y = yBottom - h %}
+              {% set ns = namespace(y=yBottom) %}
+              {% for st in status_order %}
+                {% set c = (p.status_counts.get(st) or 0) %}
+                {% if c > 0 %}
+                  {% set segH = (c / denom) * plotH %}
+                  {% set ySeg = ns.y - segH %}
+                  <rect x="{{ x }}" y="{{ ySeg }}" width="{{ barW }}" height="{{ segH }}" fill="{{ status_colors.get(st, videos_color) }}" opacity="0.92">
+                    <title>{{ p.day }}: {{ c }} {{ st }} ({{ v }} total)</title>
+                  </rect>
+                  {% if segH >= 16 %}
+                    <text class="bar-label" x="{{ x + barW/2 }}" y="{{ ySeg + segH/2 + 4 }}" text-anchor="middle" fill="{{ status_text_colors.get(st, '#ffffff') }}" font-size="12">{{ c }}</text>
+                  {% endif %}
+                  {% set ns.y = ySeg %}
+                {% endif %}
+              {% endfor %}
+              {% if (i % label_every) == 0 %}
+              <text class="axis-label" x="{{ x + barW/2 }}" y="{{ vbh - 14 }}" text-anchor="middle" fill="#a8adc0">{{ p.day[5:] }}</text>
+              {% endif %}
+            {% endfor %}
+          </svg>
+        </div>
+        <div class="chart-legend">
+          <ul>
+            {% for st in status_order %}
+              <li class="legend-item"><span class="legend-chip" data-color="{{ status_colors.get(st, videos_color) }}"></span>{{ st }}</li>
+            {% endfor %}
+          </ul>
+        </div>
+      </div>
+    </section>
+
+    <section class="grid stats-grid">
+      <div class="card">
+        <h2>Average Motion Detection Time</h2>
+        {% set pairs = per_day %}
+        {% set n = pairs|length %}
+        {% set vbw = 600 %}
+        {% set vbh = 220 %}
+        {% set left = 60 %}
+        {% set right = 20 %}
+        {% set topPad = 10 %}
+        {% set bottomPad = 34 %}
+        {% set yTop = topPad %}
+        {% set yBottom = vbh - bottomPad %}
+        {% set plotH = yBottom - yTop %}
+        {% set axisW = vbw - left - right %}
+        {% set step = axisW / n %}
+        {% set barW = step * 0.9 %}
+        {% set vals = [] %}
+        {% for p in pairs %}{% if p.md_avg is not none %}{% set _ = vals.append(p.md_avg) %}{% endif %}{% endfor %}
+        {% set maxv = (vals|max) if vals and vals|length>0 else 0 %}
+        {% set denom = maxv if maxv > 0 else 1 %}
+        <div class="chart-wrap">
+          <svg class="chart" width="100%" height="220" viewBox="0 0 {{ vbw }} {{ vbh }}" preserveAspectRatio="xMinYMin meet">
+            <rect x="0" y="0" width="{{ vbw }}" height="{{ vbh }}" rx="8" fill="#11151d" />
+            <line x1="{{ left }}" y1="{{ yBottom }}" x2="{{ vbw - right }}" y2="{{ yBottom }}" stroke="#444" />
+            <line x1="{{ left }}" y1="{{ yTop }}" x2="{{ left }}" y2="{{ yBottom }}" stroke="#444" />
+            <text class="axis-label" x="{{ left - 8 }}" y="{{ yBottom }}" text-anchor="end" fill="#a8adc0">0</text>
+            <text class="axis-label" x="{{ left - 8 }}" y="{{ yTop + 12 }}" text-anchor="end" fill="#a8adc0">{{ '%.1f'|format(maxv) }}</text>
+            {% set label_every = 1 %}
+            {% if n > 14 %}{% set label_every = 2 %}{% endif %}
+            {% if n > 28 %}{% set label_every = 4 %}{% endif %}
+            {% for p in pairs %}
+              {% set i = loop.index0 %}
+              {% set v = p.md_avg %}
+              {% set v0 = (v if v is not none else 0) %}
+              {% set h = (v0 / denom) * plotH %}
+              {% set x = left + i * step + (step - barW) / 2 %}
+              {% set y = yBottom - h %}
+              <rect x="{{ x }}" y="{{ y }}" width="{{ barW }}" height="{{ h }}" fill="{{ md_color }}" opacity="0.9">
+                <title>{{ p.day }}: {% if v is none %}n/a{% else %}{{ '%.2f'|format(v) }}s{% endif %}</title>
+              </rect>
+              {% if (i % label_every) == 0 %}
+              <text class="axis-label" x="{{ x + barW/2 }}" y="{{ vbh - 12 }}" text-anchor="middle" fill="#a8adc0">{{ p.day[5:] }}</text>
+              {% endif %}
+            {% endfor %}
+          </svg>
+        </div>
+      </div>
+
+      <div class="card">
+        <h2>Average Full Processing Time</h2>
+        {% set pairs = per_day %}
+        {% set n = pairs|length %}
+        {% set vbw = 600 %}
+        {% set vbh = 220 %}
+        {% set left = 60 %}
+        {% set right = 20 %}
+        {% set topPad = 10 %}
+        {% set bottomPad = 34 %}
+        {% set yTop = topPad %}
+        {% set yBottom = vbh - bottomPad %}
+        {% set plotH = yBottom - yTop %}
+        {% set axisW = vbw - left - right %}
+        {% set step = axisW / n %}
+        {% set barW = step * 0.9 %}
+        {% set vals = [] %}
+        {% for p in pairs %}{% if p.full_avg is not none %}{% set _ = vals.append(p.full_avg) %}{% endif %}{% endfor %}
+        {% set maxv = (vals|max) if vals and vals|length>0 else 0 %}
+        {% set denom = maxv if maxv > 0 else 1 %}
+        <div class="chart-wrap">
+          <svg class="chart" width="100%" height="220" viewBox="0 0 {{ vbw }} {{ vbh }}" preserveAspectRatio="xMinYMin meet">
+            <rect x="0" y="0" width="{{ vbw }}" height="{{ vbh }}" rx="8" fill="#11151d" />
+            <line x1="{{ left }}" y1="{{ yBottom }}" x2="{{ vbw - right }}" y2="{{ yBottom }}" stroke="#444" />
+            <line x1="{{ left }}" y1="{{ yTop }}" x2="{{ left }}" y2="{{ yBottom }}" stroke="#444" />
+            <text class="axis-label" x="{{ left - 8 }}" y="{{ yBottom }}" text-anchor="end" fill="#a8adc0">0</text>
+            <text class="axis-label" x="{{ left - 8 }}" y="{{ yTop + 12 }}" text-anchor="end" fill="#a8adc0">{{ '%.1f'|format(maxv) }}</text>
+            {% set label_every = 1 %}
+            {% if n > 14 %}{% set label_every = 2 %}{% endif %}
+            {% if n > 28 %}{% set label_every = 4 %}{% endif %}
+            {% for p in pairs %}
+              {% set i = loop.index0 %}
+              {% set v = p.full_avg %}
+              {% set v0 = (v if v is not none else 0) %}
+              {% set h = (v0 / denom) * plotH %}
+              {% set x = left + i * step + (step - barW) / 2 %}
+              {% set y = yBottom - h %}
+              <rect x="{{ x }}" y="{{ y }}" width="{{ barW }}" height="{{ h }}" fill="{{ full_color }}" opacity="0.9">
+                <title>{{ p.day }}: {% if v is none %}n/a{% else %}{{ '%.2f'|format(v) }}s{% endif %}</title>
+              </rect>
+              {% if (i % label_every) == 0 %}
+              <text class="axis-label" x="{{ x + barW/2 }}" y="{{ vbh - 12 }}" text-anchor="middle" fill="#a8adc0">{{ p.day[5:] }}</text>
+              {% endif %}
+            {% endfor %}
+          </svg>
+        </div>
+      </div>
+    </section>
+
+    <section class="grid stats-grid">
+      {% set wh = events_weekday_heatmap or {} %}
+      {% set start_offset = (wh.start_offset if wh.start_offset is defined else 360) %}
+      {% set bins = (wh.bins if wh.bins is defined else 72) %}
+      {% set bin_minutes = (wh.bin_minutes if wh.bin_minutes is defined else 15) %}
+      {% set weekday_labels = (wh.weekday_labels if wh.weekday_labels is defined else ['Mon','Tue','Wed','Thu','Fri','Sat','Sun']) %}
+      {% set weekday_day_counts = (wh.weekday_day_counts if wh.weekday_day_counts is defined else [0,0,0,0,0,0,0]) %}
+      {% set away_counts = (wh.away_counts if wh.away_counts is defined else []) %}
+      {% set back_counts = (wh.back_counts if wh.back_counts is defined else []) %}
+      {% set max_pct_away = (wh.max_pct_away if wh.max_pct_away is defined else 0) %}
+      {% set max_pct_back = (wh.max_pct_back if wh.max_pct_back is defined else 0) %}
+
+      {% macro weekday_heatmap(title, kind, counts, color, max_pct) -%}
+        {% set vbw = 1000 %}
+        {% set vbh = 240 %}
+        {% set left = 80 %}
+        {% set right = 34 %}
+        {% set axisW = vbw - left - right %}
+        {% set cellW = axisW / bins %}
+        {% set cellH = 18 %}
+        {% set rowGap = 4 %}
+        {% set rowStep = cellH + rowGap %}
+        {% set gridTop = 28 %}
+        {% set yAxis = gridTop + 7 * rowStep + 8 %}
+        {% set denom = (max_pct if max_pct and max_pct > 0 else 1) %}
+        <div class="card">
+          <h2>{{ title }}</h2>
+          <div class="chart-wrap">
+            <svg class="chart chart-weekday" width="100%" height="240" viewBox="0 0 {{ vbw }} {{ vbh }}" preserveAspectRatio="none" data-unstretch-text="1">
+              <rect x="0" y="0" width="{{ vbw }}" height="{{ vbh }}" rx="8" fill="#11151d" />
+
+              <line x1="{{ left }}" y1="{{ yAxis }}" x2="{{ vbw - right }}" y2="{{ yAxis }}" stroke="#444" />
+              {% for h in range(6, 25) %}
+                {% set x0 = left + ((h - 6) / 18.0) * axisW %}
+                {% set x = x0 %}
+                {% set anchor = 'middle' %}
+                {% if h == 6 %}
+                  {% set anchor = 'start' %}
+                  {% set x = left + 2 %}
+                {% elif h == 24 %}
+                  {% set anchor = 'end' %}
+                  {% set x = (vbw - right - 2) %}
+                {% endif %}
+                <line x1="{{ x0 }}" y1="{{ yAxis }}" x2="{{ x0 }}" y2="{{ yAxis + 6 }}" stroke="#2a2f40" />
+                {% if (h % 2) == 0 %}
+                  <text class="axis-label" x="{{ x }}" y="{{ yAxis + 22 }}" text-anchor="{{ anchor }}" fill="#a8adc0">{{ '%02d'|format(h) }}</text>
+                {% endif %}
+              {% endfor %}
+
+              {% for wd in range(7) %}
+                {% set y = gridTop + wd * rowStep %}
+                <text class="axis-label" x="{{ left - 10 }}" y="{{ y + (cellH/2) + 4 }}" text-anchor="end" fill="#a8adc0">{{ weekday_labels[wd] }}</text>
+                {% for i in range(bins) %}
+                  {% set x = left + i * cellW %}
+                  {% set c = (counts[wd][i] if counts and wd < (counts|length) and i < (counts[wd]|length) else 0) %}
+                  {% set dcount = (weekday_day_counts[wd] if weekday_day_counts and wd < (weekday_day_counts|length) else 0) %}
+                  {% set pct = (c / dcount) if dcount and dcount > 0 else 0 %}
+                  {% set scaled = (pct / denom) if denom and denom > 0 else 0 %}
+                  {% set op = (0.10 + 0.90 * scaled) if c > 0 else 0.08 %}
+                  {% set start_min = start_offset + i * bin_minutes %}
+                  {% set end_min = start_min + bin_minutes %}
+                  {% set sh = (start_min // 60) %}
+                  {% set sm = (start_min % 60) %}
+                  {% set eh = (end_min // 60) %}
+                  {% set em = (end_min % 60) %}
+                  <rect x="{{ x }}" y="{{ y }}" width="{{ cellW }}" height="{{ cellH }}" fill="{{ color }}" opacity="{{ '%.3f'|format(op) }}" stroke="#2a2f40" stroke-width="0.5">
+                    <title>{{ weekday_labels[wd] }} {{ '%02d:%02d'|format(sh, sm) }}–{{ '%02d:%02d'|format(eh, em) }} {{ kind }}: {{ c }}/{{ dcount }} days ({{ '%.1f'|format(100.0*pct) }}%)</title>
+                  </rect>
+                {% endfor %}
+              {% endfor %}
+
+              <rect x="{{ left }}" y="{{ gridTop }}" width="{{ axisW }}" height="{{ 7 * rowStep - rowGap }}" fill="none" stroke="#1d2030" stroke-width="1" />
+            </svg>
+          </div>
+          <div class="chart-legend">
+            <ul>
+              <li class="legend-item">Max cell: <strong>{{ '%.1f'|format(100.0*max_pct) }}%</strong> (per weekday)</li>
+            </ul>
+          </div>
+          <p class="muted">Brighter = higher % of days (within that weekday) with at least one event in that time window.</p>
+        </div>
+      {%- endmacro %}
+
+      {{ weekday_heatmap('Away by Weekday', 'away', away_counts, away_color, max_pct_away) }}
+      {{ weekday_heatmap('Back by Weekday', 'back', back_counts, back_color, max_pct_back) }}
+    </section>
+
+    {% else %}
+      <section class="card">
+        <h2>No log files found</h2>
+        <p>Ensure logs are in the directory and named like <code>video_processor.log</code> or <code>video_processor_YYYY-MM-DD.log</code>.</p>
+      </section>
+    {% endif %}
+
+  </main>
+
+  <script>
+    (function(){
+      function unstretchSvgText(svg){
+        if (!svg || !svg.viewBox || !svg.viewBox.baseVal) return;
+        var mode = (svg.getAttribute('data-unstretch-text') || '1').toLowerCase();
+        var vb = svg.viewBox.baseVal;
+        var vbw = vb.width || 0;
+        var vbh = vb.height || 0;
+        if (!vbw || !vbh) return;
+
+        var rect = svg.getBoundingClientRect();
+        var renderW = rect.width;
+        var renderH = rect.height;
+        if (!renderW || !renderH) return;
+
+        var sx = renderW / vbw;
+        var sy = renderH / vbh;
+        if (!sx || !sy) return;
+
+        // If size hasn't changed, skip work.
+        var last = svg.dataset && svg.dataset.lastStretch;
+        var cur = sx.toFixed(4) + ',' + sy.toFixed(4);
+        if (last === cur) return;
+        if (svg.dataset) svg.dataset.lastStretch = cur;
+
+        var k;
+        if (mode === 'y') {
+          k = sx / sy;
+        } else {
+          // default: fix horizontal squish by scaling x to match y
+          k = sy / sx;
+        }
+        if (!isFinite(k) || k <= 0) return;
+
+        var texts = svg.querySelectorAll('text.axis-label, text.bar-label');
+        texts.forEach(function(t){
+          if (!t.dataset.baseTransform) {
+            t.dataset.baseTransform = t.getAttribute('transform') || '';
+          }
+          var xAttr = t.getAttribute('x');
+          var yAttr = t.getAttribute('y');
+          var x = xAttr ? parseFloat(xAttr) : 0;
+          var y = yAttr ? parseFloat(yAttr) : 0;
+          if (!isFinite(x) || !isFinite(y)) { x = 0; y = 0; }
+
+          var base = t.dataset.baseTransform;
+          var fix;
+          if (mode === 'y') {
+            // Fix vertical stretch by scaling y to match x
+            fix = 'translate(' + x + ' ' + y + ') scale(1 ' + k + ') translate(' + (-x) + ' ' + (-y) + ')';
+          } else {
+            fix = 'translate(' + x + ' ' + y + ') scale(' + k + ' 1) translate(' + (-x) + ' ' + (-y) + ')';
+          }
+          t.setAttribute('transform', (base ? (base + ' ') : '') + fix);
+        });
+      }
+
+      function applyLegendChipColors(){
+        document.querySelectorAll('.legend-chip[data-color]').forEach(function(el){
+          try {
+            if (el.dataset && el.dataset.color) {
+              el.style.background = el.dataset.color;
+            }
+          } catch (e) {}
+        });
+      }
+
+      function runUnstretch(){
+        document.querySelectorAll('svg[data-unstretch-text]').forEach(unstretchSvgText);
+      }
+
+      var scheduled = false;
+      function scheduleRun(){
+        if (scheduled) return;
+        scheduled = true;
+        window.requestAnimationFrame(function(){
+          scheduled = false;
+          runUnstretch();
+        });
+      }
+
+      function run(){
+        applyLegendChipColors();
+        scheduleRun();
+
+        // Mobile layouts can settle after initial paint (address bar, viewport).
+        setTimeout(scheduleRun, 50);
+        setTimeout(scheduleRun, 200);
+        setTimeout(scheduleRun, 600);
+
+        // Re-run once fonts are ready (if supported).
+        try {
+          if (document.fonts && document.fonts.ready) {
+            document.fonts.ready.then(scheduleRun).catch(function(){});
+          }
+        } catch (e) {}
+
+        // Observe SVG size changes (more reliable than window.resize).
+        try {
+          if (window.ResizeObserver) {
+            var ro = new ResizeObserver(function(){
+              scheduleRun();
+            });
+            document.querySelectorAll('svg[data-unstretch-text]').forEach(function(svg){
+              try { ro.observe(svg); } catch (e) {}
+            });
+          }
+        } catch (e) {}
+      }
+
+      if (document.readyState === 'loading') {
+        document.addEventListener('DOMContentLoaded', run);
+      } else {
+        run();
+      }
+      window.addEventListener('resize', function(){
+        window.requestAnimationFrame(scheduleRun);
+      });
+
+      // visualViewport catches mobile address bar / zoom changes.
+      try {
+        if (window.visualViewport) {
+          window.visualViewport.addEventListener('resize', scheduleRun);
+          window.visualViewport.addEventListener('scroll', scheduleRun);
+        }
+      } catch (e) {}
+    })();
+  </script>
+</body>
+</html>

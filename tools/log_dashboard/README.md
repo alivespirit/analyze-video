@@ -4,19 +4,38 @@ A lightweight FastAPI server that parses your application logs and serves a simp
 
 ## Features
 
-- Per-day log viewer with: timestamp, severity, video basename, message
-- Filters: Severity and Status (e.g., `no_motion`, `gate_crossing`, `no_significant_motion`, `error`)
- - Filters: Severity (single-select), Gate (up/down/both), and Status (multi-select)
-- Status Counts tile shows totals and (when filtered) filtered vs total for the day
+- Per-day log viewer (`/today`, `/day/{YYYY-MM-DD}`) with: timestamp, severity, video basename, message
+- Filters:
+	- Severity (single-select)
+	- Status (multi-select, comma-separated in the URL like `status=no_motion,gate_crossing`)
+	- Gate direction (up/down). Videos detected as `both` match both filters.
+	- Video (click a video name in logs to filter by it, or use `video=<basename>`)
+- Status Counts tile shows totals for the whole day and, when filtered, shows filtered vs total video count
+- Gate Crossings tile shows up/down counts and a compact Away/Back interval list (when present)
 - Per-Video Summary (collapsible):
 	- Start time: first "New file detected" timestamp (HH:MM:SS)
 	- Status, raw events, processing time (prefers Motion Detection time, falls back to Full Processing time)
+	- Optional chips for gate direction, away/back reaction state, and ReID results (when present in logs)
 - Processing Times Chart:
 	- Bars evenly spaced across full width (one per video)
 	- Bar colors by status with a compact legend
 	- Click a bar to jump to the first corresponding log entry
+	- Hour boundary separators + labels when the next video starts in a new hour
 - Readable log list with stable, per-video colors for quick visual grouping
 - “Available Days” page lists today first, then the rest in descending order
+
+### Stats page (`/stats`)
+
+The Stats page aggregates across all discovered log files (current + rotated) and shows:
+
+- **Events (Away/Back) by Time of Day**: a 06:00–24:00 heatmap.
+	- 15-minute bins.
+	- Intensity represents the **% of days** that had at least one Away/Back event in that time window.
+	- Includes an hourly marginal strip summarizing how often events happen per hour.
+- **Total Unique Videos** per day as stacked bars by final status (includes an `unknown` bucket when needed so totals match).
+- **Average Motion Detection Time** per day.
+- **Average Full Processing Time** per day.
+- **Away by Weekday** and **Back by Weekday** heatmaps (hourly bins, normalized within each weekday as % of days).
 
 ### Video Playback
 
@@ -34,7 +53,7 @@ Requirements:
 ### Chart Hour Boundaries
 
 - Hour separators are drawn between bars when the next video’s hour differs from the current one.
-- Separators use dashed styling for clarity and include small hour labels (e.g., `02h`).
+- Separators use dashed styling for clarity and include small hour labels (e.g., `2h`).
 
 ### Collapsible State Persistence
 
@@ -50,7 +69,8 @@ Requirements:
 - Status is multi-select: toggle badges or click legend items to add/remove statuses. The query uses a single CSV param like `status=no_motion,gate_crossing`.
 - Counts remain full-day while filtering; the Status Counts tile always shows totals for all statuses.
 - Gate filter supports `up` and `down`, with `both` counted in both directions when present.
-- The header shows "Filtered videos" when any filter is active; a small Clear control appears there and resets all filters back to the full day view.
+- You can filter to a single video via `video=<basename>` (also available by clicking a video in the log list).
+- The header shows "Filtered videos" when any filter is active; a Clear control resets all filters back to the full day view.
 
 ## Run
 
@@ -97,7 +117,8 @@ When `ENABLE_LOG_DASHBOARD` is true, `main.py` starts the dashboard in a backgro
 
 - `no_motion`: slate
 - `no_significant_motion`: amber
-- `significant_motion`: violet
+- `no_person`: yellow
+- `significant_motion`: blue
 - `gate_crossing`: green
 - `error`: red
 

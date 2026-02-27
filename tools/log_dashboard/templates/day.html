@@ -12,6 +12,7 @@
       <h1>{{ day }}</h1>
       <nav>
         <a class="nav-btn" href="{% if is_today_route %}/today{% else %}/day/{{ day }}{% endif %}" title="Home">Home</a>
+        <a class="nav-btn" href="/stats" title="Stats">Stats</a>
         <a class="nav-btn" href="/" title="All Days">All Days</a>
       </nav>
     </div>
@@ -199,7 +200,7 @@
         {% set y_avg = yBottom - (avgv / denom) * plotH %}
         {% set y_min = yBottom - (minv / denom) * plotH %}
         <div class="chart-wrap">
-          <svg class="chart" width="100%" height="260" viewBox="0 0 {{ vbw }} {{ vbh }}" preserveAspectRatio="xMinYMin meet">
+          <svg class="chart" width="100%" height="260" viewBox="0 0 {{ vbw }} {{ vbh }}" preserveAspectRatio="none">
             <!-- Axis -->
             <line x1="{{ left }}" y1="{{ yBottom }}" x2="{{ vbw - right }}" y2="{{ yBottom }}" stroke="#444" />
             <line x1="{{ left }}" y1="{{ yTop }}" x2="{{ left }}" y2="{{ yBottom }}" stroke="#444" />

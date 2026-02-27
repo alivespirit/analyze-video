@@ -233,7 +233,7 @@ class NetworkErrorFilter(logging.Filter):
 log_formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s', datefmt='%Y-%m-%d %H:%M:%S')
 log_file = os.path.join(LOG_PATH, "video_processor.log")
 file_handler = CustomTimedRotatingFileHandler(
-    log_file, when="midnight", interval=1, backupCount=30, encoding='utf8', utc=False
+    log_file, when="midnight", interval=1, backupCount=60, encoding='utf8', utc=False
 )
 file_handler.setFormatter(log_formatter)
 file_handler.setLevel(logging.INFO)
@@ -312,7 +312,6 @@ from detect_motion import detect_motion
 from telegram_notification import button_callback, send_notifications, reaction_callback, cleanup_temp_media
 from path_utils import parse_datetime_from_path
 import re
-
 
 # Initialize the Application
 try:

@@ -126,7 +126,7 @@ def analyze_video(motion_result, video_path):
     # -----------------------------------------
 
     # --- Skip Gemini analysis during off-peak hours to keep under rate limits ---
-    if now.hour < 9 or now.hour > 18:
+    if now.hour < 9 or now.hour > 19:
         logger.info(f"[{file_basename}] Skipping Gemini analysis (off-peak hours).")
         if detected_motion_status == "error":
             return {'response': timestamp + "\U0001F4A2 Шось неясно", 'insignificant_frames': motion_result['insignificant_frames'], 'clip_path': None}

@@ -252,16 +252,31 @@ pip install -r requirements.txt
 
 A lightweight web dashboard that reads existing log files and provides per-day insights and a readable log viewer.
 
+- Routes:
+   - `/` lists all available days (today first)
+   - `/today` shows today (or latest available) with filters
+   - `/day/{YYYY-MM-DD}` shows a specific day with filters
+   - `/stats` shows aggregated stats across all log days
 - Per-day views: timestamp, severity, video basename, message
-- Filters: Severity and Status (`no_motion`, `gate_crossing`, `no_significant_motion`, `error`)
- - Filters: Severity (single), Gate (up/down/both), and Status (multi-select)
-- Status Counts with totals and filtered counts
-- Collapsible Per-Video Summary: Start time (first “New file detected”), status, raw events, processing time (prefers motion detection; falls back to full processing)
-- Processing Times Chart: evenly spaced bars, colored by status, with min/avg/max guide lines and right-aligned axis labels; bars are clickable to jump to logs
-- Status-based colors everywhere: filename colors in logs match the chart’s status families with deterministic shade variations; status badges use the same colors
-- Quick access: `/today` route renders the latest day directly
-- Responsive UX: stacked log entries on mobile and floating up/down buttons (visible on mobile and desktop)
-- “Available Days” page shows today first, then past days in descending order
+- Filters:
+   - Severity (single-select)
+   - Status (multi-select, CSV in the URL like `status=no_motion,gate_crossing`)
+   - Gate direction (up/down). Videos detected as `both` match both filters.
+   - Video (via `video=<basename>` or by clicking a video in the logs)
+- Status Counts with totals and filtered vs total video count
+- Gate Crossings tile with up/down counts and a compact Away/Back interval list (when present)
+- Collapsible Per-Video Summary: start time, status, raw events, processing time + optional chips (gate direction, away/back reaction state, ReID results when present)
+- Processing Times Chart: evenly spaced bars, colored by status, with min/avg/max guide lines; bars are clickable to jump to logs; hour boundaries are marked
+- Responsive UX: stacked log entries on mobile and floating up/down buttons on mobile
+
+### Stats page (`/stats`)
+
+Aggregated view across all discovered log files (current + rotated):
+
+- Events heatmaps for Away/Back by time-of-day (06:00–24:00) and by weekday
+- Total Unique Videos per day (stacked by status, including `unknown` when needed)
+- Average Motion Detection time per day
+- Average Full Processing time per day
 
 ### Video Playback
 
@@ -279,7 +294,7 @@ A lightweight web dashboard that reads existing log files and provides per-day i
 ### Chart Hour Boundaries
 
 - Hour separators are drawn between bars when the next video’s hour differs from the current one.
-- Separators use dashed styling and include small hour labels (e.g., `02h`) for clarity.
+- Separators use dashed styling and include small hour labels (e.g., `2h`) for clarity.
 
 ### Collapsible State Persistence
 

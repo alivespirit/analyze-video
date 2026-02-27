@@ -192,7 +192,7 @@ RES_CONFIGS = {
         "CROP_PADDING": 60,
         "TRACK_ROI_PADDING": 20,
         "REID_LINE_EXTRA_TOLERANCE": 40,
-        "REID_CROP_PADDING": 24,
+        "REID_CROP_PADDING": 16,
         "MIN_CONTOUR_AREA": 7200,  # 4x area
         # Tesla hotspot (x, y) scaled for 4K framing
         "TESLA_HOTSPOT": (2300, 900),
