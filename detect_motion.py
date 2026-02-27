@@ -91,6 +91,12 @@ MIN_INSIGNIFICANT_EVENT_DURATION_SECONDS = 0.2 # Events shorter than this are di
 # > TRACK_SKIP_FROM_SECONDS: track every 2nd frame, render every 2nd frame (legacy behavior)
 TRACK_FULL_UNTIL_SECONDS = 6.0
 TRACK_SKIP_FROM_SECONDS = 12.0
+
+# Fast-processing overrides (used when backlog is high)
+FAST_MOTION_STRIDE = int(os.getenv("FAST_MOTION_STRIDE", "3"))
+FAST_TRACK_FULL_UNTIL_SECONDS = float(os.getenv("FAST_TRACK_FULL_UNTIL_SECONDS", "4"))
+FAST_TRACK_SKIP_FROM_SECONDS = float(os.getenv("FAST_TRACK_SKIP_FROM_SECONDS", "8"))
+
 SAVE_INSIGNIFICANT_FRAMES = True
 SEND_INSIGNIFICANT_FRAMES = False
 PERSON_MIN_FRAMES = 10 # Minimum frames with person inside ROI to consider event significant, if less then sent to Gemini for analysis
@@ -641,7 +647,7 @@ def bbox_diag(b):
     return (w * w + h * h) ** 0.5
 
 
-def detect_motion(input_video_path, output_dir):
+def detect_motion(input_video_path, output_dir, fast_processing: bool = False):
     """
     Analyzes a video file for motion, identifies significant events, and uses an object tracker.
 
@@ -657,12 +663,21 @@ def detect_motion(input_video_path, output_dir):
     Args:
         input_video_path (str): The path to the input .mp4 video file.
         output_dir (str): The directory to save generated clips and frames.
+        fast_processing (bool): If True, use more aggressive stride/thresholds to reduce CPU time.
 
     Returns:
         dict: A dictionary containing the analysis status ('significant_motion', 'no_motion', etc.),
               path to the generated clip, paths to insignificant frames, and detected object counts.
     """
     file_basename = os.path.basename(input_video_path)
+    fast_processing = bool(fast_processing)
+
+    # Per-call tracking thresholds (avoid mutating module-level constants)
+    track_full_until_seconds = FAST_TRACK_FULL_UNTIL_SECONDS if fast_processing else TRACK_FULL_UNTIL_SECONDS
+    track_skip_from_seconds = FAST_TRACK_SKIP_FROM_SECONDS if fast_processing else TRACK_SKIP_FROM_SECONDS
+    if track_skip_from_seconds < track_full_until_seconds:
+        # Ensure sane ordering even if env vars are misconfigured
+        track_skip_from_seconds = track_full_until_seconds
 
     # Open video first to detect resolution and choose ROI config accordingly
     cap = cv2.VideoCapture(input_video_path)
@@ -756,6 +771,12 @@ def detect_motion(input_video_path, output_dir):
         md_scale = 1.0
         motion_stride = 1
         output_size = (orig_w, orig_h)
+
+    if fast_processing:
+        try:
+            motion_stride = max(int(motion_stride), int(FAST_MOTION_STRIDE))
+        except Exception:
+            motion_stride = int(motion_stride) if str(motion_stride).isdigit() else 3
 
     # Optional profiling/knobs
     # - MOTION_PRETRAIN_SECONDS=5 (default). Set to 0 to disable pretraining.
@@ -1438,7 +1459,7 @@ def detect_motion(input_video_path, output_dir):
     # Process each event separately and include only those with person inside ROI for >= PERSON_MIN_FRAMES
     for clip_index, (start_frame, end_frame) in enumerate(significant_sub_clips):
         duration_seconds = (end_frame - start_frame) / fps
-        is_long_motion = duration_seconds > TRACK_FULL_UNTIL_SECONDS
+        is_long_motion = duration_seconds > track_full_until_seconds
         padding_seconds_adjusted = 1 if is_long_motion else PADDING_SECONDS
         padded_start = max(0, start_frame - int(padding_seconds_adjusted * fps))
         padded_end = min(total_frames, end_frame + int(padding_seconds_adjusted * fps))
@@ -1448,10 +1469,10 @@ def detect_motion(input_video_path, output_dir):
             padded_start = 0
 
         # Decide per-event tracking and rendering stride
-        if duration_seconds <= TRACK_FULL_UNTIL_SECONDS:
+        if duration_seconds <= track_full_until_seconds:
             tracker_stride = 1
             output_stride = 1
-        elif duration_seconds <= TRACK_SKIP_FROM_SECONDS:
+        elif duration_seconds <= track_skip_from_seconds:
             tracker_stride = 1
             output_stride = 2
         else:

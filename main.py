@@ -57,8 +57,11 @@ class MainScriptChangeHandler(FileSystemEventHandler):
             return
 
         changed_path = os.path.abspath(event.src_path)
-        # Only react to .py files directly under SCRIPT_DIR (non-recursive)
-        if os.path.dirname(changed_path) == self.watch_dir and changed_path.endswith('.py'):
+        # React to .py files directly under SCRIPT_DIR or under SCRIPT_DIR/tools/log_dashboard (non-recursive in both)
+        log_dashboard_dir = os.path.join(self.watch_dir, "tools", "log_dashboard")
+        is_main_dir_py = os.path.dirname(changed_path) == self.watch_dir and changed_path.endswith('.py')
+        is_log_dashboard_py = os.path.dirname(changed_path) == os.path.abspath(log_dashboard_dir) and changed_path.endswith('.py')
+        if is_main_dir_py or is_log_dashboard_py:
             logger.info(f"Detected change in {changed_path}. Initiating graceful restart...")
             global RESTART_REQUESTED
             RESTART_REQUESTED = True
@@ -347,6 +350,51 @@ except Exception as e:
      exit(1)
 
 
+# --- Motion queue depth tracking (for adaptive fast-processing) ---
+# ThreadPoolExecutor doesn't expose its queue size as public API; we track it ourselves.
+# Depth includes the currently running item (if any) plus all waiting submissions.
+MOTION_QUEUE_FAST_THRESHOLD = int(os.getenv("MOTION_QUEUE_FAST_THRESHOLD", "10"))
+# Hysteresis thresholds (preferred). If not set, fall back to MOTION_QUEUE_FAST_THRESHOLD.
+MOTION_QUEUE_FAST_ENTER_THRESHOLD = int(
+    os.getenv("MOTION_QUEUE_FAST_ENTER_THRESHOLD", str(MOTION_QUEUE_FAST_THRESHOLD))
+)
+MOTION_QUEUE_FAST_EXIT_THRESHOLD = int(
+    os.getenv("MOTION_QUEUE_FAST_EXIT_THRESHOLD", str(max(0, MOTION_QUEUE_FAST_ENTER_THRESHOLD - 3)))
+)
+MOTION_QUEUE_DEPTH_LOCK = threading.Lock()
+MOTION_QUEUE_DEPTH = 0
+MOTION_FAST_MODE_ENABLED = False
+
+
+def motion_queue_dec() -> int:
+    global MOTION_QUEUE_DEPTH
+    global MOTION_FAST_MODE_ENABLED
+    with MOTION_QUEUE_DEPTH_LOCK:
+        MOTION_QUEUE_DEPTH = max(0, int(MOTION_QUEUE_DEPTH) - 1)
+        if MOTION_FAST_MODE_ENABLED and int(MOTION_QUEUE_DEPTH) <= int(MOTION_QUEUE_FAST_EXIT_THRESHOLD):
+            MOTION_FAST_MODE_ENABLED = False
+        return int(MOTION_QUEUE_DEPTH)
+
+
+def motion_queue_inc_and_decide_fast() -> tuple[int, bool]:
+    """Increment motion queue depth and decide if this task should use fast processing.
+
+    Uses hysteresis:
+      - enable fast mode when queue depth (before increment) >= ENTER threshold
+      - disable fast mode when queue depth drops to <= EXIT threshold (handled in motion_queue_dec)
+    """
+    global MOTION_QUEUE_DEPTH
+    global MOTION_FAST_MODE_ENABLED
+    with MOTION_QUEUE_DEPTH_LOCK:
+        queue_before = int(MOTION_QUEUE_DEPTH)
+        if not MOTION_FAST_MODE_ENABLED and int(MOTION_QUEUE_FAST_ENTER_THRESHOLD) > 0 and queue_before >= int(MOTION_QUEUE_FAST_ENTER_THRESHOLD):
+            MOTION_FAST_MODE_ENABLED = True
+
+        fast = bool(MOTION_FAST_MODE_ENABLED)
+        MOTION_QUEUE_DEPTH = queue_before + 1
+        return int(MOTION_QUEUE_DEPTH), fast
+
+
 # --- FileHandler (uses executor) ---
 class FileHandler(FileSystemEventHandler):
     def __init__(self, loop, app):
@@ -398,7 +446,7 @@ class FileHandler(FileSystemEventHandler):
         # This function is replaced with the new logic
         file_path = event.src_path
         file_basename = os.path.basename(file_path)
-        # Build timestamp text like "HHHMM" for buttons, robust to legacy/new formats
+        # Build timestamp text like "HHHMMM" for buttons, robust to legacy/new formats
         dt = None
         try:
             dt = parse_datetime_from_path(file_path)
@@ -436,16 +484,31 @@ class FileHandler(FileSystemEventHandler):
             self.logger.error(f"[{file_basename}] Error waiting for file stability: {e_wait}", exc_info=True)
             return
 
+        fast_processing = False
+        queue_depth = None
         try:
             current_loop = asyncio.get_running_loop()
-            update_processing_ledger(file_path, "started", {"start_ts": time.time()})
+            queue_depth, fast_processing = motion_queue_inc_and_decide_fast()
+            update_processing_ledger(
+                file_path,
+                "started",
+                {"start_ts": time.time(), "fast_processing": fast_processing, "motion_queue_depth": queue_depth},
+            )
             
             # --- REFACTORED: Run motion detection and Gemini analysis in separate executors ---
             # 1. Run CPU-bound motion detection in the single-worker executor.
-            self.logger.info(f"[{file_basename}] Queuing motion detection...")
-            motion_result = await current_loop.run_in_executor(
-                motion_executor, detect_motion, file_path, TEMP_DIR
+            self.logger.info(
+                f"[{file_basename}] Queuing motion detection... (motion_queue_depth={queue_depth}, fast_processing={fast_processing})"
             )
+            try:
+                motion_future = current_loop.run_in_executor(
+                    motion_executor, detect_motion, file_path, TEMP_DIR, fast_processing
+                )
+            except Exception:
+                motion_queue_dec()
+                raise
+            motion_future.add_done_callback(lambda _f: motion_queue_dec())
+            motion_result = await motion_future
             self.logger.info(f"[{file_basename}] Motion detection complete. Status: {motion_result.get('status')}")
 
             # 2. Run I/O-bound Gemini analysis in the multi-worker executor.
@@ -476,6 +539,10 @@ class FileHandler(FileSystemEventHandler):
                     video_response += "\n_I don't feel so good, Mr.Stark. I don't want to go..._ \U0001F622"
             else:
                 video_response += f"\n\U0001F50B *{battery.percent}% ~{battery_time_left}*"
+
+        # Visibility: mark fast-processed videos in Telegram message
+        if fast_processing:
+            video_response += " \U0001F680"
 
         try:
             await send_notifications(self.app, video_response, insignificant_frames, clip_path, file_path, file_basename, timestamp_text, preserve_media_on_failure=True, allow_plain_fallback=False)
