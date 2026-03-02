@@ -336,8 +336,9 @@
               </td>
               {% set col = status_colors.get(st, '#3b82f6') %}
               {% set tcol = status_text_colors.get(st, '#ffffff') %}
+              {% set is_fast = fast_processing_per_video_all and fast_processing_per_video_all.get(vid) %}
               <td>
-                <span class="tag status-chip" style="background: {{ col }}; color: {{ tcol }}" aria-label="{{ st }}" title="{{ st }}">
+                <span class="tag status-chip{% if is_fast %} fast-processing{% endif %}" style="background: {{ col }}; color: {{ tcol }}" aria-label="{{ st }}" title="{{ st }}{% if is_fast %} (fast_processing){% endif %}">
                   {{ st }}
                   {% set gdir = metrics.gate_direction_per_video.get(vid) %}
                   {% if gdir %}

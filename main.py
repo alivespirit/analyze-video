@@ -60,7 +60,7 @@ class MainScriptChangeHandler(FileSystemEventHandler):
         # React to .py files directly under SCRIPT_DIR or under SCRIPT_DIR/tools/log_dashboard (non-recursive in both)
         log_dashboard_dir = os.path.join(self.watch_dir, "tools", "log_dashboard")
         is_main_dir_py = os.path.dirname(changed_path) == self.watch_dir and changed_path.endswith('.py')
-        is_log_dashboard_py = os.path.dirname(changed_path) == os.path.abspath(log_dashboard_dir) and changed_path.endswith('.py')
+        is_log_dashboard_py = os.path.dirname(changed_path) == log_dashboard_dir and changed_path.endswith('.py')
         if is_main_dir_py or is_log_dashboard_py:
             logger.info(f"Detected change in {changed_path}. Initiating graceful restart...")
             global RESTART_REQUESTED
@@ -542,7 +542,7 @@ class FileHandler(FileSystemEventHandler):
 
         # Visibility: mark fast-processed videos in Telegram message
         if fast_processing:
-            video_response += " \U0001F680"
+            video_response += " \u26A1\uFE0F"
 
         try:
             await send_notifications(self.app, video_response, insignificant_frames, clip_path, file_path, file_basename, timestamp_text, preserve_media_on_failure=True, allow_plain_fallback=False)

@@ -37,6 +37,8 @@ RAW_EVENTS_RE = re.compile(r"Found (?P<count>\d+) raw motion event\(s\)")
 MD_TIME_RE = re.compile(r"Motion detection took (?P<seconds>[0-9]+\.[0-9]+|[0-9]+) seconds")
 GATE_RE = re.compile(r"Gate crossing detected! Direction: (?P<dir>up|down|both)")
 NEW_FILE_RE = re.compile(r"^New file detected:")
+# From main.py: "Queuing motion detection... (motion_queue_depth=..., fast_processing=True/False)"
+FAST_PROCESSING_RE = re.compile(r"fast_processing=(?P<val>True|False)")
 AWAY_RE = re.compile(r"Reaction detected: object went away")
 BACK_RE = re.compile(r"Reaction detected: object came back")
 REACTION_REMOVED_RE = re.compile(r"Reaction removed\.")
@@ -225,6 +227,8 @@ def collect_metrics(entries: List[Dict]) -> Dict:
     gate_counts = {"up": 0, "down": 0}
     gate_direction_per_video: Dict[str, str] = {}
     first_seen_ts_per_video: Dict[str, datetime] = {}
+    # Fast-processing mode (per video)
+    fast_processing_per_video: Dict[str, bool] = {}
     # Away/back reaction events and latest reaction state per video
     away_back_events: List[Dict] = []
     reaction_state_per_video: Dict[str, Optional[str]] = {}
@@ -253,6 +257,12 @@ def collect_metrics(entries: List[Dict]) -> Dict:
             # First seen timestamp from "New file detected"
             if NEW_FILE_RE.search(content) and vid not in first_seen_ts_per_video:
                 first_seen_ts_per_video[vid] = e["ts"]
+
+            # Fast-processing marker from queue log
+            m = FAST_PROCESSING_RE.search(content)
+            if m and m.group("val") == "True":
+                # If it was ever True for this video, treat it as fast-processing.
+                fast_processing_per_video[vid] = True
 
             m = RAW_EVENTS_RE.search(content)
             if m:
@@ -379,6 +389,7 @@ def collect_metrics(entries: List[Dict]) -> Dict:
         "gate_counts": gate_counts,
         "gate_direction_per_video": gate_direction_per_video,
         "first_seen_ts_per_video": first_seen_ts_per_video,
+        "fast_processing_per_video": fast_processing_per_video,
         "videos_total": len({v for v in status_per_video.keys()} | {v for v in full_time_per_video.keys()} | {v for v in raw_events_per_video.keys()}),
         "away_back_events": away_back_events,
         # Latest reaction state after processing entire day
@@ -1145,6 +1156,7 @@ def today_view(
         play=play,
         video_src=video_src,
             status_counts_all=metrics_all.get("status_counts", {}),
+        fast_processing_per_video_all=metrics_all.get("fast_processing_per_video", {}),
         away_intervals=away_intervals,
         hhmmss_per_video=hhmmss_per_video,
         mmss_per_video=mmss_per_video,
@@ -1246,6 +1258,7 @@ def day_view(
         play=play,
         video_src=video_src,
             status_counts_all=metrics_all.get("status_counts", {}),
+        fast_processing_per_video_all=metrics_all.get("fast_processing_per_video", {}),
         away_intervals=away_intervals,
         hhmmss_per_video=hhmmss_per_video,
         mmss_per_video=mmss_per_video,
