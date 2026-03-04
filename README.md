@@ -1,4 +1,4 @@
-# Analyze Video Bot
+# Analyze Video Bot (Споглядайко)
 
 This project is a Python-based application that monitors a folder for new video files, analyzes them for motion and objects, generates descriptions with the Gemini AI platform, and sends results to a Telegram chat. It's designed for surveillance footage, featuring object detection/tracking with a custom-trained YOLOv12 model (exported to OpenVINO), gate crossing alerts, optional Tesla integration, dynamic AI model selection, and restart recovery.
 
