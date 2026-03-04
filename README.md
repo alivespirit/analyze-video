@@ -8,14 +8,19 @@ This project is a Python-based application that monitors a folder for new video 
 
 - **Folder Monitoring**: Automatically processes new `.mp4` files in a specified folder using `watchdog`.
 - **Intelligent Video Analysis (OpenCV & YOLOv12)**:
+   - **Cropped ROI Analysis**: Performs motion detection on a smaller, padded region around the ROI for better performance.
    - **Object Detection & Tracking**: Uses a custom-trained YOLOv12 model exported to OpenVINO (loaded via the Ultralytics `YOLO` wrapper) to detect and track objects like people and cars, assigning them stable IDs. The model has been trained on footage from a wide-angle camera located on a second floor, enabling it to more accurately identify distorted objects.
   - **Gate Crossing Detection**: Identifies and sends a special notification when a person crosses a predefined horizontal line in the frame, indicating entry or exit.
-  - **Cropped ROI Analysis**: Performs analysis on a smaller, padded region around the ROI for better performance.
+  - **False-Positive Suppression**:
+    - **Car-below-line filter**: Cars whose bounding box extends below the configured gate line (`LINE_Y`) are automatically discarded, reducing impossible detections (e.g., cars appearing to drive underground or through the gate).
+    - **Static person suppression**: Person detections are tracked for movement and confidence. Entities that remain nearly stationary (center drift below threshold) and have low average confidence are suppressed as likely false positives (e.g., snow piles, statues). Suppression is only triggered after a minimum number of updates to avoid premature filtering.
+    - **Probation/trust mechanism**: New person entities start in probation and are drawn for visibility, but do not count toward ROI, crossing, or unique person stats until trusted. Trust is granted if the entity moves enough or accumulates sufficient confidence over time. This prevents static false positives from affecting event logic.
+    - All suppression parameters are configurable in `detect_motion.py` (see "Customization" below).
   - **Smart Event Filtering**: Differentiates between significant, insignificant, and noisy motion events based on duration.
-   - **Highlight Clips**: Generates clips for significant motions with tracked objects and bounding boxes. Uses a CRF-based H.264 writer (libx264, preset=faster, CRF=28, yuv420p, faststart). For 1080p/4K sources, highlight output is written at 1080p.
-   - **Long-Event Speed-Up**: Long events are rendered faster by writing fewer frames (frame skipping) while keeping the output FPS unchanged.
-   - **Insignificant Motion Snapshots**: Can extract a representative frame for brief motion events; sending snapshots to Telegram is optional.
-   - **Low-Resolution Clips (Motion-Only Mode)**: For specific low-res sources (640×360 and 896×512), runs ROI motion detection and generates a highlight at the source resolution (no tracking/ReID).
+  - **Highlight Clips**: Generates clips for significant motions with tracked objects and bounding boxes. Uses a CRF-based H.264 writer (libx264, preset=faster, CRF=28, yuv420p, faststart). For 1080p/4K sources, highlight output is written at 1080p.
+  - **Long-Event Speed-Up**: Long events are rendered faster by writing fewer frames (frame skipping) while keeping the output FPS unchanged.
+  - **Insignificant Motion Snapshots**: Can extract a representative frame for brief motion events; sending snapshots to Telegram is optional.
+  - **Low-Resolution Clips (Motion-Only Mode)**: For specific low-res sources (640×360 and 896×512), runs ROI motion detection and generates a highlight at the source resolution (no tracking/ReID).
 - **Dynamic Gemini AI Analysis**:
   - **Time-Based Model Selection**: Automatically switches between different Gemini models (e.g., Pro vs. Flash) based on the time of day for cost optimization.
   - **Fallback Models**: Includes logic to fall back to secondary and final models if the primary one fails.
@@ -133,6 +138,7 @@ pip install -r requirements.txt
      - `motion_detection_roi`: polygon used for initial motion detection and for deriving the cropped analysis region baseline.
      - `tracker_roi` (optional): polygon defining the tracker’s working area; a padded bounding box around it is used to crop frames for faster tracking (falls back to `motion_detection_roi` if absent).
      - `person_tracker_roi` (optional): polygon filter for person detections; only persons whose bounding-box center lies inside this polygon are counted/tracked.
+     - `line_y` (optional): line for gate crossing detection, if not specified value is taken from constants in `detect_motion.py`.
 
 6. **(Optional) Configure AI Models and Prompts:**
     - Place your custom analysis instructions in `prompt.txt`.
@@ -220,30 +226,47 @@ pip install -r requirements.txt
 - **Prompt:** Edit `prompt.txt` to change the analysis prompt sent to Gemini AI.
 - **AI Models:** Edit `gemini_models.env` to control which Gemini models are used; changes apply without restarting the app.
 - **Motion & Detection Parameters:** Adjust constants in `detect_motion.py` to fine-tune sensitivity. Key knobs:
-  - `LINE_Y`: horizontal line Y position
-  - `LINE_Y_TOLERANCE`: pixel tolerance around the line to suppress jitter near the threshold
-  - `STABLE_MIN_FRAMES`: frames outside tolerance required to accept a side change (hysteresis)
-  - `DWELL_SECONDS`: minimum time on the new side to count mid-event flips; the last flip can be confirmed by final side
-  - `TRACK_FULL_UNTIL_SECONDS`, `TRACK_SKIP_FROM_SECONDS`: speed/quality trade-offs for tracking/rendering long events
-  - `MAX_EVENT_GAP_SECONDS`: max gap between motion frames before splitting into separate events
-  - `MIN_EVENT_DURATION_SECONDS`, `MIN_INSIGNIFICANT_EVENT_DURATION_SECONDS`: event duration filters
-  - `PERSON_MIN_FRAMES`: minimum person-in-ROI frames required to keep an event
-  - `MIN_CONTOUR_AREA`: motion contour area threshold for initial motion detection
-  - `CONF_THRESHOLD`: detection confidence threshold for the YOLO model
-  - `HIGHLIGHT_WINDOW_FRAMES`: frames to keep the red highlight after a crossing
-  - `CROP_PADDING`: extra pixels around ROI for cropped analysis
+  - `LINE_Y`: horizontal line Y position (gate; also used for car-below-line suppression)
+  - `LINE_Y_TOLERANCE`: pixel tolerance around the line to suppress jitter near the threshold (default: 6 for 1080p, 12 for 4K)
+  - `STABLE_MIN_FRAMES`: frames outside tolerance required to accept a side change (hysteresis; default: 2)
+  - `DWELL_SECONDS`: minimum time on the new side to count mid-event flips; the last flip can be confirmed by final side (default: 2.0)
+  - `TRACK_FULL_UNTIL_SECONDS`, `TRACK_SKIP_FROM_SECONDS`: speed/quality trade-offs for tracking/rendering long events (defaults: 6.0, 12.0)
+  - `FAST_MOTION_STRIDE`, `FAST_TRACK_FULL_UNTIL_SECONDS`, `FAST_TRACK_SKIP_FROM_SECONDS`: fast-processing overrides for high-backlog mode (defaults: 3, 4.0, 8.0)
+  - `MAX_EVENT_GAP_SECONDS`: max gap between motion frames before splitting into separate events (default: 3.0)
+  - `MIN_EVENT_DURATION_SECONDS`, `MIN_INSIGNIFICANT_EVENT_DURATION_SECONDS`: event duration filters (defaults: 0.8, 0.2)
+  - `PERSON_MIN_FRAMES`: minimum person-in-ROI frames required to keep an event (default: 10)
+  - `MIN_CONTOUR_AREA`: motion contour area threshold for initial motion detection (default: 1800 for 1080p, 7200 for 4K)
+  - `CONF_THRESHOLD`: detection confidence threshold for the YOLO model (default: 0.45)
+  - `HIGHLIGHT_WINDOW_FRAMES`: frames to keep the red highlight after a crossing (default: 5)
+  - `CROP_PADDING`: extra pixels around ROI for cropped analysis (default: 30 for 1080p, 60 for 4K)
+  - `TRACK_ROI_ENABLED`: enable tracker ROI crop (default: True)
+  - `TRACK_ROI_PADDING`: extra padding for tracker ROI crop (default: 10 for 1080p, 20 for 4K)
+  - `SAVE_INSIGNIFICANT_FRAMES`: whether to save insignificant motion frames (default: True)
+  - `SEND_INSIGNIFICANT_FRAMES`: whether to send insignificant motion frames to Telegram (default: False)
+  - `STATIC_PERSON_MAX_MOVE_PX`: max allowed center drift (pixels) for a person to be considered static (default: 10)
+  - `STATIC_PERSON_MIN_UPDATES`: minimum number of updates before a static person can be suppressed (default: 20)
+  - `STATIC_PERSON_MAX_MEAN_CONF`: max mean confidence for a static person to be suppressed (default: 0.80)
+  - `OBJECT_DETECTION_MODEL_PATH`: path to exported OpenVINO model (default: models/yolo12n_openvino_model)
+  - `COLOR_PERSON`, `COLOR_CAR`, `COLOR_DEFAULT`, `COLOR_HIGHLIGHT`, `COLOR_LINE`: overlay colors (BGR tuples; defaults in code)
+  - `OVERLAY_FONT_SCALE`, `OVERLAY_TEXT_THICKNESS`, `OVERLAY_BOX_THICKNESS`, `OVERLAY_LINE_THICKNESS`, `OVERLAY_LABEL_BG_HEIGHT`, `OVERLAY_PAD_X`, `OVERLAY_PAD_Y`: overlay appearance (resolution-dependent defaults)
+  - `TESLA_EMAIL`, `TESLA_REFRESH_TOKEN`, `TESLA_SOC_FILE`, `TESLA_SOC_CHECK_ENABLED`: Tesla integration parameters (see Tesla section)
 - **ReID Parameters (detect_motion.py):**
   - `REID_ENABLED`: enable/disable person re-identification (default: True)
+  - `REID_MODEL_PATH`: path to Intel ReID model (default: models/reid/intel/person-reidentification-retail-0288/FP16/person-reidentification-retail-0288.xml)
+  - `REID_GALLERY_PATH`: folder with reference images (default: person_of_interest/)
   - `REID_THRESHOLD`: cosine similarity threshold for a positive match (default: 0.6)
   - `REID_SAMPLING_STRIDE`: sample every N frames near the line tolerance (default: 2)
   - `REID_LINE_EXTRA_TOLERANCE`: extra pixels beyond `LINE_Y_TOLERANCE` for ReID sampling (default: 20)
   - `REID_CROP_PADDING`: extra pixels around detected person boxes when creating ReID crops (default: 12)
   - `REID_MAX_SAMPLES`: cap on crops per video to keep inference snappy (default: 128)
   - `SAVE_REID_BEST_CROP`: save the best matching crop when matched (default: True)
-  - `REID_GALLERY_PATH` (env): folder with reference images (default: `person_of_interest/`)
+  - `REID_TOP_K`: number of best, diverse crops to save per event (default: 3)
+  - `REID_DIVERSITY_MIN_DIST`: min cosine distance between selected embeddings (default: 0.2)
+  - `REID_NEGATIVE_GALLERY_PATH`: folder with negative reference images (default: person_of_interest_negative/)
+  - `REID_NEGATIVE_MARGIN`: match must exceed negatives by at least this cosine margin (default: 0.08)
 - **ReID Model Location:** By default, the Intel model XML is expected at `models/reid/intel/person-reidentification-retail-0288/FP16/person-reidentification-retail-0288.xml`. Adjust if your model path differs.
 - **ROI:** Modify `roi-4k.json` / `roi-1080p.json` (or legacy `roi.json`) to change the monitored area.
-- **Object Detection Model:** Replace the contents of the `best_openvino_model` directory with your own exported YOLOv12 OpenVINO model.
+- **Object Detection Model:** Choose pre-trained model between `models/*_openvino_model` or place your own exported YOLOv12 OpenVINO model there and adjust `OBJECT_DETECTION_MODEL_PATH`.
   - Follow instructions in [tools/finetuning/](tools/finetuning/) to train your own model if needed.
 
 ---
