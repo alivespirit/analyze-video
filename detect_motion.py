@@ -97,6 +97,15 @@ FAST_MOTION_STRIDE = int(os.getenv("FAST_MOTION_STRIDE", "3"))
 FAST_TRACK_FULL_UNTIL_SECONDS = float(os.getenv("FAST_TRACK_FULL_UNTIL_SECONDS", "4"))
 FAST_TRACK_SKIP_FROM_SECONDS = float(os.getenv("FAST_TRACK_SKIP_FROM_SECONDS", "8"))
 
+# --- False-positive suppression heuristics ---
+# 1) Cars below LINE_Y are physically impossible in this camera setup.
+#    If any part of a car bbox extends below LINE_Y (y2 > LINE_Y), discard it.
+# 2) Static low-confidence "person" false positives (e.g., snow pile) can flicker in-place.
+#    Suppress a person entity once it has stayed within a small pixel radius while mean conf stays below threshold.
+STATIC_PERSON_MAX_MOVE_PX = int(os.getenv("STATIC_PERSON_MAX_MOVE_PX", "10"))
+STATIC_PERSON_MIN_UPDATES = int(os.getenv("STATIC_PERSON_MIN_UPDATES", "20"))
+STATIC_PERSON_MAX_MEAN_CONF = float(os.getenv("STATIC_PERSON_MAX_MEAN_CONF", "0.80"))
+
 SAVE_INSIGNIFICANT_FRAMES = True
 SEND_INSIGNIFICANT_FRAMES = False
 PERSON_MIN_FRAMES = 10 # Minimum frames with person inside ROI to consider event significant, if less then sent to Gemini for analysis
@@ -109,8 +118,8 @@ TESLA_LAST_CHECK = 0
 TESLA_SOC_CHECK_ENABLED = bool(teslapy and TESLA_REFRESH_TOKEN and TESLA_EMAIL)
 
 # --- Object Detection Configuration ---
-OBJECT_DETECTION_MODEL_PATH = os.getenv("OBJECT_DETECTION_MODEL_PATH", default=os.path.join("models", "best_openvino_model"))
-CONF_THRESHOLD = 0.5
+OBJECT_DETECTION_MODEL_PATH = os.getenv("OBJECT_DETECTION_MODEL_PATH", default=os.path.join("models", "yolo12n_openvino_model"))
+CONF_THRESHOLD = float(os.getenv("CONF_THRESHOLD", "0.45"))
 DETECT_CLASSES = [0, 1]  # 0: person, 1: car
 TRACK_ROI_ENABLED = True  # Enable tracker ROI crop (from roi.json: 'tracker_roi' or fallback to motion_detection_roi/legacy)
 COLOR_PERSON = (100, 200, 0)
@@ -483,7 +492,8 @@ def draw_tracked_box(frame, box, local_id, label_name, conf, soc, highlight=Fals
         # Show only session-wide person display ID; omit local/tracker IDs
         label_text = f"p{display_id} {conf:.0%}"
     else:
-        label_text = f"{label_name} {local_id} {conf:.0%}"
+        # Add local_id for debugging if needed: label_text = f"{label_name} {local_id} {conf:.0%}"
+        label_text = f"{label_name} {conf:.0%}" 
 
     if TESLA_SOC_CHECK_ENABLED:
         if label_name == 'car':
@@ -1524,6 +1534,11 @@ def detect_motion(input_video_path, output_dir, fast_processing: bool = False):
         DUP_CENTER_RATIO = 0.25
         person_frames_in_roi = 0
 
+        # Per-event suppression state for static false-positive persons
+        suppressed_person_entities = set()  # entity_id
+        person_entity_motion = {}  # entity_id -> {'x0','y0','max_move','sum_conf','n'}
+        person_entity_seen_global_ids = {}  # entity_id -> set(global_id)
+
         # Seek once to the start of the event, then advance sequentially to avoid decoder seek artifacts
         if prof.enabled:
             t0 = time.perf_counter()
@@ -1626,6 +1641,15 @@ def detect_motion(input_video_path, output_dir, fast_processing: bool = False):
                 for box, global_id, cls, conf in dets:
                     label_name = class_names[cls]
 
+                    # Discard impossible car detections below the crossing line.
+                    # y grows downwards; any part below LINE_Y means y2 > LINE_Y.
+                    if label_name == 'car':
+                        try:
+                            if float(box[3]) > float(LINE_Y):
+                                continue
+                        except Exception:
+                            continue
+
                     # If configured, ignore person detections outside the person_tracker ROI
                     if label_name == 'person' and person_tracker_polygon_cv is not None:
                         cx = int((box[0] + box[2]) / 2)
@@ -1640,7 +1664,8 @@ def detect_motion(input_video_path, output_dir, fast_processing: bool = False):
                         class_counters[label_name] += 1
                     local_id = id_mapping[global_id]
 
-                    if label_name in event_unique_objects:
+                    # Count unique non-person objects immediately; person uniqueness is added only if not suppressed.
+                    if label_name in event_unique_objects and label_name != 'person':
                         event_unique_objects[label_name].add(global_id)
 
                     # Line crossing tracking per person (compute net outcome per event)
@@ -1743,6 +1768,109 @@ def detect_motion(input_video_path, output_dir, fast_processing: bool = False):
                             ent['last_frame'] = frame_idx
                         frame_assigned_entities.add(entity_id)
                         event_global_to_entity[global_id] = entity_id
+
+                        # Suppress static low-confidence false-positive persons (entity-scoped)
+                        if entity_id in suppressed_person_entities:
+                            continue
+                        try:
+                            cxp = float((box[0] + box[2]) * 0.5)
+                            cyp = float((box[1] + box[3]) * 0.5)
+                        except Exception:
+                            continue
+                        st = person_entity_motion.get(entity_id)
+                        if st is None:
+                            st = {
+                                'x0': cxp,
+                                'y0': cyp,
+                                'max_move': 0.0,
+                                'sum_conf': 0.0,
+                                'n': 0,
+                                'trusted': False,
+                            }
+                            person_entity_motion[entity_id] = st
+
+                        # Track all tracker IDs that ever mapped to this stable entity
+                        seen_ids = person_entity_seen_global_ids.get(entity_id)
+                        if seen_ids is None:
+                            seen_ids = set()
+                            person_entity_seen_global_ids[entity_id] = seen_ids
+                        try:
+                            seen_ids.add(global_id)
+                        except Exception:
+                            pass
+                        was_trusted = bool(st.get('trusted', False))
+                        trusted_now = was_trusted
+
+                        try:
+                            dx = cxp - float(st['x0'])
+                            dy = cyp - float(st['y0'])
+                            d = (dx * dx + dy * dy) ** 0.5
+                            if d > float(st['max_move']):
+                                st['max_move'] = float(d)
+                            st['sum_conf'] = float(st['sum_conf']) + float(conf)
+                            st['n'] = int(st['n']) + 1
+
+                            # If the entity actually moves, trust it immediately.
+                            if float(st['max_move']) > float(STATIC_PERSON_MAX_MOVE_PX):
+                                trusted_now = True
+
+                            if int(st['n']) >= int(STATIC_PERSON_MIN_UPDATES):
+                                mean_conf = float(st['sum_conf']) / max(1, int(st['n']))
+                                # If it stayed static AND mean conf is low → suppress.
+                                if float(st['max_move']) <= float(STATIC_PERSON_MAX_MOVE_PX) and mean_conf < float(STATIC_PERSON_MAX_MEAN_CONF):
+                                    suppressed_person_entities.add(entity_id)
+                                    logger.debug(
+                                        "[%s] Suppressed static person entity=%s: max_move=%.2fpx, mean_conf=%.3f, updates=%d",
+                                        file_basename,
+                                        entity_id,
+                                        float(st['max_move']),
+                                        mean_conf,
+                                        int(st['n']),
+                                    )
+                                    # Retroactively remove any already-counted tracker IDs for this entity
+                                    try:
+                                        for gid in person_entity_seen_global_ids.get(entity_id, set()):
+                                            event_unique_objects.get('person', set()).discard(gid)
+                                    except Exception:
+                                        pass
+                                    continue
+                                # If it stayed static but mean conf is strong enough → trust after probation.
+                                if mean_conf >= float(STATIC_PERSON_MAX_MEAN_CONF):
+                                    trusted_now = True
+                        except Exception:
+                            # If stats update fails, do not suppress
+                            pass
+
+                        st['trusted'] = bool(trusted_now)
+
+                        # Probation: ignore this person until trusted.
+                        if not trusted_now:
+                            # Still draw the box for visibility/debugging, but don't let it affect ROI/crossing logic.
+                            # Use the same display-id mapping so the label stays consistent (pN), even during probation.
+                            disp_id_preview = None
+                            if session_display_initialized:
+                                if local_id not in person_display_ids:
+                                    person_display_ids[local_id] = person_display_id_counter
+                                    person_display_id_counter += 1
+                                disp_id_preview = person_display_ids[local_id]
+                            else:
+                                if entity_id not in event_entity_display_ids:
+                                    event_entity_display_ids[entity_id] = event_entity_display_id_counter
+                                    event_entity_display_id_counter += 1
+                                disp_id_preview = event_entity_display_ids[entity_id]
+                                if local_id not in event_display_ids:
+                                    event_display_ids[local_id] = disp_id_preview
+
+                            draw_tracked_box(frame, box, local_id, label_name, conf, soc, highlight=False, display_id=disp_id_preview)
+                            continue
+
+                        # Only count this person once trusted (also include any past tracker ids for this entity).
+                        if 'person' in event_unique_objects:
+                            try:
+                                for gid in person_entity_seen_global_ids.get(entity_id, {global_id}):
+                                    event_unique_objects['person'].add(gid)
+                            except Exception:
+                                event_unique_objects['person'].add(global_id)
 
                         # Determine display ID (tracker-based mapping with event-entity stability)
                         disp_id = None
