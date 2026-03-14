@@ -2,7 +2,7 @@ import os
 import time
 import json
 import logging
-from collections import defaultdict
+from collections import defaultdict, deque
 from typing import List, Optional
 
 import cv2
@@ -27,7 +27,7 @@ except ImportError:
 logger = logging.getLogger()
 
 
-class _TimingProfiler:
+class TimingProfiler:
     def __init__(self, enabled: bool = False):
         self.enabled = bool(enabled)
         self.totals_s = defaultdict(float)
@@ -119,7 +119,7 @@ TESLA_SOC_CHECK_ENABLED = bool(teslapy and TESLA_REFRESH_TOKEN and TESLA_EMAIL)
 
 # --- Object Detection Configuration ---
 OBJECT_DETECTION_MODEL_PATH = os.getenv("OBJECT_DETECTION_MODEL_PATH", default=os.path.join("models", "yolo12n_openvino_model"))
-CONF_THRESHOLD = float(os.getenv("CONF_THRESHOLD", "0.45"))
+CONF_THRESHOLD = float(os.getenv("CONF_THRESHOLD", "0.4"))
 DETECT_CLASSES = [0, 1]  # 0: person, 1: car
 TRACK_ROI_ENABLED = True  # Enable tracker ROI crop (from roi.json: 'tracker_roi' or fallback to motion_detection_roi/legacy)
 COLOR_PERSON = (100, 200, 0)
@@ -151,6 +151,29 @@ REID_TOP_K = 3  # save up to K best, diverse crops per event
 REID_DIVERSITY_MIN_DIST = 0.2  # min cosine distance between selected embeddings
 REID_NEGATIVE_GALLERY_PATH = os.getenv("REID_NEGATIVE_GALLERY_PATH", os.path.join(SCRIPT_DIR, "person_of_interest_negative"))
 REID_NEGATIVE_MARGIN = 0.08  # match must exceed negatives by at least this cosine margin
+
+# --- Approximate car speed configuration ---
+# The speed estimate is intentionally lightweight and heuristic-based.
+# It converts pixel motion to km/h using configurable meters-per-pixel,
+# with extra correction for perspective (y position) and wide-angle edges (x position).
+CAR_SPEED_ENABLED = True
+# Default tuned down for this camera setup; can be overridden via env.
+CAR_SPEED_BASE_MPP = float(os.getenv("CAR_SPEED_BASE_MPP", "0.0051"))
+CAR_SPEED_REF_Y_NORM = float(os.getenv("CAR_SPEED_REF_Y_NORM", "0.60"))
+CAR_SPEED_PERSPECTIVE_STRENGTH = float(os.getenv("CAR_SPEED_PERSPECTIVE_STRENGTH", "1.1"))
+CAR_SPEED_WIDEANGLE_EDGE_STRENGTH = float(os.getenv("CAR_SPEED_WIDEANGLE_EDGE_STRENGTH", "1.1"))
+CAR_SPEED_MIN_FACTOR = float(os.getenv("CAR_SPEED_MIN_FACTOR", "0.55"))
+CAR_SPEED_MAX_FACTOR = float(os.getenv("CAR_SPEED_MAX_FACTOR", "2.20"))
+CAR_SPEED_MIN_DISPLACEMENT_PX = float(os.getenv("CAR_SPEED_MIN_DISPLACEMENT_PX", "2.5"))
+CAR_SPEED_MAX_GAP_SECONDS = float(os.getenv("CAR_SPEED_MAX_GAP_SECONDS", "1.0"))
+CAR_SPEED_EMA_ALPHA = float(os.getenv("CAR_SPEED_EMA_ALPHA", "0.25"))
+CAR_SPEED_MEDIAN_WINDOW = int(os.getenv("CAR_SPEED_MEDIAN_WINDOW", "6"))
+CAR_SPEED_DY_WEIGHT = float(os.getenv("CAR_SPEED_DY_WEIGHT", "0.35"))
+CAR_SPEED_MAX_VALID_KMH = float(os.getenv("CAR_SPEED_MAX_VALID_KMH", "100"))
+CAR_SPEED_LABEL_MIN_KMH = float(os.getenv("CAR_SPEED_LABEL_MIN_KMH", "5"))
+CAR_TRAIL_MAX_POINTS = int(os.getenv("CAR_TRAIL_MAX_POINTS", "18"))
+CAR_TRAIL_THICKNESS = int(os.getenv("CAR_TRAIL_THICKNESS", "4"))
+CAR_TRAIL_COLOR = (255, 255, 255)
 
 # --- Load Object Detection Model ---
 try:
@@ -463,7 +486,7 @@ def as_np_points(points):
         return None
 
 
-def draw_tracked_box(frame, box, local_id, label_name, conf, soc, highlight=False, display_id=None):
+def draw_tracked_box(frame, box, local_id, label_name, conf, soc, highlight=False, display_id=None, car_speed_kmh=None):
     """
     Draws a bounding box with a label for a tracked object on a video frame.
     If the object is a car in a specific location, it may display Tesla SoC.
@@ -503,6 +526,9 @@ def draw_tracked_box(frame, box, local_id, label_name, conf, soc, highlight=Fals
                 else:
                     label_text = f"Tesla {conf:.0%}"
 
+    if label_name == 'car' and car_speed_kmh is not None and car_speed_kmh >= CAR_SPEED_LABEL_MIN_KMH:
+        label_text = f"{label_text} {int(round(car_speed_kmh))} km/h"
+
     cv2.rectangle(frame, (x1, y1), (x2, y2), color, OVERLAY_BOX_THICKNESS)
 
     (w, h), _ = cv2.getTextSize(label_text, cv2.FONT_HERSHEY_DUPLEX, OVERLAY_FONT_SCALE, OVERLAY_TEXT_THICKNESS)
@@ -523,7 +549,7 @@ def format_mmss(seconds):
     return f"{mins:02d}:{rem:02d}"
 
 
-def draw_event_overlay(frame, event_idx, total_events, seconds_from_start):
+def draw_event_overlay(frame, event_idx, total_events, seconds_from_start, frame_number=None):
     """
     Draws a static black box in the bottom-right with white text showing
     current event number, total events, and seconds from start of source video.
@@ -535,9 +561,12 @@ def draw_event_overlay(frame, event_idx, total_events, seconds_from_start):
         event_idx (int): Current event index (1-based).
         total_events (int): Total number of significant events.
         seconds_from_start (int): Seconds from the start of the source video.
+        frame_number (int | None): Optional source frame number for temporary calibration.
     """
     h, w = frame.shape[:2]
     text = f"{event_idx}/{total_events} - {format_mmss(seconds_from_start)}"
+    if frame_number is not None:
+        text = f"{text} - f:{int(frame_number)}"
 
     font = cv2.FONT_HERSHEY_DUPLEX
     font_scale = OVERLAY_FONT_SCALE
@@ -657,6 +686,90 @@ def bbox_diag(b):
     return (w * w + h * h) ** 0.5
 
 
+class CarSpeedEstimator:
+    def __init__(self):
+        self._tracks = {}
+
+    def meters_per_pixel(self, x: float, y: float, frame_w: int, frame_h: int) -> float:
+        x_norm = float(np.clip(x / max(1.0, float(frame_w - 1)), 0.0, 1.0))
+        y_norm = float(np.clip(y / max(1.0, float(frame_h - 1)), 0.0, 1.0))
+
+        # Perspective: objects higher in frame are farther, so each pixel covers more meters.
+        y_factor = 1.0 + CAR_SPEED_PERSPECTIVE_STRENGTH * (CAR_SPEED_REF_Y_NORM - y_norm)
+        y_factor = float(np.clip(y_factor, CAR_SPEED_MIN_FACTOR, CAR_SPEED_MAX_FACTOR))
+
+        # Wide-angle compensation: edges are affected more by lens distortion.
+        edge = abs(x_norm - 0.5) / 0.5
+        x_factor = 1.0 + CAR_SPEED_WIDEANGLE_EDGE_STRENGTH * (edge * edge)
+
+        return CAR_SPEED_BASE_MPP * y_factor * x_factor
+
+    def update(self, track_id: int, box, frame_num: int, fps: float, frame_w: int, frame_h: int) -> Optional[float]:
+        x = float((box[0] + box[2]) * 0.5)
+        y = float((box[1] + box[3]) * 0.5)
+
+        st = self._tracks.get(track_id)
+        if st is None:
+            self._tracks[track_id] = {
+                'x': x,
+                'y': y,
+                'frame': int(frame_num),
+                'speed_kmh': None,
+                'raw_kmh_hist': deque(maxlen=max(1, int(CAR_SPEED_MEDIAN_WINDOW))),
+                'trail': deque([(int(x), int(y))], maxlen=max(2, int(CAR_TRAIL_MAX_POINTS))),
+            }
+            return None
+
+        st['trail'].append((int(x), int(y)))
+
+        df = int(frame_num) - int(st['frame'])
+        if df <= 0 or fps <= 0:
+            st['x'], st['y'], st['frame'] = x, y, int(frame_num)
+            return st.get('speed_kmh')
+
+        dt = float(df) / float(fps)
+        if dt > CAR_SPEED_MAX_GAP_SECONDS:
+            st['x'], st['y'], st['frame'] = x, y, int(frame_num)
+            return st.get('speed_kmh')
+
+        dx = x - float(st['x'])
+        dy = y - float(st['y'])
+        # Traffic is mostly horizontal in this camera; down-weight vertical jitter from bbox noise.
+        dy_w = float(np.clip(CAR_SPEED_DY_WEIGHT, 0.0, 1.0))
+        disp_px = (dx * dx + (dy_w * dy) * (dy_w * dy)) ** 0.5
+
+        if disp_px < CAR_SPEED_MIN_DISPLACEMENT_PX:
+            raw_kmh = 0.0
+        else:
+            mpp = self.meters_per_pixel(x=x, y=y, frame_w=frame_w, frame_h=frame_h)
+            raw_kmh = (disp_px / dt) * mpp * 3.6
+        raw_kmh = min(float(raw_kmh), CAR_SPEED_MAX_VALID_KMH)
+
+        hist = st.get('raw_kmh_hist')
+        if hist is None:
+            hist = deque(maxlen=max(1, int(CAR_SPEED_MEDIAN_WINDOW)))
+            st['raw_kmh_hist'] = hist
+        hist.append(raw_kmh)
+        median_raw_kmh = float(np.median(np.array(hist, dtype=np.float32)))
+
+        prev = st.get('speed_kmh')
+        if prev is None:
+            speed_kmh = median_raw_kmh
+        else:
+            a = float(np.clip(CAR_SPEED_EMA_ALPHA, 0.0, 1.0))
+            speed_kmh = (a * median_raw_kmh) + ((1.0 - a) * float(prev))
+
+        st['x'], st['y'], st['frame'] = x, y, int(frame_num)
+        st['speed_kmh'] = float(speed_kmh)
+        return st['speed_kmh']
+
+    def trail_points(self, track_id: int):
+        st = self._tracks.get(track_id)
+        if st is None:
+            return []
+        return list(st.get('trail', []))
+
+
 def detect_motion(input_video_path, output_dir, fast_processing: bool = False):
     """
     Analyzes a video file for motion, identifies significant events, and uses an object tracker.
@@ -697,10 +810,10 @@ def detect_motion(input_video_path, output_dir, fast_processing: bool = False):
 
     profile_env = os.getenv("ANALYZE_VIDEO_PROFILE", "0").strip().lower()
     profile_enabled = profile_env not in ("", "0", "false", "no", "off")
-    prof = _TimingProfiler(enabled=profile_enabled)
+    prof = TimingProfiler(enabled=profile_enabled)
     wall_start = time.perf_counter()
 
-    def _maybe_log_profile(status: str) -> None:
+    def maybe_log_profile(status: str) -> None:
         if not prof.enabled:
             return
         wall_s = time.perf_counter() - wall_start
@@ -725,7 +838,7 @@ def detect_motion(input_video_path, output_dir, fast_processing: bool = False):
     if not (is_4k or is_1080p or low_res_mode):
         logger.info(f"[{file_basename}] Unsupported clip resolution: {orig_w}x{orig_h}. Skipping analysis.")
         cap.release()
-        _maybe_log_profile("no_motion_unsupported_res")
+        maybe_log_profile("no_motion_unsupported_res")
         return {
             'status': 'no_motion',
             'clip_path': None,
@@ -832,7 +945,7 @@ def detect_motion(input_video_path, output_dir, fast_processing: bool = False):
     roi_config = read_roi_config(roi_path)
     if roi_config is None:
         logger.error(f"[{file_basename}] ROI config file not found or invalid: {roi_path}.")
-        _maybe_log_profile("error_roi_config")
+        maybe_log_profile("error_roi_config")
         return {'status': 'error', 'clip_path': None, 'insignificant_frames': []}
     # Motion detection ROI: if dict, expect 'motion_detection_roi'; if legacy (list), use it directly
     if isinstance(roi_config, dict):
@@ -850,7 +963,7 @@ def detect_motion(input_video_path, output_dir, fast_processing: bool = False):
         roi_poly_points = None
     if roi_poly_points is None:
         logger.error(f"[{file_basename}] Motion detection ROI missing in {roi_path}.")
-        _maybe_log_profile("error_roi_missing")
+        maybe_log_profile("error_roi_missing")
         return {'status': 'error', 'clip_path': None, 'insignificant_frames': []}
     # Fit ROI to the frame when necessary.
     if low_res_mode:
@@ -1288,7 +1401,7 @@ def detect_motion(input_video_path, output_dir, fast_processing: bool = False):
         cap.release()
         elapsed_time = time.time() - start_time
         logger.info(f"[{file_basename}] Motion detection took {elapsed_time:.2f} seconds.")
-        _maybe_log_profile("no_motion")
+        maybe_log_profile("no_motion")
         return {'status': 'no_motion', 'clip_path': None, 'insignificant_frames': []}
 
     motion_frame_indices = [item[0] for item in motion_events]
@@ -1349,7 +1462,7 @@ def detect_motion(input_video_path, output_dir, fast_processing: bool = False):
         cap.release()
         elapsed_time = time.time() - start_time
         logger.info(f"[{file_basename}] Motion detection took {elapsed_time:.2f} seconds.")
-        _maybe_log_profile("no_motion_all_short")
+        maybe_log_profile("no_motion_all_short")
         return {'status': 'no_motion', 'clip_path': None, 'insignificant_frames': []}
 
     if not significant_sub_clips:
@@ -1357,7 +1470,7 @@ def detect_motion(input_video_path, output_dir, fast_processing: bool = False):
         cap.release()
         elapsed_time = time.time() - start_time
         logger.info(f"[{file_basename}] Motion detection took {elapsed_time:.2f} seconds.")
-        _maybe_log_profile("no_significant_motion")
+        maybe_log_profile("no_significant_motion")
         return {'status': 'no_significant_motion', 'clip_path': None, 'insignificant_frames': insignificant_motion_frames}
 
     output_filename = os.path.join(output_dir, file_basename)
@@ -1384,7 +1497,13 @@ def detect_motion(input_video_path, output_dir, fast_processing: bool = False):
                     # Optional minimal overlay: draw event index/time (no boxes).
                     try:
                         current_seconds = int((frame_idx - 1) / fps)
-                        draw_event_overlay(frame, clip_index + 1, len(significant_sub_clips), current_seconds)
+                        draw_event_overlay(
+                            frame,
+                            clip_index + 1,
+                            len(significant_sub_clips),
+                            current_seconds,
+                            frame_number=(frame_idx - 1),
+                        )
                     except Exception:
                         pass
 
@@ -1420,10 +1539,10 @@ def detect_motion(input_video_path, output_dir, fast_processing: bool = False):
             logger.info(f"[{file_basename}] Motion detection took {elapsed_time:.2f} seconds.")
 
             if written_frame_count <= 0:
-                _maybe_log_profile("low_res_no_frames")
+                maybe_log_profile("low_res_no_frames")
                 return {'status': 'no_motion', 'clip_path': None, 'insignificant_frames': insignificant_motion_frames, 'low_res_clip': True, 'frame_size': (orig_w, orig_h)}
 
-            _maybe_log_profile("low_res_significant_motion")
+            maybe_log_profile("low_res_significant_motion")
             return {
                 'status': 'significant_motion',
                 'clip_path': output_filename,
@@ -1437,7 +1556,7 @@ def detect_motion(input_video_path, output_dir, fast_processing: bool = False):
                 cap.release()
             except Exception:
                 pass
-            _maybe_log_profile("low_res_error")
+            maybe_log_profile("low_res_error")
             return {'status': 'error', 'clip_path': None, 'insignificant_frames': insignificant_motion_frames, 'low_res_clip': True, 'frame_size': (orig_w, orig_h)}
 
     logger.info(f"[{file_basename}] Starting object tracking for {len(significant_sub_clips)} significant event(s).")
@@ -1538,6 +1657,7 @@ def detect_motion(input_video_path, output_dir, fast_processing: bool = False):
         suppressed_person_entities = set()  # entity_id
         person_entity_motion = {}  # entity_id -> {'x0','y0','max_move','sum_conf','n'}
         person_entity_seen_global_ids = {}  # entity_id -> set(global_id)
+        car_speed_estimator = CarSpeedEstimator() if CAR_SPEED_ENABLED else None
 
         # Seek once to the start of the event, then advance sequentially to avoid decoder seek artifacts
         if prof.enabled:
@@ -1640,6 +1760,7 @@ def detect_motion(input_video_path, output_dir, fast_processing: bool = False):
 
                 for box, global_id, cls, conf in dets:
                     label_name = class_names[cls]
+                    car_speed_kmh = None
 
                     # Discard impossible car detections below the crossing line.
                     # y grows downwards; any part below LINE_Y means y2 > LINE_Y.
@@ -1663,6 +1784,27 @@ def detect_motion(input_video_path, output_dir, fast_processing: bool = False):
                         id_mapping[global_id] = class_counters[label_name]
                         class_counters[label_name] += 1
                     local_id = id_mapping[global_id]
+
+                    if label_name == 'car' and car_speed_estimator is not None:
+                        current_frame_num = frame_idx - 1
+                        car_speed_kmh = car_speed_estimator.update(
+                            track_id=global_id,
+                            box=box,
+                            frame_num=current_frame_num,
+                            fps=fps,
+                            frame_w=orig_w,
+                            frame_h=orig_h,
+                        )
+                        if car_speed_kmh is not None and car_speed_kmh >= CAR_SPEED_LABEL_MIN_KMH:
+                            pts = car_speed_estimator.trail_points(global_id)
+                            if len(pts) >= 2:
+                                cv2.polylines(
+                                    frame,
+                                    [np.array(pts, dtype=np.int32)],
+                                    False,
+                                    CAR_TRAIL_COLOR,
+                                    max(1, int(CAR_TRAIL_THICKNESS)),
+                                )
 
                     # Count unique non-person objects immediately; person uniqueness is added only if not suppressed.
                     if label_name in event_unique_objects and label_name != 'person':
@@ -2044,7 +2186,7 @@ def detect_motion(input_video_path, output_dir, fast_processing: bool = False):
                             frame_has_highlight = True
                     # Determine display id for person labels (already set earlier)
                     disp_id = None if label_name != 'person' else disp_id
-                    draw_tracked_box(frame, box, local_id, label_name, conf, soc, highlight=highlight_active, display_id=disp_id)
+                    draw_tracked_box(frame, box, local_id, label_name, conf, soc, highlight=highlight_active, display_id=disp_id, car_speed_kmh=car_speed_kmh)
                     if label_name == 'person' and disp_id is not None:
                         accepted_persons.append((box[:], event_global_to_entity.get(global_id, entity_id if 'entity_id' in locals() else -1)))
 
@@ -2057,7 +2199,13 @@ def detect_motion(input_video_path, output_dir, fast_processing: bool = False):
 
             # Draw static event overlay in bottom-right: "<idx>/<total> - MM:SS"
             current_seconds = int((frame_idx - 1) / fps)
-            draw_event_overlay(frame, clip_index + 1, len(significant_sub_clips), current_seconds)
+            draw_event_overlay(
+                frame,
+                clip_index + 1,
+                len(significant_sub_clips),
+                current_seconds,
+                frame_number=(frame_idx - 1),
+            )
 
             # Append frames to output based on output_stride to speed up render without
             # sacrificing tracking continuity (for moderate-length events)
@@ -2196,7 +2344,7 @@ def detect_motion(input_video_path, output_dir, fast_processing: bool = False):
     if written_frame_count == 0:
         elapsed_time = time.time() - start_time
         logger.info(f"[{file_basename}] No significant events with person in ROI found. Full processing took {elapsed_time:.2f} seconds.")
-        _maybe_log_profile("no_person")
+        maybe_log_profile("no_person")
         return {'status': 'no_person', 'clip_path': None, 'insignificant_frames': insignificant_motion_frames}
 
     # Finalize CRF-based H.264 writer
@@ -2332,7 +2480,7 @@ def detect_motion(input_video_path, output_dir, fast_processing: bool = False):
     elapsed_time = time.time() - start_time
     logger.info(f"[{file_basename}] Full processing took {elapsed_time:.2f} seconds. Detected: {num_persons} persons, {num_cars} cars.")
 
-    _maybe_log_profile(final_status)
+    maybe_log_profile(final_status)
 
     return {
         'status': final_status,
