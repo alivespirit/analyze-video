@@ -124,7 +124,6 @@ DETECT_CLASSES = [0, 1]  # 0: person, 1: car
 TRACK_ROI_ENABLED = True  # Enable tracker ROI crop (from roi.json: 'tracker_roi' or fallback to motion_detection_roi/legacy)
 COLOR_PERSON = (100, 200, 0)
 COLOR_CAR = (200, 120, 0)
-COLOR_CAR_SPEEDTRAP = (0, 140, 190)
 COLOR_DEFAULT = (255, 255, 255)
 COLOR_HIGHLIGHT = (80, 90, 245)
 COLOR_LINE = (0, 255, 255)
@@ -517,7 +516,7 @@ def draw_tracked_box(frame, box, local_id, label_name, conf, soc, highlight=Fals
         if label_name == 'person':
             color = COLOR_PERSON
         elif label_name == 'car':
-            color = COLOR_CAR_SPEEDTRAP if speedtrap_zone_active else COLOR_CAR
+            color = COLOR_HIGHLIGHT if speedtrap_zone_active else COLOR_CAR
         else:
             color = COLOR_DEFAULT
 
