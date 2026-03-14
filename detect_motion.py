@@ -124,6 +124,7 @@ DETECT_CLASSES = [0, 1]  # 0: person, 1: car
 TRACK_ROI_ENABLED = True  # Enable tracker ROI crop (from roi.json: 'tracker_roi' or fallback to motion_detection_roi/legacy)
 COLOR_PERSON = (100, 200, 0)
 COLOR_CAR = (200, 120, 0)
+COLOR_CAR_SPEEDTRAP = (0, 140, 190)
 COLOR_DEFAULT = (255, 255, 255)
 COLOR_HIGHLIGHT = (80, 90, 245)
 COLOR_LINE = (0, 255, 255)
@@ -174,6 +175,15 @@ CAR_SPEED_LABEL_MIN_KMH = float(os.getenv("CAR_SPEED_LABEL_MIN_KMH", "5"))
 CAR_TRAIL_MAX_POINTS = int(os.getenv("CAR_TRAIL_MAX_POINTS", "18"))
 CAR_TRAIL_THICKNESS = int(os.getenv("CAR_TRAIL_THICKNESS", "4"))
 CAR_TRAIL_COLOR = (255, 255, 255)
+
+# --- Car speedtrap configuration ---
+# Computes speed from frame count between two vertical X-lines with known distance.
+CAR_SPEEDTRAP_ENABLED = True
+CAR_SPEEDTRAP_X1 = int(os.getenv("CAR_SPEEDTRAP_X1", "1860"))
+CAR_SPEEDTRAP_X2 = int(os.getenv("CAR_SPEEDTRAP_X2", "2620"))
+CAR_SPEEDTRAP_DISTANCE_M = float(os.getenv("CAR_SPEEDTRAP_DISTANCE_M", "5.0"))
+CAR_SPEEDTRAP_MAX_VALID_KMH = float(os.getenv("CAR_SPEEDTRAP_MAX_VALID_KMH", "100"))
+CAR_SPEEDTRAP_OVERLAY_EXTRA_GAP = 16
 
 # --- Load Object Detection Model ---
 try:
@@ -486,7 +496,7 @@ def as_np_points(points):
         return None
 
 
-def draw_tracked_box(frame, box, local_id, label_name, conf, soc, highlight=False, display_id=None, car_speed_kmh=None):
+def draw_tracked_box(frame, box, local_id, label_name, conf, soc, highlight=False, display_id=None, car_speed_kmh=None, speedtrap_zone_active=False):
     """
     Draws a bounding box with a label for a tracked object on a video frame.
     If the object is a car in a specific location, it may display Tesla SoC.
@@ -507,7 +517,7 @@ def draw_tracked_box(frame, box, local_id, label_name, conf, soc, highlight=Fals
         if label_name == 'person':
             color = COLOR_PERSON
         elif label_name == 'car':
-            color = COLOR_CAR
+            color = COLOR_CAR_SPEEDTRAP if speedtrap_zone_active else COLOR_CAR
         else:
             color = COLOR_DEFAULT
 
@@ -549,7 +559,7 @@ def format_mmss(seconds):
     return f"{mins:02d}:{rem:02d}"
 
 
-def draw_event_overlay(frame, event_idx, total_events, seconds_from_start, frame_number=None):
+def draw_event_overlay(frame, event_idx, total_events, seconds_from_start, frame_number=None, top_line_text=None):
     """
     Draws a static black box in the bottom-right with white text showing
     current event number, total events, and seconds from start of source video.
@@ -562,6 +572,7 @@ def draw_event_overlay(frame, event_idx, total_events, seconds_from_start, frame
         total_events (int): Total number of significant events.
         seconds_from_start (int): Seconds from the start of the source video.
         frame_number (int | None): Optional source frame number for temporary calibration.
+        top_line_text (str | None): Optional line rendered above the default event line.
     """
     h, w = frame.shape[:2]
     text = f"{event_idx}/{total_events} - {format_mmss(seconds_from_start)}"
@@ -571,7 +582,17 @@ def draw_event_overlay(frame, event_idx, total_events, seconds_from_start, frame
     font = cv2.FONT_HERSHEY_DUPLEX
     font_scale = OVERLAY_FONT_SCALE
     thickness = OVERLAY_TEXT_THICKNESS
-    (text_w, text_h), _ = cv2.getTextSize(text, font, font_scale, thickness)
+    lines = []
+    if top_line_text:
+        lines.append(str(top_line_text))
+    lines.append(text)
+
+    sizes = [cv2.getTextSize(t, font, font_scale, thickness)[0] for t in lines]
+    text_w = max((s[0] for s in sizes), default=0)
+    line_h = max((s[1] for s in sizes), default=0)
+    line_gap = max(4, OVERLAY_TEXT_THICKNESS * 2)
+    top_extra_gap = max(0, int(CAR_SPEEDTRAP_OVERLAY_EXTRA_GAP)) if top_line_text else 0
+    text_block_h = (line_h * len(lines)) + (line_gap * max(0, len(lines) - 1)) + top_extra_gap
 
     pad_x = OVERLAY_PAD_X
     pad_y = OVERLAY_PAD_Y
@@ -580,15 +601,20 @@ def draw_event_overlay(frame, event_idx, total_events, seconds_from_start, frame
     x2 = w
     y2 = h
     x1 = x2 - (text_w + pad_x * 2)
-    y1 = y2 - (text_h + pad_y * 2)
+    y1 = y2 - (text_block_h + pad_y * 2)
 
     # Black box background
     cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 0, 0), -1)
 
-    # Text in white centered within padding
+    # Text in white centered within padding (top to bottom)
     text_x = x1 + pad_x
-    text_y = y1 + pad_y + text_h - 2
-    cv2.putText(frame, text, (text_x, text_y), font, font_scale, (255, 255, 255), thickness, cv2.LINE_AA)
+    text_y = y1 + pad_y + line_h - 2
+    for idx, t in enumerate(lines):
+        cv2.putText(frame, t, (text_x, text_y), font, font_scale, (255, 255, 255), thickness, cv2.LINE_AA)
+        step = line_h + line_gap
+        if top_line_text and idx == 0 and len(lines) > 1:
+            step += top_extra_gap
+        text_y += step
 
 
 def detect_draw_and_save_snapshot(frame, soc, output_dir, input_video_path, file_basename, mid_frame_index, tag, classes=None):
@@ -1658,6 +1684,8 @@ def detect_motion(input_video_path, output_dir, fast_processing: bool = False):
         person_entity_motion = {}  # entity_id -> {'x0','y0','max_move','sum_conf','n'}
         person_entity_seen_global_ids = {}  # entity_id -> set(global_id)
         car_speed_estimator = CarSpeedEstimator() if CAR_SPEED_ENABLED else None
+        speedtrap_state = {}  # global_id -> {'last_x': float, 'line': int | None, 'frame': int | None}
+        speedtrap_overlay_text = None
 
         # Seek once to the start of the event, then advance sequentially to avoid decoder seek artifacts
         if prof.enabled:
@@ -1761,6 +1789,7 @@ def detect_motion(input_video_path, output_dir, fast_processing: bool = False):
                 for box, global_id, cls, conf in dets:
                     label_name = class_names[cls]
                     car_speed_kmh = None
+                    speedtrap_zone_active = False
 
                     # Discard impossible car detections below the crossing line.
                     # y grows downwards; any part below LINE_Y means y2 > LINE_Y.
@@ -1787,6 +1816,7 @@ def detect_motion(input_video_path, output_dir, fast_processing: bool = False):
 
                     if label_name == 'car' and car_speed_estimator is not None:
                         current_frame_num = frame_idx - 1
+                        cx = float((box[0] + box[2]) * 0.5)
                         car_speed_kmh = car_speed_estimator.update(
                             track_id=global_id,
                             box=box,
@@ -1795,6 +1825,61 @@ def detect_motion(input_video_path, output_dir, fast_processing: bool = False):
                             frame_w=orig_w,
                             frame_h=orig_h,
                         )
+
+                        if CAR_SPEEDTRAP_ENABLED and fps > 0 and CAR_SPEEDTRAP_DISTANCE_M > 0:
+                            st_trap = speedtrap_state.get(global_id)
+                            if st_trap is None:
+                                speedtrap_state[global_id] = {'last_x': cx, 'line': None, 'frame': None}
+                            else:
+                                prev_x = float(st_trap.get('last_x', cx))
+                                crossed = []
+                                if prev_x != cx:
+                                    if (prev_x - CAR_SPEEDTRAP_X1) * (cx - CAR_SPEEDTRAP_X1) <= 0:
+                                        crossed.append(CAR_SPEEDTRAP_X1)
+                                    if (prev_x - CAR_SPEEDTRAP_X2) * (cx - CAR_SPEEDTRAP_X2) <= 0:
+                                        crossed.append(CAR_SPEEDTRAP_X2)
+                                if len(crossed) == 2:
+                                    if cx >= prev_x:
+                                        crossed.sort()
+                                    else:
+                                        crossed.sort(reverse=True)
+
+                                for crossed_line in crossed:
+                                    start_line = st_trap.get('line')
+                                    start_frame = st_trap.get('frame')
+                                    if start_line is None or start_frame is None:
+                                        st_trap['line'] = int(crossed_line)
+                                        st_trap['frame'] = int(current_frame_num)
+                                        continue
+
+                                    if int(start_line) == int(crossed_line):
+                                        st_trap['line'] = int(crossed_line)
+                                        st_trap['frame'] = int(current_frame_num)
+                                        continue
+
+                                    df = int(current_frame_num) - int(start_frame)
+                                    if df > 0:
+                                        dt = float(df) / float(fps)
+                                        trap_kmh = (float(CAR_SPEEDTRAP_DISTANCE_M) / dt) * 3.6
+                                        if 0.0 < trap_kmh <= CAR_SPEEDTRAP_MAX_VALID_KMH:
+                                            direction = "->" if int(start_line) == int(CAR_SPEEDTRAP_X1) else "<-"
+                                            speedtrap_overlay_text = f"SpeedTrap {int(round(trap_kmh))} km/h {direction}"
+
+                                    # Reset start at current line for subsequent measurements.
+                                    st_trap['line'] = int(crossed_line)
+                                    st_trap['frame'] = int(current_frame_num)
+
+                                st_trap['last_x'] = cx
+
+                        trap_x_min = min(CAR_SPEEDTRAP_X1, CAR_SPEEDTRAP_X2)
+                        trap_x_max = max(CAR_SPEEDTRAP_X1, CAR_SPEEDTRAP_X2)
+                        speedtrap_zone_active = (
+                            CAR_SPEEDTRAP_ENABLED
+                            and (car_speed_kmh is not None)
+                            and (car_speed_kmh >= CAR_SPEED_LABEL_MIN_KMH)
+                            and (trap_x_min <= cx <= trap_x_max)
+                        )
+
                         if car_speed_kmh is not None and car_speed_kmh >= CAR_SPEED_LABEL_MIN_KMH:
                             pts = car_speed_estimator.trail_points(global_id)
                             if len(pts) >= 2:
@@ -2186,7 +2271,18 @@ def detect_motion(input_video_path, output_dir, fast_processing: bool = False):
                             frame_has_highlight = True
                     # Determine display id for person labels (already set earlier)
                     disp_id = None if label_name != 'person' else disp_id
-                    draw_tracked_box(frame, box, local_id, label_name, conf, soc, highlight=highlight_active, display_id=disp_id, car_speed_kmh=car_speed_kmh)
+                    draw_tracked_box(
+                        frame,
+                        box,
+                        local_id,
+                        label_name,
+                        conf,
+                        soc,
+                        highlight=highlight_active,
+                        display_id=disp_id,
+                        car_speed_kmh=car_speed_kmh,
+                        speedtrap_zone_active=speedtrap_zone_active,
+                    )
                     if label_name == 'person' and disp_id is not None:
                         accepted_persons.append((box[:], event_global_to_entity.get(global_id, entity_id if 'entity_id' in locals() else -1)))
 
@@ -2205,6 +2301,7 @@ def detect_motion(input_video_path, output_dir, fast_processing: bool = False):
                 len(significant_sub_clips),
                 current_seconds,
                 frame_number=(frame_idx - 1),
+                top_line_text=speedtrap_overlay_text,
             )
 
             # Append frames to output based on output_stride to speed up render without

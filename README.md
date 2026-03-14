@@ -25,6 +25,10 @@ This project is a Python-based application that monitors a folder for new video 
     - Accounts for tracker/output stride by using frame-index deltas and source FPS.
     - Applies heuristic perspective and wide-angle edge correction, plus median+EMA smoothing to reduce jitter.
     - Draws a short trailing line behind moving cars for readability.
+  - **Car SpeedTrap (Line-to-Line Measurement)**:
+    - Computes near-precise car speed from frame count between two vertical X-lines with known real-world distance.
+    - Supports both driving directions (`X1 -> X2` and `X2 -> X1`).
+    - Shows the latest SpeedTrap value in the event overlay and highlights moving cars inside the trap zone.
   - **Low-Resolution Clips (Motion-Only Mode)**: For specific low-res sources (640×360 and 896×512), runs ROI motion detection and generates a highlight at the source resolution (no tracking/ReID).
 - **Dynamic Gemini AI Analysis**:
   - **Time-Based Model Selection**: Automatically switches between different Gemini models (e.g., Pro vs. Flash) based on the time of day for cost optimization.
@@ -252,13 +256,19 @@ pip install -r requirements.txt
   - `STATIC_PERSON_MIN_UPDATES`: minimum number of updates before a static person can be suppressed (default: 20)
   - `STATIC_PERSON_MAX_MEAN_CONF`: max mean confidence for a static person to be suppressed (default: 0.80)
   - `OBJECT_DETECTION_MODEL_PATH`: path to exported OpenVINO model (default: models/yolo12n_openvino_model)
-   - Car speed (approximate):
-      - `CAR_SPEED_BASE_MPP`: base meters-per-pixel scale (global calibration knob)
-      - `CAR_SPEED_PERSPECTIVE_STRENGTH`, `CAR_SPEED_WIDEANGLE_EDGE_STRENGTH`: perspective/lens edge compensation
-      - `CAR_SPEED_MEDIAN_WINDOW`, `CAR_SPEED_EMA_ALPHA`, `CAR_SPEED_DY_WEIGHT`: smoothing and jitter control
-      - `CAR_SPEED_LABEL_MIN_KMH`, `CAR_SPEED_MAX_VALID_KMH`: label visibility and safety cap
-      - `CAR_TRAIL_MAX_POINTS`, `CAR_TRAIL_THICKNESS`: trail length/appearance
-      - Practical calibration: measure real distance on the road and count frames (`v_kmh = distance_m / (frames / fps) * 3.6`), then scale `CAR_SPEED_BASE_MPP` proportionally.
+  - Car speed (approximate):
+    - `CAR_SPEED_BASE_MPP`: base meters-per-pixel scale (global calibration knob)
+    - `CAR_SPEED_PERSPECTIVE_STRENGTH`, `CAR_SPEED_WIDEANGLE_EDGE_STRENGTH`: perspective/lens edge compensation
+    - `CAR_SPEED_MEDIAN_WINDOW`, `CAR_SPEED_EMA_ALPHA`, `CAR_SPEED_DY_WEIGHT`: smoothing and jitter control
+    - `CAR_SPEED_LABEL_MIN_KMH`, `CAR_SPEED_MAX_VALID_KMH`: label visibility and safety cap
+    - `CAR_TRAIL_MAX_POINTS`, `CAR_TRAIL_THICKNESS`: trail length/appearance
+    - Practical calibration: measure real distance on the road and count frames (`v_kmh = distance_m / (frames / fps) * 3.6`), then scale `CAR_SPEED_BASE_MPP` proportionally.
+  - Car SpeedTrap:
+    - `CAR_SPEEDTRAP_ENABLED`: enable/disable speedtrap overlay logic
+    - `CAR_SPEEDTRAP_X1`, `CAR_SPEEDTRAP_X2`: vertical trap line positions in pixels
+    - `CAR_SPEEDTRAP_DISTANCE_M`: real distance between `X1` and `X2` in meters
+    - `CAR_SPEEDTRAP_MAX_VALID_KMH`: sanity cap for trap speed
+    - `CAR_SPEEDTRAP_OVERLAY_EXTRA_GAP`: extra spacing between SpeedTrap and event overlay lines
   - `COLOR_PERSON`, `COLOR_CAR`, `COLOR_DEFAULT`, `COLOR_HIGHLIGHT`, `COLOR_LINE`: overlay colors (BGR tuples; defaults in code)
   - `OVERLAY_FONT_SCALE`, `OVERLAY_TEXT_THICKNESS`, `OVERLAY_BOX_THICKNESS`, `OVERLAY_LINE_THICKNESS`, `OVERLAY_LABEL_BG_HEIGHT`, `OVERLAY_PAD_X`, `OVERLAY_PAD_Y`: overlay appearance (resolution-dependent defaults)
   - `TESLA_EMAIL`, `TESLA_REFRESH_TOKEN`, `TESLA_SOC_FILE`, `TESLA_SOC_CHECK_ENABLED`: Tesla integration parameters (see Tesla section)
