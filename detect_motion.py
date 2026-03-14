@@ -1845,8 +1845,8 @@ def detect_motion(input_video_path, output_dir, fast_processing: bool = False):
 
                                 for crossed_line in crossed:
                                     start_line = st_trap.get('line')
-                                    start_frame = st_trap.get('frame')
-                                    if start_line is None or start_frame is None:
+                                    trap_start_frame = st_trap.get('frame')
+                                    if start_line is None or trap_start_frame is None:
                                         st_trap['line'] = int(crossed_line)
                                         st_trap['frame'] = int(current_frame_num)
                                         continue
@@ -1856,7 +1856,7 @@ def detect_motion(input_video_path, output_dir, fast_processing: bool = False):
                                         st_trap['frame'] = int(current_frame_num)
                                         continue
 
-                                    df = int(current_frame_num) - int(start_frame)
+                                    df = int(current_frame_num) - int(trap_start_frame)
                                     if df > 0:
                                         dt = float(df) / float(fps)
                                         trap_kmh = (float(CAR_SPEEDTRAP_DISTANCE_M) / dt) * 3.6
