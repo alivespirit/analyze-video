@@ -150,17 +150,8 @@ def analyze_video(motion_result, video_path):
             else:
                 return {'response': timestamp + f"\u2611\uFE0F{low_res_prefix} Виявлено капець рух." + reid_text, 'insignificant_frames': motion_result['insignificant_frames'], 'clip_path': motion_result.get('clip_path')}
 
-    video_to_process = None
+    video_to_process = video_path
     video_bytes_obj = None
-    if detected_motion_status == "error":
-        logger.warning(f"[{file_basename}] Error during motion detection. Analyzing full video.")
-        video_to_process = video_path
-    elif detected_motion_status == "no_significant_motion" or detected_motion_status == "no_person":
-        logger.info(f"[{file_basename}] Analyzing full video as there was no significant motion or no person detected.")
-        video_to_process = video_path
-    elif detected_motion_status == "significant_motion":
-        logger.info(f"[{file_basename}] Running Gemini analysis for detected motion at {motion_result['clip_path']}")
-        video_to_process = motion_result['clip_path']
 
     if not video_to_process:
         logger.info(f"[{file_basename}] No video to analyze, but insignificant frames may exist.")
