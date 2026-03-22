@@ -2489,25 +2489,36 @@ def detect_motion(input_video_path, output_dir, fast_processing: bool = False):
                 # Score each sample vs gallery and compute embeddings for diversity filtering
                 scored = []
                 best_score = 0.0
+                best_gallery_path = None
                 for crop in samples:
                     try:
                         emb = reid.get_embedding(crop)
                         score = 0.0
+                        sample_best_gallery_path = None
                         neg_score = 0.0
                         if len(reid.gallery_vectors) > 0:
                             # compute max cosine similarity to gallery
-                            for ref_vec in reid.gallery_vectors:
+                            for ref_idx, ref_vec in enumerate(reid.gallery_vectors):
                                 s = float(np.dot(emb, ref_vec))
                                 if s > score:
                                     score = s
+                                    if ref_idx < len(reid.gallery_paths):
+                                        sample_best_gallery_path = reid.gallery_paths[ref_idx]
                         if len(reid.negative_vectors) > 0:
                             for neg_vec in reid.negative_vectors:
                                 s = float(np.dot(emb, neg_vec))
                                 if s > neg_score:
                                     neg_score = s
-                        scored.append({"crop": crop, "score": float(score), "neg": float(neg_score), "emb": emb})
+                        scored.append({
+                            "crop": crop,
+                            "score": float(score),
+                            "neg": float(neg_score),
+                            "emb": emb,
+                            "best_gallery_path": sample_best_gallery_path,
+                        })
                         if score > best_score:
                             best_score = score
+                            best_gallery_path = sample_best_gallery_path
                     except Exception:
                         continue
 
@@ -2522,6 +2533,19 @@ def detect_motion(input_video_path, output_dir, fast_processing: bool = False):
                 reid_result["score"] = round(best_score, 4)
                 reid_result["neg_score"] = round(best_neg, 4)
                 reid_result["margin"] = REID_NEGATIVE_MARGIN
+                reid_result["best_gallery_path"] = best_gallery_path
+
+                if best_gallery_path:
+                    if best_score >= REID_THRESHOLD:
+                        logger.info(
+                            f"[{file_basename}] ReID best gallery match above threshold: score={best_score:.3f}, gallery_crop={best_gallery_path}"
+                        )
+                    else:
+                        logger.debug(
+                            f"[{file_basename}] ReID best gallery match: score={best_score:.3f}, gallery_crop={best_gallery_path}"
+                        )
+                elif best_score > 0:
+                    logger.info(f"[{file_basename}] ReID best gallery match path unavailable; score={best_score:.3f}")
 
                 # Select up to REID_TOP_K diverse top crops
                 selected = []

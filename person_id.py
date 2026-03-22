@@ -10,6 +10,7 @@ logger = logging.getLogger()
 
 # Cache gallery embeddings per path to avoid reloading within the same process
 _GALLERY_CACHE: dict[str, list[np.ndarray]] = {}
+_GALLERY_PATH_CACHE: dict[str, list[str]] = {}
 _CACHE_DIR = os.path.join(os.path.dirname(__file__), "temp")
 
 
@@ -25,6 +26,7 @@ class PersonReID:
                  negative_gallery_path: str | None = None, negative_margin: float = 0.0):
         self.threshold = float(threshold)
         self.gallery_vectors: list[np.ndarray] = []
+        self.gallery_paths: list[str] = []
         self.negative_vectors: list[np.ndarray] = []
         self.file_basename = file_basename
         self.negative_margin = float(negative_margin or 0.0)
@@ -71,18 +73,20 @@ class PersonReID:
             logger.warning(f"{self._lp()}ReID: Gallery not found at {gallery_path}.")
             return
         # Delegate to the generic loader and assign to instance state
-        vectors = self.load_gallery_vectors(gallery_path)
+        vectors, paths = self.load_gallery_vectors(gallery_path, with_paths=True)
         self.gallery_vectors = vectors
+        self.gallery_paths = paths
         logger.debug("%sReID: Loaded %d reference image(s) from %s.", self._lp(), len(vectors), gallery_path)
 
-    def load_gallery_vectors(self, gallery_path: str) -> list[np.ndarray]:
+    def load_gallery_vectors(self, gallery_path: str, with_paths: bool = False) -> list[np.ndarray] | tuple[list[np.ndarray], list[str]]:
         """Loader returning embedding vectors list for a gallery path (used for negatives too)."""
         if not os.path.exists(gallery_path):
-            return []
+            return ([], []) if with_paths else []
 
         cached = _GALLERY_CACHE.get(gallery_path)
-        if cached is not None:
-            return cached
+        cached_paths = _GALLERY_PATH_CACHE.get(gallery_path)
+        if cached is not None and cached_paths is not None and len(cached) == len(cached_paths):
+            return (cached, cached_paths) if with_paths else cached
 
         try:
             os.makedirs(_CACHE_DIR, exist_ok=True)
@@ -91,7 +95,7 @@ class PersonReID:
         gallery_key = hashlib.sha1(os.path.abspath(gallery_path).encode("utf-8")).hexdigest()[:16]
         cache_npz = os.path.join(_CACHE_DIR, f"reid_gallery_cache_{gallery_key}.npz")
 
-        files = [f for f in os.listdir(gallery_path) if f.lower().endswith((".jpg", ".jpeg", ".png"))]
+        files = sorted(f for f in os.listdir(gallery_path) if f.lower().endswith((".jpg", ".jpeg", ".png")))
         current_count = len(files)
         latest_mtime = 0.0
         for f in files:
@@ -105,15 +109,20 @@ class PersonReID:
                 npz_mtime = os.path.getmtime(cache_npz)
                 with np.load(cache_npz, allow_pickle=False) as data:
                     vectors = data["vectors"] if "vectors" in data.files else None
+                    paths_arr = data["paths"] if "paths" in data.files else None
                     saved_count = int(data["count"]) if "count" in data.files else (vectors.shape[0] if vectors is not None else 0)
-                if vectors is not None and npz_mtime >= latest_mtime and saved_count == current_count:
+                if vectors is not None and paths_arr is not None and npz_mtime >= latest_mtime and saved_count == current_count:
                     vectors_list = [vectors[i] for i in range(vectors.shape[0])]
-                    _GALLERY_CACHE[gallery_path] = vectors_list
-                    return vectors_list
+                    paths_list = [str(paths_arr[i]) for i in range(paths_arr.shape[0])]
+                    if len(vectors_list) == len(paths_list):
+                        _GALLERY_CACHE[gallery_path] = vectors_list
+                        _GALLERY_PATH_CACHE[gallery_path] = paths_list
+                        return (vectors_list, paths_list) if with_paths else vectors_list
             except Exception:
                 pass
 
         vectors_list: list[np.ndarray] = []
+        paths_list: list[str] = []
         for filename in files:
             path = os.path.join(gallery_path, filename)
             img = cv2.imread(path)
@@ -122,16 +131,18 @@ class PersonReID:
             try:
                 vec = self.get_embedding(img)
                 vectors_list.append(vec)
+                paths_list.append(path)
             except Exception:
                 continue
         _GALLERY_CACHE[gallery_path] = vectors_list
+        _GALLERY_PATH_CACHE[gallery_path] = paths_list
         if len(vectors_list) > 0:
             try:
                 vectors_array = np.stack(vectors_list)
-                np.savez(cache_npz, vectors=vectors_array, count=len(vectors_list))
+                np.savez(cache_npz, vectors=vectors_array, paths=np.array(paths_list), count=len(vectors_list))
             except Exception:
                 pass
-        return vectors_list
+        return (vectors_list, paths_list) if with_paths else vectors_list
 
     def identify(self, person_crop: np.ndarray) -> tuple[bool, float]:
         """Return (is_match, max_score) against loaded gallery."""
