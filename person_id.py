@@ -114,12 +114,13 @@ class PersonReID:
         cached = _GALLERY_CACHE.get(gallery_path)
         cached_paths = _GALLERY_PATH_CACHE.get(gallery_path)
         cached_sig = _GALLERY_SIG_CACHE.get(gallery_path)
+        rebuild_reason = "cache miss or stale cache"
         if cached is not None and cached_paths is not None and len(cached) == len(cached_paths) and cached_sig == current_sig:
             logger.debug("%sReID: Gallery cache hit (in-memory): %d vectors from %s.", self._lp(), len(cached), gallery_path)
             return (cached, cached_paths) if with_paths else cached
 
         if cached is not None and cached_paths is not None and len(cached) == len(cached_paths) and cached_sig is not None and cached_sig != current_sig:
-            logger.info("%sReID: Gallery changed since in-memory cache was built. Rebuilding embeddings for %s.", self._lp(), gallery_path)
+            rebuild_reason = "gallery changed since in-memory cache was built"
 
         if os.path.exists(cache_npz):
             try:
@@ -146,7 +147,7 @@ class PersonReID:
             except Exception:
                 pass
 
-        logger.info("%sReID: Building gallery embeddings from images in %s.", self._lp(), gallery_path)
+        logger.info("%sReID: Building gallery embeddings from images in %s (%s).", self._lp(), gallery_path, rebuild_reason)
 
         vectors_list: list[np.ndarray] = []
         paths_list: list[str] = []

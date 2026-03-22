@@ -2069,25 +2069,8 @@ def detect_motion(input_video_path, output_dir, fast_processing: bool = False):
 
                         st['trusted'] = bool(trusted_now)
 
-                        # Probation: ignore this person until trusted.
+                        # Probation: fully suppress until trusted (no counting and no drawing).
                         if not trusted_now:
-                            # Still draw the box for visibility/debugging, but don't let it affect ROI/crossing logic.
-                            # Use the same display-id mapping so the label stays consistent (pN), even during probation.
-                            disp_id_preview = None
-                            if session_display_initialized:
-                                if local_id not in person_display_ids:
-                                    person_display_ids[local_id] = person_display_id_counter
-                                    person_display_id_counter += 1
-                                disp_id_preview = person_display_ids[local_id]
-                            else:
-                                if entity_id not in event_entity_display_ids:
-                                    event_entity_display_ids[entity_id] = event_entity_display_id_counter
-                                    event_entity_display_id_counter += 1
-                                disp_id_preview = event_entity_display_ids[entity_id]
-                                if local_id not in event_display_ids:
-                                    event_display_ids[local_id] = disp_id_preview
-
-                            draw_tracked_box(frame, box, local_id, label_name, conf, soc, highlight=False, display_id=disp_id_preview)
                             continue
 
                         # Only count this person once trusted (also include any past tracker ids for this entity).
