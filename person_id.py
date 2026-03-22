@@ -11,6 +11,7 @@ logger = logging.getLogger()
 # Cache gallery embeddings per path to avoid reloading within the same process
 _GALLERY_CACHE: dict[str, list[np.ndarray]] = {}
 _GALLERY_PATH_CACHE: dict[str, list[str]] = {}
+_GALLERY_SIG_CACHE: dict[str, str] = {}
 _CACHE_DIR = os.path.join(os.path.dirname(__file__), "temp")
 
 
@@ -80,13 +81,9 @@ class PersonReID:
 
     def load_gallery_vectors(self, gallery_path: str, with_paths: bool = False) -> list[np.ndarray] | tuple[list[np.ndarray], list[str]]:
         """Loader returning embedding vectors list for a gallery path (used for negatives too)."""
+        gallery_path = os.path.abspath(gallery_path)
         if not os.path.exists(gallery_path):
             return ([], []) if with_paths else []
-
-        cached = _GALLERY_CACHE.get(gallery_path)
-        cached_paths = _GALLERY_PATH_CACHE.get(gallery_path)
-        if cached is not None and cached_paths is not None and len(cached) == len(cached_paths):
-            return (cached, cached_paths) if with_paths else cached
 
         try:
             os.makedirs(_CACHE_DIR, exist_ok=True)
@@ -98,11 +95,31 @@ class PersonReID:
         files = sorted(f for f in os.listdir(gallery_path) if f.lower().endswith((".jpg", ".jpeg", ".png")))
         current_count = len(files)
         latest_mtime = 0.0
+        sig_hasher = hashlib.sha1()
         for f in files:
             try:
-                latest_mtime = max(latest_mtime, os.path.getmtime(os.path.join(gallery_path, f)))
+                path = os.path.join(gallery_path, f)
+                st = os.stat(path)
+                latest_mtime = max(latest_mtime, st.st_mtime)
+                sig_hasher.update(f.encode("utf-8", errors="ignore"))
+                sig_hasher.update(b"|")
+                sig_hasher.update(str(int(st.st_size)).encode("ascii", errors="ignore"))
+                sig_hasher.update(b"|")
+                sig_hasher.update(str(int(getattr(st, "st_mtime_ns", int(st.st_mtime * 1_000_000_000)))).encode("ascii", errors="ignore"))
+                sig_hasher.update(b"\n")
             except Exception:
                 continue
+        current_sig = sig_hasher.hexdigest()
+
+        cached = _GALLERY_CACHE.get(gallery_path)
+        cached_paths = _GALLERY_PATH_CACHE.get(gallery_path)
+        cached_sig = _GALLERY_SIG_CACHE.get(gallery_path)
+        if cached is not None and cached_paths is not None and len(cached) == len(cached_paths) and cached_sig == current_sig:
+            logger.debug("%sReID: Gallery cache hit (in-memory): %d vectors from %s.", self._lp(), len(cached), gallery_path)
+            return (cached, cached_paths) if with_paths else cached
+
+        if cached is not None and cached_paths is not None and len(cached) == len(cached_paths) and cached_sig is not None and cached_sig != current_sig:
+            logger.info("%sReID: Gallery changed since in-memory cache was built. Rebuilding embeddings for %s.", self._lp(), gallery_path)
 
         if os.path.exists(cache_npz):
             try:
@@ -111,15 +128,25 @@ class PersonReID:
                     vectors = data["vectors"] if "vectors" in data.files else None
                     paths_arr = data["paths"] if "paths" in data.files else None
                     saved_count = int(data["count"]) if "count" in data.files else (vectors.shape[0] if vectors is not None else 0)
-                if vectors is not None and paths_arr is not None and npz_mtime >= latest_mtime and saved_count == current_count:
+                    saved_sig = str(data["signature"]) if "signature" in data.files else None
+
+                # Backward-compatible refresh logic:
+                # - Prefer exact signature match for correctness.
+                # - Fallback to old mtime/count check for legacy caches without signature.
+                sig_ok = (saved_sig == current_sig) if saved_sig is not None else (npz_mtime >= latest_mtime and saved_count == current_count)
+                if vectors is not None and paths_arr is not None and sig_ok and saved_count == current_count:
                     vectors_list = [vectors[i] for i in range(vectors.shape[0])]
                     paths_list = [str(paths_arr[i]) for i in range(paths_arr.shape[0])]
                     if len(vectors_list) == len(paths_list):
+                        logger.debug("%sReID: Gallery cache hit (npz): %d vectors from %s.", self._lp(), len(vectors_list), cache_npz)
                         _GALLERY_CACHE[gallery_path] = vectors_list
                         _GALLERY_PATH_CACHE[gallery_path] = paths_list
+                        _GALLERY_SIG_CACHE[gallery_path] = current_sig
                         return (vectors_list, paths_list) if with_paths else vectors_list
             except Exception:
                 pass
+
+        logger.info("%sReID: Building gallery embeddings from images in %s.", self._lp(), gallery_path)
 
         vectors_list: list[np.ndarray] = []
         paths_list: list[str] = []
@@ -136,10 +163,17 @@ class PersonReID:
                 continue
         _GALLERY_CACHE[gallery_path] = vectors_list
         _GALLERY_PATH_CACHE[gallery_path] = paths_list
+        _GALLERY_SIG_CACHE[gallery_path] = current_sig
         if len(vectors_list) > 0:
             try:
                 vectors_array = np.stack(vectors_list)
-                np.savez(cache_npz, vectors=vectors_array, paths=np.array(paths_list), count=len(vectors_list))
+                np.savez(
+                    cache_npz,
+                    vectors=vectors_array,
+                    paths=np.array(paths_list),
+                    count=len(vectors_list),
+                    signature=np.array(current_sig),
+                )
             except Exception:
                 pass
         return (vectors_list, paths_list) if with_paths else vectors_list
