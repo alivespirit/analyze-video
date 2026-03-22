@@ -119,7 +119,7 @@ TESLA_SOC_CHECK_ENABLED = bool(teslapy and TESLA_REFRESH_TOKEN and TESLA_EMAIL)
 
 # --- Object Detection Configuration ---
 OBJECT_DETECTION_MODEL_PATH = os.getenv("OBJECT_DETECTION_MODEL_PATH", default=os.path.join("models", "yolo12n_openvino_model"))
-CONF_THRESHOLD = float(os.getenv("CONF_THRESHOLD", "0.4"))
+CONF_THRESHOLD = float(os.getenv("CONF_THRESHOLD", "0.35"))
 DETECT_CLASSES = [0, 1]  # 0: person, 1: car
 TRACK_ROI_ENABLED = True  # Enable tracker ROI crop (from roi.json: 'tracker_roi' or fallback to motion_detection_roi/legacy)
 COLOR_PERSON = (100, 200, 0)
