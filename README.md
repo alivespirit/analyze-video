@@ -33,7 +33,7 @@ This project is a Python-based application that monitors a folder for new video 
 - **Dynamic Gemini AI Analysis**:
   - **Time-Based Model Selection**: Automatically switches between different Gemini models (e.g., Pro vs. Flash) based on the time of day for cost optimization.
   - **Fallback Models**: Includes logic to fall back to secondary and final models if the primary one fails.
-  - **Custom Prompts**: Uses a `prompt.txt` file for tailored analysis.
+  - **Custom Prompts**: Uses a `config/prompt.txt` file for tailored analysis.
 - **Robust Telegram Integration**:
   - **Grouped Notifications**: Combines multiple insignificant/no-motion events into a single, editable Telegram message to reduce clutter.
   - **Interactive Callbacks**: Allows users to request the full original video via inline buttons.
@@ -138,10 +138,10 @@ pip install -r requirements.txt
    ```
 
 5. **Configure Regions of Interest (ROI):**
-    - Create resolution-specific ROI files in the project directory:
-       - `roi-4k.json`: ROI authored for 4K sources (baseline).
-       - `roi-1080p.json`: ROI authored for 1080p sources (optional).
-       - `roi.json`: legacy fallback if the resolution-specific file is not present.
+    - Create resolution-specific ROI files in the `config/` directory:
+       - `config/roi-4k.json`: ROI authored for 4K sources (baseline).
+       - `config/roi-1080p.json`: ROI authored for 1080p sources (optional).
+       - `config/roi.json`: legacy fallback if the resolution-specific file is not present.
     - You can use the script in `tools/gate_motion_detector.py` as a starting point to select an ROI for your video.
     - Each ROI file consolidates ROIs with clear purposes:
      - `motion_detection_roi`: polygon used for initial motion detection and for deriving the cropped analysis region baseline.
@@ -150,8 +150,8 @@ pip install -r requirements.txt
      - `line_y` (optional): line for gate crossing detection, if not specified value is taken from constants in `detect_motion.py`.
 
 6. **(Optional) Configure AI Models and Prompts:**
-    - Place your custom analysis instructions in `prompt.txt`.
-    - Configure Gemini model selection via `gemini_models.env` (read on every analysis call, no restart needed):
+    - Place your custom analysis instructions in `config/prompt.txt`.
+    - Configure Gemini model selection via `config/gemini_models.env` (read on every analysis call, no restart needed):
        ```env
        MODEL_PRO=
        MODEL_MAIN=gemini-2.5-flash
@@ -202,7 +202,7 @@ pip install -r requirements.txt
      - **Person ReID (Gate Crossings):**
        - During tracking, the analyzer samples person crops near the line tolerance band every `REID_SAMPLING_STRIDE` frames.
        - After a gate crossing is confirmed, these crops are compared against gallery embeddings using Intel's `person-reidentification-retail-0288` model.
-       - Gallery embeddings are cached on disk at `temp/` per gallery path to avoid recomputation across worker processes.
+       - Gallery embeddings are cached on disk at `temp/` per gallery path (configurable via `REID_CACHE_DIR`) to avoid recomputation across worker processes.
        - If a positive match is found, the gate message includes `XX%` and (optionally) the best crop is saved to the daily output folder.
    - **AI Analysis (I/O-Bound Task):** The result is passed to the `io_executor`.
      - For gate crossings or off-peak hours, Gemini is skipped.
@@ -232,8 +232,8 @@ pip install -r requirements.txt
 
 ## Customization
 
-- **Prompt:** Edit `prompt.txt` to change the analysis prompt sent to Gemini AI.
-- **AI Models:** Edit `gemini_models.env` to control which Gemini models are used; changes apply without restarting the app.
+- **Prompt:** Edit `config/prompt.txt` to change the analysis prompt sent to Gemini AI.
+- **AI Models:** Edit `config/gemini_models.env` to control which Gemini models are used; changes apply without restarting the app.
 - **Motion & Detection Parameters:** Adjust constants in `detect_motion.py` to fine-tune sensitivity. Key knobs:
   - `LINE_Y`: horizontal line Y position (gate; also used for car-below-line suppression)
   - `LINE_Y_TOLERANCE`: pixel tolerance around the line to suppress jitter near the threshold (default: 6 for 1080p, 12 for 4K)
@@ -246,6 +246,9 @@ pip install -r requirements.txt
   - `PERSON_MIN_FRAMES`: minimum person-in-ROI frames required to keep an event (default: 10)
   - `MIN_CONTOUR_AREA`: motion contour area threshold for initial motion detection (default: 1800 for 1080p, 7200 for 4K)
   - `CONF_THRESHOLD`: detection confidence threshold for the YOLO model (default: 0.45)
+  - `IOU_THRESHOLD`: IoU threshold passed to `model.track()` (default: 0.7)
+  - `IMGSZ`: inference image size passed to `model.track()` / `model.predict()` (default: 640)
+  - `TRACKER_CONFIG`: path to ByteTrack/BoTSORT config file (default: `config/tracker.yaml`)
   - `HIGHLIGHT_WINDOW_FRAMES`: frames to keep the red highlight after a crossing (default: 5)
   - `CROP_PADDING`: extra pixels around ROI for cropped analysis (default: 30 for 1080p, 60 for 4K)
   - `TRACK_ROI_ENABLED`: enable tracker ROI crop (default: True)
@@ -271,7 +274,9 @@ pip install -r requirements.txt
     - `CAR_SPEEDTRAP_OVERLAY_EXTRA_GAP`: extra spacing between SpeedTrap and event overlay lines
   - `COLOR_PERSON`, `COLOR_CAR`, `COLOR_DEFAULT`, `COLOR_HIGHLIGHT`, `COLOR_LINE`: overlay colors (BGR tuples; defaults in code)
   - `OVERLAY_FONT_SCALE`, `OVERLAY_TEXT_THICKNESS`, `OVERLAY_BOX_THICKNESS`, `OVERLAY_LINE_THICKNESS`, `OVERLAY_LABEL_BG_HEIGHT`, `OVERLAY_PAD_X`, `OVERLAY_PAD_Y`: overlay appearance (resolution-dependent defaults)
-  - `TESLA_EMAIL`, `TESLA_REFRESH_TOKEN`, `TESLA_SOC_FILE`, `TESLA_SOC_CHECK_ENABLED`: Tesla integration parameters (see Tesla section)
+  - `TESLA_EMAIL`, `TESLA_REFRESH_TOKEN`: Tesla API credentials (master only; `detect_motion.py` only reads the cache)
+  - `TESLA_SOC_FILE`: path to Tesla SoC cache file (default: `temp/tesla_soc.txt`)
+  - `TESLA_SOC_DISPLAY_ENABLED`: show SoC overlay on highlight clips (default: `true`)
 - **ReID Parameters (detect_motion.py):**
   - `REID_ENABLED`: enable/disable person re-identification (default: True)
   - `REID_MODEL_PATH`: path to Intel ReID model (default: models/reid/intel/person-reidentification-retail-0288/FP16/person-reidentification-retail-0288.xml)
@@ -286,8 +291,9 @@ pip install -r requirements.txt
   - `REID_DIVERSITY_MIN_DIST`: min cosine distance between selected embeddings (default: 0.2)
   - `REID_NEGATIVE_GALLERY_PATH`: folder with negative reference images (default: person_of_interest_negative/)
   - `REID_NEGATIVE_MARGIN`: match must exceed negatives by at least this cosine margin (default: 0.08)
+  - `REID_CACHE_DIR`: directory for precomputed embedding `.npz` cache files (default: `temp/`); point to a shared NAS path to reuse the master's cache on the worker
 - **ReID Model Location:** By default, the Intel model XML is expected at `models/reid/intel/person-reidentification-retail-0288/FP16/person-reidentification-retail-0288.xml`. Adjust if your model path differs.
-- **ROI:** Modify `roi-4k.json` / `roi-1080p.json` (or legacy `roi.json`) to change the monitored area.
+- **ROI:** Modify `config/roi-4k.json` / `config/roi-1080p.json` (or legacy `config/roi.json`) to change the monitored area.
 - **Object Detection Model:** Choose pre-trained model between `models/*_openvino_model` or place your own exported YOLOv12 OpenVINO model there and adjust `OBJECT_DETECTION_MODEL_PATH`.
   - Follow instructions in [tools/finetuning/](tools/finetuning/) to train your own model if needed.
 
