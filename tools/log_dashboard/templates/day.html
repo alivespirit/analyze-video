@@ -426,7 +426,7 @@
         {% set ns = namespace(seen={}) %}
         <ul class="logs">
           {% for e in entries %}
-          <li class="log {{ e.level|lower }}"{% if e.video and not ns.seen.get(e.video) %} id="log-{{ e.video }}"{% set _ = ns.seen.update({e.video: True}) %}{% endif %}>
+          <li class="log {{ e.level|lower }}{% if e.worker %} worker{% endif %}"{% if e.video and not ns.seen.get(e.video) %} id="log-{{ e.video }}"{% set _ = ns.seen.update({e.video: True}) %}{% endif %}>
             <div class="meta">
               <span class="ts">{{ e.ts.strftime('%H:%M:%S') }}</span>
               <span class="lvl">{{ e.level }}</span>

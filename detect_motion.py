@@ -18,11 +18,6 @@ try:
 except Exception as e:
     raise
 
-# --- Import teslapy for Tesla integration ---
-try:
-    import teslapy
-except ImportError:
-    teslapy = None
 
 logger = logging.getLogger()
 
@@ -77,9 +72,9 @@ class TimingProfiler:
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 
 # --- Motion detection configuration ---
-ROI_CONFIG_FILE = os.path.join(SCRIPT_DIR, "roi.json")
-ROI_CONFIG_FILE_1080P = os.path.join(SCRIPT_DIR, "roi-1080p.json")
-ROI_CONFIG_FILE_4K = os.path.join(SCRIPT_DIR, "roi-4k.json")
+ROI_CONFIG_FILE = os.path.join(SCRIPT_DIR, "config", "roi.json")
+ROI_CONFIG_FILE_1080P = os.path.join(SCRIPT_DIR, "config", "roi-1080p.json")
+ROI_CONFIG_FILE_4K = os.path.join(SCRIPT_DIR, "config", "roi-4k.json")
 PADDING_SECONDS = 1.5
 WARMUP_FRAMES = 15
 MAX_EVENT_GAP_SECONDS = 3.0
@@ -110,18 +105,18 @@ SAVE_INSIGNIFICANT_FRAMES = True
 SEND_INSIGNIFICANT_FRAMES = False
 PERSON_MIN_FRAMES = 10 # Minimum frames with person inside ROI to consider event significant, if less then sent to Gemini for analysis
 
-# --- Tesla config ---
-TESLA_EMAIL = os.getenv("TESLA_EMAIL")
-TESLA_REFRESH_TOKEN = os.getenv("TESLA_REFRESH_TOKEN")
-TESLA_SOC_FILE = os.path.join(SCRIPT_DIR, "temp", "tesla_soc.txt")
-TESLA_LAST_CHECK = 0
-TESLA_SOC_CHECK_ENABLED = bool(teslapy and TESLA_REFRESH_TOKEN and TESLA_EMAIL)
+# --- Tesla SoC display config ---
+TESLA_SOC_FILE = os.getenv("TESLA_SOC_FILE", os.path.join(SCRIPT_DIR, "temp", "tesla_soc.txt"))
+TESLA_SOC_DISPLAY_ENABLED = os.getenv("TESLA_SOC_DISPLAY_ENABLED", "true").lower() == "true"
 
 # --- Object Detection Configuration ---
 OBJECT_DETECTION_MODEL_PATH = os.getenv("OBJECT_DETECTION_MODEL_PATH", default=os.path.join("models", "yolo12n_openvino_model"))
 CONF_THRESHOLD = float(os.getenv("CONF_THRESHOLD", "0.35"))
 DETECT_CLASSES = [0, 1]  # 0: person, 1: car
-TRACK_ROI_ENABLED = True  # Enable tracker ROI crop (from roi.json: 'tracker_roi' or fallback to motion_detection_roi/legacy)
+TRACK_ROI_ENABLED = os.getenv("TRACK_ROI_ENABLED", "true").lower() == "true"  # Enable tracker ROI crop (from roi.json: 'tracker_roi' or fallback to motion_detection_roi/legacy)
+TRACKER_CONFIG = os.getenv("TRACKER_CONFIG", os.path.join(SCRIPT_DIR, "config", "tracker.yaml"))
+IOU_THRESHOLD = float(os.getenv("IOU_THRESHOLD", "0.7"))
+IMGSZ = int(os.getenv("IMGSZ", "640"))
 COLOR_PERSON = (100, 200, 0)
 COLOR_CAR = (200, 120, 0)
 COLOR_DEFAULT = (255, 255, 255)
@@ -132,8 +127,8 @@ STABLE_MIN_FRAMES = 2  # frames outside tolerance required to confirm stable sid
 DWELL_SECONDS = 2.0    # seconds to stay on the other side to confirm a crossing
 
 # --- Person ReID Configuration ---
-REID_ENABLED = True
-REID_MODEL_PATH = os.path.join(
+REID_ENABLED = os.getenv("REID_ENABLED", "true").lower() == "true"
+REID_MODEL_PATH = os.getenv("REID_MODEL_PATH", os.path.join(
     SCRIPT_DIR,
     "models",
     "reid",
@@ -141,9 +136,9 @@ REID_MODEL_PATH = os.path.join(
     "person-reidentification-retail-0288",
     "FP16",
     "person-reidentification-retail-0288.xml",
-)
+))
 REID_GALLERY_PATH = os.getenv("REID_GALLERY_PATH", os.path.join(SCRIPT_DIR, "person_of_interest"))
-REID_THRESHOLD = 0.6 # cosine similarity threshold
+REID_THRESHOLD = float(os.getenv("REID_THRESHOLD", "0.6")) # cosine similarity threshold
 REID_SAMPLING_STRIDE = 2  # sample every Nth frame near the line for ReID
 REID_MAX_SAMPLES = 128 # maximum number of ReID samples to collect per event
 SAVE_REID_BEST_CROP = True
@@ -390,84 +385,22 @@ def scale_roi_points_to_frame(
         return points
 
 
-def load_tesla_soc(filepath):
-    """Loads the Tesla SoC from the cache file if it exists."""
-    if os.path.exists(filepath):
-        with open(filepath, 'r') as f:
-            soc = int(f.read().strip())
-            return soc
-    return None
-
-
-def check_tesla_soc(file_basename):
+def check_tesla_soc():
     """
-    Checks the Tesla's state of charge (SoC), using a cached value if recent.
-    
-    1. Checks for `tesla_soc.txt`.
-    2. If it exists and was modified < 2 hours ago, returns the value from the file.
-    3. Otherwise, fetches the SoC from the Tesla API, saves it to the file, and returns it.
+    Returns the cached Tesla SoC from tesla_soc.txt, or None if unavailable/stale.
 
-    Args:
-        file_basename (str): The basename of the video file being processed, for logging.
-
-    Returns:
-        int: The battery level (0-100) or None if an error occurs.
+    SoC fetching from the Tesla API is handled separately by main.py on a periodic schedule.
+    This function only reads the cache file. A cached value older than 2 days is considered stale.
     """
-    global TESLA_LAST_CHECK
-    soc = None
-    if os.path.exists(TESLA_SOC_FILE):
-        last_modified_time = os.path.getmtime(TESLA_SOC_FILE)
-        soc = load_tesla_soc(TESLA_SOC_FILE)
-        current_time = time.time()
-        if (current_time - last_modified_time < 7200) or (current_time - TESLA_LAST_CHECK < 600):
-            if soc is not None:
-                logger.info(f"[{file_basename}] Using cached Tesla SoC: {soc}%")
-                return soc
-            else:
-                logger.warning(f"[{file_basename}] Could not read cached SoC file. Will fetch fresh data.")
-
-    logger.info(f"[{file_basename}] Fetching fresh Tesla SoC from API...")
     try:
-        with teslapy.Tesla(email=TESLA_EMAIL, cache_file=os.path.join(SCRIPT_DIR, "temp", "tesla_token_cache.json")) as tesla:
-            if not tesla.authorized:
-                tesla.refresh_token(refresh_token=TESLA_REFRESH_TOKEN)
-            vehicles = tesla.vehicle_list()
-            if not vehicles:
-                logger.error(f"[{file_basename}] No vehicles found in Tesla account.")
-                return None
-            vehicle = vehicles[0]
-            charge_state = vehicle.get_vehicle_data().get('charge_state', {})
-            battery_level = charge_state.get('battery_level')
-
-            TESLA_LAST_CHECK = time.time()
-
-            if battery_level is not None:
-                logger.info(f"[{file_basename}] Successfully fetched Tesla SoC: {battery_level}%")
-                try:
-                    with open(TESLA_SOC_FILE, 'w') as f:
-                        f.write(str(battery_level))
-                except IOError as e:
-                    logger.error(f"[{file_basename}] Could not write to Tesla SoC cache file: {e}")
-                return battery_level
-            else:
-                if soc is not None:
-                    logger.warning(f"[{file_basename}] Could not retrieve 'battery_level' from Tesla API response. Using cached Tesla SoC: {soc}%")
-                    return soc
-                else:
-                    logger.warning(f"[{file_basename}] Could not retrieve 'battery_level' from Tesla API response and no cached SoC available.")
-                    return None
-
-    except Exception as e:
-        TESLA_LAST_CHECK = time.time()
-        if soc is not None:
-            if "408 Client Error" in str(e):
-                logger.info(f"[{file_basename}] Tesla is asleep. Using cached Tesla SoC: {soc}%", exc_info=False)
-            else:
-                logger.warning(f"[{file_basename}] Tesla call failed: {e}. Using cached Tesla SoC: {soc}%", exc_info=False)
-            return soc
-        else:
-            logger.warning(f"[{file_basename}] Tesla call failed and no cached SoC available: {e}", exc_info=False)
+        if not os.path.exists(TESLA_SOC_FILE):
             return None
+        if time.time() - os.path.getmtime(TESLA_SOC_FILE) > 172800:  # older than 2 days
+            return None
+        with open(TESLA_SOC_FILE, "r") as f:
+            return int(f.read().strip())
+    except (OSError, ValueError):
+        return None
 
 
 def read_roi_config(file_path):
@@ -527,7 +460,7 @@ def draw_tracked_box(frame, box, local_id, label_name, conf, soc, highlight=Fals
         # Add local_id for debugging if needed: label_text = f"{label_name} {local_id} {conf:.0%}"
         label_text = f"{label_name} {conf:.0%}" 
 
-    if TESLA_SOC_CHECK_ENABLED:
+    if TESLA_SOC_DISPLAY_ENABLED:
         if label_name == 'car':
             if x1 <= TESLA_TX <= x2 and y1 <= TESLA_TY <= y2:
                 if soc is not None:
@@ -636,7 +569,7 @@ def detect_draw_and_save_snapshot(frame, soc, output_dir, input_video_path, file
     if classes is None:
         classes = DETECT_CLASSES
     try:
-        results = object_detection_model.predict(frame, imgsz=640, conf=CONF_THRESHOLD, verbose=False, classes=classes)
+        results = object_detection_model.predict(frame, imgsz=IMGSZ, conf=CONF_THRESHOLD, verbose=False, classes=classes)
     except Exception as e:
         logger.warning("[%s] Snapshot detection failed: %s", file_basename, e)
         return None
@@ -1443,7 +1376,7 @@ def detect_motion(input_video_path, output_dir, fast_processing: bool = False):
             clip_end = motion_frame_indices[i]
         sub_clips.append((clip_start, clip_end))
 
-    soc = check_tesla_soc(file_basename) if TESLA_SOC_CHECK_ENABLED else None
+    soc = check_tesla_soc() if TESLA_SOC_DISPLAY_ENABLED else None
 
     logger.info(f"[{file_basename}] Found {len(sub_clips)} raw motion event(s). Filtering by duration...")
     significant_sub_clips = []
@@ -1747,14 +1680,14 @@ def detect_motion(input_video_path, output_dir, fast_processing: bool = False):
             if prof.enabled:
                 t0 = time.perf_counter()
                 results = object_detection_model.track(
-                    track_frame, imgsz=640, conf=CONF_THRESHOLD, persist=True, verbose=False,
-                    tracker="tracker.yaml", classes=DETECT_CLASSES
+                    track_frame, imgsz=IMGSZ, conf=CONF_THRESHOLD, iou=IOU_THRESHOLD,
+                    persist=True, verbose=False, tracker=TRACKER_CONFIG, classes=DETECT_CLASSES
                 )
                 prof.add("track.yolo_track", time.perf_counter() - t0)
             else:
                 results = object_detection_model.track(
-                    track_frame, imgsz=640, conf=CONF_THRESHOLD, persist=True, verbose=False,
-                    tracker="tracker.yaml", classes=DETECT_CLASSES
+                    track_frame, imgsz=IMGSZ, conf=CONF_THRESHOLD, iou=IOU_THRESHOLD,
+                    persist=True, verbose=False, tracker=TRACKER_CONFIG, classes=DETECT_CLASSES
                 )
 
             # Count whether this frame contains a person within ROI and whether any crossing/highlight happens

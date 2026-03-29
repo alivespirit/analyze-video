@@ -293,6 +293,25 @@ pip install -r requirements.txt
 
 ---
 
+## Remote Worker (Optional)
+
+Motion detection can be offloaded to a separate machine over HTTP, freeing the master's CPU/battery. The master falls back to local processing automatically if the worker is unavailable or has low battery.
+
+Enable in the master's `.env`:
+
+```env
+WORKER_ENABLED=true
+WORKER_URL=http://10.0.0.2:8741
+WORKER_TIMEOUT=120
+WORKER_MIN_BATTERY=5
+```
+
+The worker machine runs `uvicorn worker.server:app` from the same `analyze-video` directory, with its own `.env` pointing to the shared NAS mount. It can use a different model, confidence threshold, or tracker config than the master.
+
+See [worker/README.md](worker/README.md) for full setup instructions.
+
+---
+
 ## Log Dashboard
 
 A lightweight web dashboard that reads existing log files and provides per-day insights and a readable log viewer.

@@ -1,0 +1,11 @@
+python-dotenv
+moviepy
+opencv-python-headless
+openvino
+numpy
+psutil
+tensorrt-cu12>=7.0.0,!=10.1.0
+lap
+ultralytics
+fastapi
+uvicorn

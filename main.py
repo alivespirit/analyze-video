@@ -311,7 +311,14 @@ if not os.path.exists(OBJECT_DETECTION_MODEL_PATH):
 
 # Import after .env and logging are configured to ensure modules read env vars
 from analyze_video import analyze_video
-from detect_motion import detect_motion
+from worker.client import (
+    detect_motion_local,
+    detect_motion_remote_async,
+    worker_available,
+    invalidate_worker_health,
+    get_worker_battery,
+    WORKER_ENABLED,
+)
 from telegram_notification import button_callback, send_notifications, reaction_callback, cleanup_temp_media
 from path_utils import parse_datetime_from_path
 import re
@@ -495,20 +502,40 @@ class FileHandler(FileSystemEventHandler):
                 {"start_ts": time.time(), "fast_processing": fast_processing, "motion_queue_depth": queue_depth},
             )
             
-            # --- REFACTORED: Run motion detection and Gemini analysis in separate executors ---
-            # 1. Run CPU-bound motion detection in the single-worker executor.
+            # --- Run motion detection: async remote (worker) or sync local (executor) ---
             self.logger.info(
                 f"[{file_basename}] Queuing motion detection... (motion_queue_depth={queue_depth}, fast_processing={fast_processing})"
             )
-            try:
-                motion_future = current_loop.run_in_executor(
-                    motion_executor, detect_motion, file_path, TEMP_DIR, fast_processing
-                )
-            except Exception:
-                motion_queue_dec()
-                raise
-            motion_future.add_done_callback(lambda _f: motion_queue_dec())
-            motion_result = await motion_future
+            if WORKER_ENABLED and worker_available():
+                # Async remote dispatch — no executor needed, multiple can run concurrently
+                try:
+                    motion_queue_dec()  # don't hold the queue slot while waiting on I/O
+                    motion_result = await detect_motion_remote_async(file_path, TEMP_DIR, fast_processing)
+                except Exception as e:
+                    self.logger.warning(f"[{file_basename}] Worker dispatch failed: {e}. Falling back to local.")
+                    invalidate_worker_health()
+                    # Re-acquire queue slot for local processing
+                    queue_depth, fast_processing = motion_queue_inc_and_decide_fast()
+                    try:
+                        motion_future = current_loop.run_in_executor(
+                            motion_executor, detect_motion_local, file_path, TEMP_DIR, fast_processing
+                        )
+                    except Exception:
+                        motion_queue_dec()
+                        raise
+                    motion_future.add_done_callback(lambda _f: motion_queue_dec())
+                    motion_result = await motion_future
+            else:
+                # Local CPU-bound processing in single-worker executor
+                try:
+                    motion_future = current_loop.run_in_executor(
+                        motion_executor, detect_motion_local, file_path, TEMP_DIR, fast_processing
+                    )
+                except Exception:
+                    motion_queue_dec()
+                    raise
+                motion_future.add_done_callback(lambda _f: motion_queue_dec())
+                motion_result = await motion_future
             self.logger.info(f"[{file_basename}] Motion detection complete. Status: {motion_result.get('status')}")
 
             # 2. Run I/O-bound Gemini analysis in the multi-worker executor.
@@ -531,14 +558,16 @@ class FileHandler(FileSystemEventHandler):
             update_processing_ledger(file_path, "failed", {"end_ts": time.time(), "error": str(e)[:256]})
 
         battery = psutil.sensors_battery()
+        worker_bat = get_worker_battery() if WORKER_ENABLED else None
+        worker_bat_text = f" / W {int(worker_bat)}%" if worker_bat is not None else ""
         if not battery.power_plugged:
             battery_time_left = time.strftime("%H:%M", time.gmtime(battery.secsleft))
             if battery.percent <= 50:
-                video_response += f"\n\U0001FAAB *{battery.percent}% ~{battery_time_left}*"
+                video_response += f"\n\U0001FAAB *{battery.percent}% ~{battery_time_left}{worker_bat_text}*"
                 if battery.percent <= 10:
                     video_response += "\n_I don't feel so good, Mr.Stark. I don't want to go..._ \U0001F622"
             else:
-                video_response += f"\n\U0001F50B *{battery.percent}% ~{battery_time_left}*"
+                video_response += f"\n\U0001F50B *{battery.percent}% ~{battery_time_left}{worker_bat_text}*"
 
         # Visibility: mark fast-processed videos in Telegram message
         if fast_processing:
@@ -780,6 +809,87 @@ async def retention_scheduler(stop_event: asyncio.Event, root: str, days: int, l
             await loop.run_in_executor(None, run_retention_cleanup, VIDEO_FOLDER, days, TEMP_DIR, TEMP_RETENTION_DAYS, logger)
         except Exception as e:
             logger.warning(f"Scheduled retention cleanup failed: {e}")
+
+
+# --- Tesla SoC periodic fetcher ---
+TESLA_SOC_FILE = os.path.join(TEMP_DIR, "tesla_soc.txt")
+TESLA_SOC_FETCH_ENABLED = bool(TESLA_EMAIL and TESLA_REFRESH_TOKEN)
+TESLA_SOC_FRESH_SECONDS = 7200   # skip API if cache is younger than 2 hours
+TESLA_SOC_POLL_SECONDS = 600     # try API every 10 minutes when cache is stale
+
+
+def fetch_tesla_soc():
+    """Fetch Tesla SoC from the API and write to cache file. Returns battery_level or None."""
+    try:
+        import teslapy
+    except ImportError:
+        logger.warning("teslapy not installed, cannot fetch Tesla SoC.")
+        return None
+
+    logger.debug("Tesla SoC: calling API...")
+    try:
+        with teslapy.Tesla(email=TESLA_EMAIL, cache_file=os.path.join(TEMP_DIR, "tesla_token_cache.json")) as tesla:
+            if not tesla.authorized:
+                tesla.refresh_token(refresh_token=TESLA_REFRESH_TOKEN)
+            vehicles = tesla.vehicle_list()
+            if not vehicles:
+                logger.debug("Tesla SoC: no vehicles found.")
+                return None
+            vehicle = vehicles[0]
+            charge_state = vehicle.get_vehicle_data().get("charge_state", {})
+            battery_level = charge_state.get("battery_level")
+            if battery_level is not None:
+                try:
+                    with open(TESLA_SOC_FILE, "w") as f:
+                        f.write(str(battery_level))
+                except IOError as e:
+                    logger.warning("Tesla SoC: could not write cache file: %s", e)
+                logger.info("Tesla SoC fetched: %s%%", battery_level)
+                return battery_level
+            logger.debug("Tesla SoC: battery_level not in API response.")
+            return None
+    except Exception as e:
+        if "408 Client Error" in str(e):
+            logger.debug("Tesla SoC: vehicle is asleep.")
+        else:
+            logger.debug("Tesla SoC: API call failed: %s", e)
+        return None
+
+
+async def tesla_soc_scheduler(stop_event: asyncio.Event):
+    """Periodically fetch Tesla SoC in the background.
+
+    If the cache file is fresh (< 2 hours old), skip the API call.
+    Otherwise, attempt the API every 10 minutes.
+    """
+    loop = asyncio.get_running_loop()
+    while not stop_event.is_set():
+        # Check if cache is fresh enough
+        try:
+            if os.path.exists(TESLA_SOC_FILE):
+                age = time.time() - os.path.getmtime(TESLA_SOC_FILE)
+                if age < TESLA_SOC_FRESH_SECONDS:
+                    # Cache is fresh, sleep until it would go stale
+                    wait = TESLA_SOC_FRESH_SECONDS - age + 10
+                    try:
+                        await asyncio.wait_for(stop_event.wait(), timeout=wait)
+                    except asyncio.TimeoutError:
+                        pass
+                    continue
+        except OSError:
+            pass
+
+        # Cache is stale or missing — try the API
+        try:
+            await loop.run_in_executor(None, fetch_tesla_soc)
+        except Exception as e:
+            logger.debug("Tesla SoC scheduler error: %s", e)
+
+        # Wait before next attempt
+        try:
+            await asyncio.wait_for(stop_event.wait(), timeout=TESLA_SOC_POLL_SECONDS)
+        except asyncio.TimeoutError:
+            pass
 
 
 def update_processing_ledger(file_path: str, status: str, extra: dict | None = None):
@@ -1053,7 +1163,7 @@ async def run_telegram_bot(stop_event):
         logger.info("Telegram application initialized.")
         await application.start()
         logger.info("Telegram application started.")
-        await application.updater.start_polling(poll_interval=1.0, timeout=20, allowed_updates=["message_reaction", "callback_query"])
+        await application.updater.start_polling(poll_interval=5.0, timeout=20, allowed_updates=["message_reaction", "callback_query"])
         logger.info("Telegram bot polling started.")
         await stop_event.wait() # Wait for the signal to stop
     except asyncio.CancelledError:
@@ -1085,7 +1195,7 @@ async def run_file_watcher(stop_event):
     try:
         loop = asyncio.get_running_loop()
         event_handler = FileHandler(loop, application) # Pass configured app
-        observer = Observer()
+        observer = Observer(timeout=5)
         # VIDEO_FOLDER existence already checked at startup
 
         observer.schedule(event_handler, path=VIDEO_FOLDER, recursive=True) # WATCH RECURSIVELY
@@ -1097,7 +1207,7 @@ async def run_file_watcher(stop_event):
                  logger.error("File watcher observer thread died unexpectedly.")
                  stop_event.set()
                  break
-             await asyncio.sleep(1) # Check every second
+             await asyncio.sleep(5)
 
     except asyncio.CancelledError:
         logger.info("File watcher task cancelled.")
@@ -1132,7 +1242,7 @@ async def run_main_script_watcher(stop_event, watch_dir):
     observer = None
     try:
         event_handler = MainScriptChangeHandler(stop_event, watch_dir)
-        observer = Observer()
+        observer = Observer(timeout=5)
         observer.schedule(event_handler, path=watch_dir, recursive=False)
         observer.start()
         logger.info("Self-watcher started.")
@@ -1142,7 +1252,7 @@ async def run_main_script_watcher(stop_event, watch_dir):
                 logger.error("Self-watcher observer thread died unexpectedly.")
                 stop_event.set()
                 break
-            await asyncio.sleep(1)
+            await asyncio.sleep(5)
 
     except asyncio.CancelledError:
         logger.info("Main script watcher task cancelled.")
@@ -1188,6 +1298,9 @@ async def main():
 
     # Schedule daily retention cleanup
     asyncio.create_task(retention_scheduler(stop_event, VIDEO_FOLDER, RETENTION_DAYS, logger))
+    # Schedule periodic Tesla SoC fetching
+    if TESLA_SOC_FETCH_ENABLED:
+        asyncio.create_task(tesla_soc_scheduler(stop_event), name="TeslaSoCSchedulerTask")
     # Use task names for better debugging if needed
     telegram_task = asyncio.create_task(run_telegram_bot(stop_event), name="TelegramBotTask")
     watcher_task = asyncio.create_task(run_file_watcher(stop_event), name="FileWatcherTask")
@@ -1222,7 +1335,7 @@ async def main():
         try:
             log_dashboard_dir = os.path.join(SCRIPT_DIR, "tools", "log_dashboard")
             if os.path.isdir(log_dashboard_dir):
-                observer = Observer()
+                observer = Observer(timeout=5)
                 observer.schedule(LogDashboardChangeHandler(dashboard_runner), path=log_dashboard_dir, recursive=True)
                 observer.start()
                 logger.info(f"Watching log dashboard directory for changes: {log_dashboard_dir}")
@@ -1233,7 +1346,7 @@ async def main():
                             if not observer.is_alive():
                                 logger.error("Log dashboard watcher died unexpectedly.")
                                 break
-                            await asyncio.sleep(1)
+                            await asyncio.sleep(5)
                     finally:
                         try:
                             observer.stop()

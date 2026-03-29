@@ -20,13 +20,13 @@ VIDEO_FOLDER = os.getenv("VIDEO_FOLDER", default=None)
 # Patterns used by CustomTimedRotatingFileHandler in main.py
 ROTATED_PATTERN = re.compile(r"^(?P<base>.+)_((?P<date>\d{4}-\d{2}-\d{2})).log$")
 
-# Log line pattern: "YYYY-MM-DD HH:MM:SS - LEVEL - message"
+# Log line pattern: optional [W] prefix (legacy) + "YYYY-MM-DD HH:MM:SS - LEVEL - message"
 LINE_RE = re.compile(
-    r"^(?P<ts>\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}) - (?P<level>[A-Z]+) - (?P<message>.*)$"
+    r"^(?P<worker_prefix>\[W\] )?(?P<ts>\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}) - (?P<level>[A-Z]+) - (?P<message>.*)$"
 )
 
-# Optional video basename in message: "[basename] Content..."
-MSG_VIDEO_RE = re.compile(r"^\[(?P<video>[^\]]+)\]\s*(?P<content>.*)$")
+# Optional video basename in message, with optional [W] worker tag: "[basename] [W] Content..."
+MSG_VIDEO_RE = re.compile(r"^\[(?P<video>[^\]]+)\]\s*(?P<worker_inline>\[W\] )?(?P<content>.*)$")
 
 # Metrics message patterns
 STATUS_RE = re.compile(r"Motion detection complete\. Status: (?P<status>[a-z_]+)")
@@ -205,15 +205,18 @@ def parse_log_lines(path: str, day: str) -> List[Dict]:
             msg = m.group("message")
             vid = None
             content = msg
+            is_worker = bool(m.group("worker_prefix"))
             vm = MSG_VIDEO_RE.match(msg)
             if vm:
                 vid = vm.group("video")
+                if vm.group("worker_inline"):
+                    is_worker = True
                 content = vm.group("content")
             try:
                 ts = datetime.strptime(ts_str, "%Y-%m-%d %H:%M:%S")
             except ValueError:
                 continue
-            entries.append({"ts": ts, "level": level, "video": vid, "content": content})
+            entries.append({"ts": ts, "level": level, "video": vid, "content": content, "worker": is_worker})
     return entries
 
 

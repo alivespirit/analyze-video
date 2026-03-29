@@ -12,7 +12,7 @@ logger = logging.getLogger()
 _GALLERY_CACHE: dict[str, list[np.ndarray]] = {}
 _GALLERY_PATH_CACHE: dict[str, list[str]] = {}
 _GALLERY_SIG_CACHE: dict[str, str] = {}
-_CACHE_DIR = os.path.join(os.path.dirname(__file__), "temp")
+_CACHE_DIR = os.environ.get("REID_CACHE_DIR", os.path.join(os.path.dirname(__file__), "temp"))
 
 
 class PersonReID:

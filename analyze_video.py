@@ -184,7 +184,7 @@ def analyze_video(motion_result, video_path):
                 return {'response': timestamp + "\u274C Відео не вдалося прочитати.", 'insignificant_frames': motion_result['insignificant_frames'], 'clip_path': motion_result.get('clip_path')}
 
         # --- Load model names from gemini_models.env on each call ---
-        models_env_path = os.path.join(SCRIPT_DIR, "gemini_models.env")
+        models_env_path = os.path.join(SCRIPT_DIR, "config", "gemini_models.env")
         try:
             models_env = dotenv_values(models_env_path) or {}
         except Exception as e_env:
@@ -221,7 +221,7 @@ def analyze_video(motion_result, video_path):
         sampling_rate = 5
         max_retries = 3
 
-        prompt_file_path = os.path.join(os.path.dirname(__file__), "prompt.txt")
+        prompt_file_path = os.path.join(os.path.dirname(__file__), "config", "prompt.txt")
         try:
             with open(prompt_file_path, "r", encoding="utf-8") as prompt_file:
                 prompt = prompt_file.read().strip()
