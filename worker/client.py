@@ -67,10 +67,11 @@ def _check_worker_health() -> bool:
         battery = data.get("battery_percent")
         _last_worker_battery = battery
         if battery is not None and battery < WORKER_MIN_BATTERY:
-            logger.info("Worker battery low (%s%%), skipping remote dispatch.", battery)
+            logger.warning("Worker battery low (%s%%), skipping remote dispatch.", battery)
             return False
         return True
-    except Exception:
+    except Exception as e:
+        logger.warning("Worker health check failed: %r", e)
         return False
 
 
@@ -80,8 +81,13 @@ def worker_available() -> bool:
     now = time.monotonic()
     if now - _last_health_time < WORKER_HEALTH_CACHE_SECONDS:
         return _last_health_ok
+    was_ok = _last_health_ok
     _last_health_ok = _check_worker_health()
     _last_health_time = now
+    if was_ok and not _last_health_ok:
+        logger.warning("Worker became unavailable.")
+    elif not was_ok and _last_health_ok:
+        logger.info("Worker is back online.")
     return _last_health_ok
 
 

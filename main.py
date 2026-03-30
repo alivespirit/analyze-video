@@ -506,7 +506,10 @@ class FileHandler(FileSystemEventHandler):
             self.logger.info(
                 f"[{file_basename}] Queuing motion detection... (motion_queue_depth={queue_depth}, fast_processing={fast_processing})"
             )
-            if WORKER_ENABLED and worker_available():
+            use_worker = WORKER_ENABLED and worker_available()
+            if WORKER_ENABLED and not use_worker:
+                self.logger.warning(f"[{file_basename}] Worker unavailable, processing locally.")
+            if use_worker:
                 # Async remote dispatch — no executor needed, multiple can run concurrently
                 try:
                     motion_queue_dec()  # don't hold the queue slot while waiting on I/O
