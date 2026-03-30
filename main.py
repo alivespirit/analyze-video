@@ -673,7 +673,17 @@ def write_processing_ledger(path: str, ledger: dict):
             tmp_path = path + ".tmp"
             with open(tmp_path, "w", encoding="utf-8") as f:
                 json.dump(ledger, f)
-            os.replace(tmp_path, path)
+            # On Windows, Defender's real-time scan can briefly hold the .tmp file
+            # open after the write, causing os.replace() to fail with WinError 5.
+            # Retry a few times with a short delay to ride out the scan window.
+            for attempt in range(5):
+                try:
+                    os.replace(tmp_path, path)
+                    break
+                except OSError:
+                    if attempt == 4:
+                        raise
+                    time.sleep(0.05 * (attempt + 1))
         except Exception as e:
             logger.error(f"Failed to write processing ledger '{path}': {e}")
 
