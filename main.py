@@ -360,7 +360,7 @@ except Exception as e:
 # --- Motion queue depth tracking (for adaptive fast-processing) ---
 # ThreadPoolExecutor doesn't expose its queue size as public API; we track it ourselves.
 # Depth includes the currently running item (if any) plus all waiting submissions.
-MOTION_QUEUE_FAST_THRESHOLD = int(os.getenv("MOTION_QUEUE_FAST_THRESHOLD", "10"))
+MOTION_QUEUE_FAST_THRESHOLD = int(os.getenv("MOTION_QUEUE_FAST_THRESHOLD", "8"))
 # Hysteresis thresholds (preferred). If not set, fall back to MOTION_QUEUE_FAST_THRESHOLD.
 MOTION_QUEUE_FAST_ENTER_THRESHOLD = int(
     os.getenv("MOTION_QUEUE_FAST_ENTER_THRESHOLD", str(MOTION_QUEUE_FAST_THRESHOLD))

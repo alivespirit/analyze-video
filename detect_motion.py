@@ -84,8 +84,8 @@ MIN_INSIGNIFICANT_EVENT_DURATION_SECONDS = 0.2 # Events shorter than this are di
 # <= TRACK_FULL_UNTIL_SECONDS: track all frames, render all frames
 # > TRACK_FULL_UNTIL_SECONDS and <= TRACK_SKIP_FROM_SECONDS: track all frames, render every 2nd frame
 # > TRACK_SKIP_FROM_SECONDS: track every 2nd frame, render every 2nd frame (legacy behavior)
-TRACK_FULL_UNTIL_SECONDS = 6.0
-TRACK_SKIP_FROM_SECONDS = 12.0
+TRACK_FULL_UNTIL_SECONDS = float(os.getenv("TRACK_FULL_UNTIL_SECONDS", "6.0"))
+TRACK_SKIP_FROM_SECONDS = float(os.getenv("TRACK_SKIP_FROM_SECONDS", "12.0"))
 
 # Fast-processing overrides (used when backlog is high)
 FAST_MOTION_STRIDE = int(os.getenv("FAST_MOTION_STRIDE", "3"))
