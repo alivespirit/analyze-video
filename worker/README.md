@@ -99,8 +99,10 @@ WORKER_MIN_BATTERY=5       # skip worker if its battery is below this %
 Run from the `analyze-video` directory:
 
 ```bash
-uvicorn worker.server:app --host 0.0.0.0 --port 8741
+uvicorn worker.server:app --host 0.0.0.0 --port 8741 --timeout-keep-alive 120
 ```
+
+`--timeout-keep-alive 120` raises the idle connection timeout from uvicorn's default of 5 s, preventing TCP resets on long-running detection jobs.
 
 ---
 

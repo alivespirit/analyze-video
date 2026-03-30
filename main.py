@@ -512,7 +512,7 @@ class FileHandler(FileSystemEventHandler):
                     motion_queue_dec()  # don't hold the queue slot while waiting on I/O
                     motion_result = await detect_motion_remote_async(file_path, TEMP_DIR, fast_processing)
                 except Exception as e:
-                    self.logger.warning(f"[{file_basename}] Worker dispatch failed: {e}. Falling back to local.")
+                    self.logger.warning(f"[{file_basename}] Worker dispatch failed: {e!r}. Falling back to local.")
                     invalidate_worker_health()
                     # Re-acquire queue slot for local processing
                     queue_depth, fast_processing = motion_queue_inc_and_decide_fast()
