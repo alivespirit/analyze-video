@@ -16,6 +16,7 @@ import os
 import shutil
 import tempfile
 import threading
+import time as _time
 
 import psutil
 from dotenv import load_dotenv
@@ -34,6 +35,7 @@ _MASTER_PREFIX_NORM_UPPER = _MASTER_PREFIX_NORM.upper()
 
 # --- Worker settings ---
 WORKER_MAX_CONCURRENT = int(os.getenv("WORKER_MAX_CONCURRENT", "2"))
+GALLERY_PRECHECK_INTERVAL = int(os.getenv("GALLERY_PRECHECK_INTERVAL", "60"))
 
 # --- Logging setup ---
 log_formatter = logging.Formatter("%(asctime)s - %(levelname)s - %(message)s", datefmt="%Y-%m-%d %H:%M:%S")
@@ -189,6 +191,52 @@ class DetectMotionRequest(BaseModel):
     video_path: str
     output_dir: str
     fast_processing: bool = False
+
+
+# --- Gallery cache pre-warming ---
+
+_precheck_lock = threading.Lock()
+_DEFAULT_REID_MODEL = "models/reid/intel/person-reidentification-retail-0288/FP16/person-reidentification-retail-0288.xml"
+
+
+def _run_gallery_precheck():
+    """Instantiate PersonReID to trigger a cache build/validate cycle.
+
+    Near-instant no-op if gallery hasn't changed (in-memory sig check).
+    Reads gallery over CIFS and saves NPZ only when the gallery signature differs.
+    Non-reentrant: skipped if a rebuild is already running.
+    """
+    if not _precheck_lock.acquire(blocking=False):
+        return
+    try:
+        gallery_path = os.getenv("REID_GALLERY_PATH", "")
+        model_path = os.getenv("REID_MODEL_PATH", _DEFAULT_REID_MODEL)
+        if not gallery_path or not os.path.isdir(gallery_path):
+            return
+        neg_gallery_path = os.getenv("REID_NEGATIVE_GALLERY_PATH") or None
+        t0 = _time.monotonic()
+        from person_id import PersonReID
+        PersonReID(model_path, gallery_path, negative_gallery_path=neg_gallery_path)
+        elapsed = _time.monotonic() - t0
+        if elapsed > 1.0:
+            logger.info("Gallery cache rebuilt in %.1fs.", elapsed)
+    except Exception as e:
+        logger.warning("Gallery precheck failed: %s", e)
+    finally:
+        _precheck_lock.release()
+
+
+async def _gallery_precheck_loop():
+    loop = asyncio.get_running_loop()
+    await loop.run_in_executor(None, _run_gallery_precheck)  # immediate on startup
+    while True:
+        await asyncio.sleep(GALLERY_PRECHECK_INTERVAL)
+        await loop.run_in_executor(None, _run_gallery_precheck)
+
+
+@app.on_event("startup")
+async def startup():
+    asyncio.create_task(_gallery_precheck_loop())
 
 
 # --- Endpoints ---

@@ -26,6 +26,7 @@ class PersonReID:
     def __init__(self, model_path: str, gallery_path: str, threshold: float = 0.65, file_basename: str | None = None,
                  negative_gallery_path: str | None = None, negative_margin: float = 0.0):
         self.threshold = float(threshold)
+        self.model_path = model_path
         self.gallery_vectors: list[np.ndarray] = []
         self.gallery_paths: list[str] = []
         self.negative_vectors: list[np.ndarray] = []
@@ -89,8 +90,9 @@ class PersonReID:
             os.makedirs(_CACHE_DIR, exist_ok=True)
         except Exception:
             pass
+        model_key = hashlib.sha1(os.path.abspath(self.model_path).encode("utf-8")).hexdigest()[:8]
         gallery_key = hashlib.sha1(os.path.abspath(gallery_path).encode("utf-8")).hexdigest()[:16]
-        cache_npz = os.path.join(_CACHE_DIR, f"reid_gallery_cache_{gallery_key}.npz")
+        cache_npz = os.path.join(_CACHE_DIR, f"reid_gallery_cache_{gallery_key}_{model_key}.npz")
 
         files = sorted(f for f in os.listdir(gallery_path) if f.lower().endswith((".jpg", ".jpeg", ".png")))
         current_count = len(files)
