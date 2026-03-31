@@ -134,6 +134,9 @@ async def detect_motion_remote_async(file_path, output_dir, fast_processing=Fals
     Sends master-perspective paths; worker handles translation, local copy,
     processing, and copying results back to CIFS mount.
 
+    On ReadError (connection dropped mid-response) retries once — the worker
+    processes a video in ~20 s so a duplicate run is cheaper than local fallback.
+
     Returns the same dict as detect_motion() with master-perspective paths.
     Raises on any failure (caller should catch and fall back to local).
     """
@@ -142,14 +145,21 @@ async def detect_motion_remote_async(file_path, output_dir, fast_processing=Fals
         "output_dir": output_dir,
         "fast_processing": fast_processing,
     }
-    async with httpx.AsyncClient() as client:
-        resp = await client.post(
-            f"{WORKER_URL}/detect-motion",
-            json=payload,
-            timeout=WORKER_TIMEOUT,
-        )
-    resp.raise_for_status()
-    data = resp.json()
-
-    _replay_worker_logs(data.get("logs"))
-    return data["result"]
+    file_basename = os.path.basename(file_path)
+    for attempt in range(2):
+        try:
+            async with httpx.AsyncClient() as client:
+                resp = await client.post(
+                    f"{WORKER_URL}/detect-motion",
+                    json=payload,
+                    timeout=WORKER_TIMEOUT,
+                )
+            resp.raise_for_status()
+            data = resp.json()
+            _replay_worker_logs(data.get("logs"))
+            return data["result"]
+        except httpx.ReadError as e:
+            if attempt == 0:
+                logger.warning("[%s] Worker ReadError on attempt 1, retrying: %r", file_basename, e)
+            else:
+                raise

@@ -57,11 +57,13 @@ class MainScriptChangeHandler(FileSystemEventHandler):
             return
 
         changed_path = os.path.abspath(event.src_path)
-        # React to .py files directly under SCRIPT_DIR or under SCRIPT_DIR/tools/log_dashboard (non-recursive in both)
+        # React to .py files directly under SCRIPT_DIR, under tools/log_dashboard, or under worker/
         log_dashboard_dir = os.path.join(self.watch_dir, "tools", "log_dashboard")
+        worker_dir = os.path.join(self.watch_dir, "worker")
         is_main_dir_py = os.path.dirname(changed_path) == self.watch_dir and changed_path.endswith('.py')
         is_log_dashboard_py = os.path.dirname(changed_path) == log_dashboard_dir and changed_path.endswith('.py')
-        if is_main_dir_py or is_log_dashboard_py:
+        is_worker_py = os.path.dirname(changed_path) == worker_dir and changed_path.endswith('.py')
+        if is_main_dir_py or is_log_dashboard_py or is_worker_py:
             logger.info(f"Detected change in {changed_path}. Initiating graceful restart...")
             global RESTART_REQUESTED
             RESTART_REQUESTED = True

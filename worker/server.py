@@ -137,15 +137,27 @@ class LogCaptureHandler(logging.Handler):
 
 # --- Copy helpers ---
 
-def copy_outputs(local_output_dir: str, cifs_output_dir: str) -> None:
-    """Copy all generated output files from local temp to CIFS mount."""
-    for root, dirs, files in os.walk(local_output_dir):
-        for f in files:
-            src = os.path.join(root, f)
-            rel = os.path.relpath(src, local_output_dir)
-            dst = os.path.join(cifs_output_dir, rel)
-            os.makedirs(os.path.dirname(dst), exist_ok=True)
-            shutil.copy2(src, dst)
+def copy_outputs(local_output_dir: str, cifs_output_dir: str, retries: int = 3, retry_delay: float = 3.0) -> None:
+    """Copy all generated output files from local temp to CIFS mount.
+
+    Retries the entire copy on OSError (e.g. transient CIFS disconnection).
+    """
+    for attempt in range(retries):
+        try:
+            for root, dirs, files in os.walk(local_output_dir):
+                for f in files:
+                    src = os.path.join(root, f)
+                    rel = os.path.relpath(src, local_output_dir)
+                    dst = os.path.join(cifs_output_dir, rel)
+                    os.makedirs(os.path.dirname(dst), exist_ok=True)
+                    shutil.copy2(src, dst)
+            return
+        except OSError as e:
+            if attempt < retries - 1:
+                logger.warning("copy_outputs failed (attempt %d/%d): %s. Retrying in %.0fs...", attempt + 1, retries, e, retry_delay)
+                _time.sleep(retry_delay)
+            else:
+                raise
 
 
 # --- Worker processing function ---

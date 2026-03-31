@@ -7,7 +7,7 @@ Wants=network-online.target
 Type=simple
 User=ghost
 WorkingDirectory=/home/ghost/analyze-video
-ExecStart=/home/ghost/analyze-video/.venv/bin/uvicorn worker.server:app --host 0.0.0.0 --port 8741 --timeout-keep-alive 120
+ExecStart=/home/ghost/analyze-video/.venv/bin/uvicorn worker.server:app --host 0.0.0.0 --port 8741 --timeout-keep-alive 120 --reload
 Restart=on-failure
 RestartSec=5
 
