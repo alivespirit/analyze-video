@@ -56,23 +56,32 @@ def get_worker_battery():
 
 
 def _check_worker_health() -> bool:
-    """Query GET /health with a short timeout. Returns True if worker is available."""
+    """Query GET /health with a short timeout. Returns True if worker is available.
+
+    On failure, retries once after a short delay before returning False, to avoid
+    marking the worker unavailable on a transient network blip.
+    """
     global _last_worker_battery
-    try:
-        resp = httpx.get(f"{WORKER_URL}/health", timeout=2.0)
-        resp.raise_for_status()
-        data = resp.json()
-        if data.get("status") != "ok":
-            return False
-        battery = data.get("battery_percent")
-        _last_worker_battery = battery
-        if battery is not None and battery < WORKER_MIN_BATTERY:
-            logger.warning("Worker battery low (%s%%), skipping remote dispatch.", battery)
-            return False
-        return True
-    except Exception as e:
-        logger.warning("Worker health check failed: %r", e)
-        return False
+    for attempt in range(2):
+        try:
+            resp = httpx.get(f"{WORKER_URL}/health", timeout=2.0)
+            resp.raise_for_status()
+            data = resp.json()
+            if data.get("status") != "ok":
+                return False
+            battery = data.get("battery_percent")
+            _last_worker_battery = battery
+            if battery is not None and battery < WORKER_MIN_BATTERY:
+                logger.warning("Worker battery low (%s%%), skipping remote dispatch.", battery)
+                return False
+            return True
+        except Exception as e:
+            if attempt == 0:
+                logger.warning("Worker health check failed: %r. Retrying...", e)
+                time.sleep(1.0)
+            else:
+                logger.warning("Worker health check failed: %r", e)
+                return False
 
 
 def worker_available() -> bool:

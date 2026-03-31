@@ -1253,12 +1253,18 @@ async def run_main_script_watcher(stop_event, watch_dir):
         watch_dir (str): Absolute path to the directory to watch (non-recursive).
     """
     watch_dir = os.path.abspath(watch_dir)
-    logger.info(f"Starting self-watcher for directory: {watch_dir} (*.py, non-recursive)")
+    logger.info(f"Starting self-watcher for directory: {watch_dir} (*.py, non-recursive + worker/ + tools/log_dashboard/)")
     observer = None
     try:
         event_handler = MainScriptChangeHandler(stop_event, watch_dir)
         observer = Observer(timeout=5)
         observer.schedule(event_handler, path=watch_dir, recursive=False)
+        worker_dir = os.path.join(watch_dir, "worker")
+        if os.path.isdir(worker_dir):
+            observer.schedule(event_handler, path=worker_dir, recursive=False)
+        log_dashboard_dir = os.path.join(watch_dir, "tools", "log_dashboard")
+        if os.path.isdir(log_dashboard_dir):
+            observer.schedule(event_handler, path=log_dashboard_dir, recursive=False)
         observer.start()
         logger.info("Self-watcher started.")
 
