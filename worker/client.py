@@ -107,14 +107,14 @@ def invalidate_worker_health():
 
 
 _WORKER_TAG_RE = re.compile(
-    r"^(?P<head>\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2} - [A-Z]+ - \[[^\]]+\]) (?P<tail>.*)$"
+    r"^(?P<head>\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2} - [A-Z]+ -)(?: (?P<bracket>\[[^\]]+\]))? (?P<tail>.*)$"
 )
 
 
 def _replay_worker_logs(logs):
     """Replay pre-formatted log lines from worker directly into master's log handlers.
 
-    Inserts [W] after the [filename] bracket to keep lines sortable by timestamp.
+    Inserts [W] after the [filename] bracket (or after the level if no bracket) to keep lines sortable by timestamp.
     Bypasses the master's formatter to preserve the worker's original timestamps and levels.
     """
     if not logs:
@@ -122,7 +122,11 @@ def _replay_worker_logs(logs):
     for line in logs:
         m = _WORKER_TAG_RE.match(line)
         if m:
-            prefixed = f"{m.group('head')} [W] {m.group('tail')}\n"
+            bracket = m.group('bracket')
+            if bracket:
+                prefixed = f"{m.group('head')} {bracket} [W] {m.group('tail')}\n"
+            else:
+                prefixed = f"{m.group('head')} [W] {m.group('tail')}\n"
         else:
             prefixed = f"[W] {line}\n"
         for handler in logger.handlers:

@@ -230,7 +230,7 @@ def _run_gallery_precheck():
         from person_id import PersonReID
         PersonReID(model_path, gallery_path, negative_gallery_path=neg_gallery_path)
         elapsed = _time.monotonic() - t0
-        if elapsed > 1.0:
+        if elapsed > 10.0:
             logger.info("Gallery cache rebuilt in %.1fs.", elapsed)
     except Exception as e:
         logger.warning("Gallery precheck failed: %s", e)

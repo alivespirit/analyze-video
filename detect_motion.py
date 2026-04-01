@@ -2,6 +2,7 @@ import os
 import time
 import json
 import logging
+import threading
 from collections import defaultdict, deque
 from typing import List, Optional
 
@@ -179,13 +180,17 @@ CAR_SPEEDTRAP_DISTANCE_M = float(os.getenv("CAR_SPEEDTRAP_DISTANCE_M", "5.0"))
 CAR_SPEEDTRAP_MAX_VALID_KMH = float(os.getenv("CAR_SPEEDTRAP_MAX_VALID_KMH", "100"))
 CAR_SPEEDTRAP_OVERLAY_EXTRA_GAP = 16
 
-# --- Load Object Detection Model ---
-try:
-    object_detection_model = YOLO(OBJECT_DETECTION_MODEL_PATH, task='detect')
-    logger.info(f"Object detection model loaded successfully from {OBJECT_DETECTION_MODEL_PATH}.")
-except Exception as e:
-    logger.critical(f"Failed to load object detection model: {e}", exc_info=True)
-    raise
+# --- Thread-local Object Detection Model ---
+# Each worker thread gets its own YOLO instance so tracker state (persist=True)
+# is never shared between concurrent detect_motion() calls.
+model_thread_local = threading.local()
+
+
+def get_detection_model() -> YOLO:
+    if not hasattr(model_thread_local, 'model'):
+        model_thread_local.model = YOLO(OBJECT_DETECTION_MODEL_PATH, task='detect')
+        logger.info("Object detection model loaded in thread '%s'.", threading.current_thread().name)
+    return model_thread_local.model
 
 # --- Resolution-aware overlay + ROI scaling configuration ---
 # These values are applied at runtime based on input frame resolution.
@@ -569,7 +574,7 @@ def detect_draw_and_save_snapshot(frame, soc, output_dir, input_video_path, file
     if classes is None:
         classes = DETECT_CLASSES
     try:
-        results = object_detection_model.predict(frame, imgsz=IMGSZ, conf=CONF_THRESHOLD, verbose=False, classes=classes)
+        results = get_detection_model().predict(frame, imgsz=IMGSZ, conf=CONF_THRESHOLD, verbose=False, classes=classes)
     except Exception as e:
         logger.warning("[%s] Snapshot detection failed: %s", file_basename, e)
         return None
@@ -579,7 +584,7 @@ def detect_draw_and_save_snapshot(frame, soc, output_dir, input_video_path, file
             boxes = results[0].boxes.xyxy.cpu().tolist()
             clss = results[0].boxes.cls.int().cpu().tolist()
             confs = results[0].boxes.conf.float().cpu().tolist()
-            class_names = object_detection_model.names
+            class_names = get_detection_model().names
 
             local_id_counter = 1
             for box, cls, conf in zip(boxes, clss, confs):
@@ -752,6 +757,8 @@ def detect_motion(input_video_path, output_dir, fast_processing: bool = False):
     """
     file_basename = os.path.basename(input_video_path)
     fast_processing = bool(fast_processing)
+
+    model = get_detection_model()
 
     # Per-call tracking thresholds (avoid mutating module-level constants)
     track_full_until_seconds = FAST_TRACK_FULL_UNTIL_SECONDS if fast_processing else TRACK_FULL_UNTIL_SECONDS
@@ -1519,9 +1526,9 @@ def detect_motion(input_video_path, output_dir, fast_processing: bool = False):
 
     logger.info(f"[{file_basename}] Starting object tracking for {len(significant_sub_clips)} significant event(s).")
 
-    if hasattr(object_detection_model, 'predictor') and object_detection_model.predictor is not None:
-        if hasattr(object_detection_model.predictor, 'trackers') and object_detection_model.predictor.trackers:
-            object_detection_model.predictor.trackers[0].reset()
+    if hasattr(model, 'predictor') and model.predictor is not None:
+        if hasattr(model.predictor, 'trackers') and model.predictor.trackers:
+            model.predictor.trackers[0].reset()
             logger.debug("[%s] Object tracker state reset.", file_basename)
 
     # Prepare ROI polygon for point-in-polygon checks
@@ -1529,7 +1536,7 @@ def detect_motion(input_video_path, output_dir, fast_processing: bool = False):
 
     writer = None
     written_frame_count = 0
-    class_names = object_detection_model.names
+    class_names = model.names
     id_mapping = {}
     class_counters = {}
     unique_objects_detected = {'person': set(), 'car': set()}
@@ -1679,13 +1686,13 @@ def detect_motion(input_video_path, output_dir, fast_processing: bool = False):
 
             if prof.enabled:
                 t0 = time.perf_counter()
-                results = object_detection_model.track(
+                results = model.track(
                     track_frame, imgsz=IMGSZ, conf=CONF_THRESHOLD, iou=IOU_THRESHOLD,
                     persist=True, verbose=False, tracker=TRACKER_CONFIG, classes=DETECT_CLASSES
                 )
                 prof.add("track.yolo_track", time.perf_counter() - t0)
             else:
-                results = object_detection_model.track(
+                results = model.track(
                     track_frame, imgsz=IMGSZ, conf=CONF_THRESHOLD, iou=IOU_THRESHOLD,
                     persist=True, verbose=False, tracker=TRACKER_CONFIG, classes=DETECT_CLASSES
                 )
