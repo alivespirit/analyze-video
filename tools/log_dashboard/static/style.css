@@ -120,6 +120,8 @@ header nav .nav-btn{white-space:nowrap}
   header nav .nav-btn{padding:6px 8px;font-size:14px;min-width:auto}
   header .inner h1{line-height:1;margin:0}
 
+  .summary-table tr.worker{border-left-width:1px}
+
   /* Stats: in-bar labels get unreadable on mobile */
   body.stats-page .chart text.bar-label{display:none}
 
