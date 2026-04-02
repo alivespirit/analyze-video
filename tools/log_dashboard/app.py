@@ -235,6 +235,8 @@ def collect_metrics(entries: List[Dict]) -> Dict:
     first_seen_ts_per_video: Dict[str, datetime] = {}
     # Fast-processing mode (per video)
     fast_processing_per_video: Dict[str, bool] = {}
+    # Worker-processed (per video)
+    worker_per_video: Dict[str, bool] = {}
     # Away/back reaction events and latest reaction state per video
     away_back_events: List[Dict] = []
     reaction_state_per_video: Dict[str, Optional[str]] = {}
@@ -269,6 +271,10 @@ def collect_metrics(entries: List[Dict]) -> Dict:
             if m and m.group("val") == "True":
                 # If it was ever True for this video, treat it as fast-processing.
                 fast_processing_per_video[vid] = True
+
+            # Worker-processed: any [W] tagged log line for this video
+            if e.get("worker"):
+                worker_per_video[vid] = True
 
             m = RAW_EVENTS_RE.search(content)
             if m:
@@ -396,6 +402,7 @@ def collect_metrics(entries: List[Dict]) -> Dict:
         "gate_direction_per_video": gate_direction_per_video,
         "first_seen_ts_per_video": first_seen_ts_per_video,
         "fast_processing_per_video": fast_processing_per_video,
+        "worker_per_video": worker_per_video,
         "videos_total": len({v for v in status_per_video.keys()} | {v for v in full_time_per_video.keys()} | {v for v in raw_events_per_video.keys()}),
         "away_back_events": away_back_events,
         # Latest reaction state after processing entire day
@@ -1211,6 +1218,7 @@ def today_view(
         video_src=video_src,
             status_counts_all=metrics_all.get("status_counts", {}),
         fast_processing_per_video_all=metrics_all.get("fast_processing_per_video", {}),
+        worker_per_video_all=metrics_all.get("worker_per_video", {}),
         away_intervals=away_intervals,
         hhmmss_per_video=hhmmss_per_video,
         mmss_per_video=mmss_per_video,
@@ -1313,6 +1321,7 @@ def day_view(
         video_src=video_src,
             status_counts_all=metrics_all.get("status_counts", {}),
         fast_processing_per_video_all=metrics_all.get("fast_processing_per_video", {}),
+        worker_per_video_all=metrics_all.get("worker_per_video", {}),
         away_intervals=away_intervals,
         hhmmss_per_video=hhmmss_per_video,
         mmss_per_video=mmss_per_video,

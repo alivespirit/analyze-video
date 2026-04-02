@@ -301,7 +301,8 @@
           <tbody>
             {% set status_filter = status %}
             {% for vid, st in metrics.status_per_video.items() %}
-            <tr class="{% if play == vid %}playing{% endif %}">
+            {% set is_worker = worker_per_video_all and worker_per_video_all.get(vid) %}
+            <tr class="{% if play == vid %}playing{% endif %}{% if is_worker %} worker{% endif %}">
               <td class="start-col">
                 {% set t = metrics.first_seen_ts_per_video.get(vid) %}
                 {% if t %}
