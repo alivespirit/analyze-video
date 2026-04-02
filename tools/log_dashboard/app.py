@@ -1,8 +1,9 @@
+import json
 import os
 import re
 import sys
 import colorsys
-from datetime import datetime, date
+from datetime import datetime, date, timedelta
 from typing import List, Dict, Optional, Tuple
 
 from fastapi import FastAPI, Query, HTTPException
@@ -16,6 +17,8 @@ LOG_PATH = os.getenv("LOG_PATH", default="")
 LOG_DIR = LOG_PATH if LOG_PATH else os.getcwd()
 LOG_BASE = os.getenv("LOG_BASENAME", default="video_processor.log")
 VIDEO_FOLDER = os.getenv("VIDEO_FOLDER", default=None)
+STATS_CACHE_FILE = os.path.join(LOG_DIR, "stats_cache.json")
+STATS_CACHE_MAX_AGE_DAYS = 90
 
 # Patterns used by CustomTimedRotatingFileHandler in main.py
 ROTATED_PATTERN = re.compile(r"^(?P<base>.+)_((?P<date>\d{4}-\d{2}-\d{2})).log$")
@@ -789,6 +792,86 @@ def index():
     return tmpl.render(ordered_days=ordered_days, log_dir=LOG_DIR)
 
 
+def load_stats_cache() -> dict:
+    try:
+        with open(STATS_CACHE_FILE, "r") as f:
+            return json.load(f)
+    except (OSError, json.JSONDecodeError, ValueError):
+        return {}
+
+
+def save_stats_cache(cache: dict) -> None:
+    cutoff = (date.today() - timedelta(days=STATS_CACHE_MAX_AGE_DAYS)).isoformat()
+    pruned = {d: v for d, v in cache.items() if d >= cutoff}
+    tmp_path = STATS_CACHE_FILE + ".tmp"
+    try:
+        with open(tmp_path, "w") as f:
+            json.dump(pruned, f)
+        os.replace(tmp_path, STATS_CACHE_FILE)
+    except OSError:
+        pass
+
+
+def compute_day_stats(path: str, d: str) -> Tuple[Dict, List[Dict]]:
+    """Parse a single day's log and return (per_day_entry, events_list)."""
+    entries = parse_log_lines(path, d)
+    metrics = collect_metrics(entries)
+
+    videos_total = int(metrics.get("videos_total") or 0)
+
+    status_counts_raw = metrics.get("status_counts") or {}
+    status_counts: Dict[str, int] = {}
+    try:
+        for k, v in dict(status_counts_raw).items():
+            if k is None:
+                continue
+            try:
+                status_counts[str(k)] = int(v or 0)
+            except Exception:
+                status_counts[str(k)] = 0
+    except Exception:
+        status_counts = {}
+
+    missing = videos_total - sum(status_counts.values())
+    if missing > 0:
+        status_counts["unknown"] = int(missing)
+
+    md_values_raw = list((metrics.get("md_time_per_video") or {}).values())
+    md_values: List[float] = []
+    for v in md_values_raw:
+        try:
+            if v is None:
+                continue
+            md_values.append(float(v))
+        except Exception:
+            continue
+    md_avg = _capped_avg(md_values)
+
+    full_values_raw = list((metrics.get("full_time_per_video") or {}).values())
+    full_values: List[float] = []
+    for v in full_values_raw:
+        try:
+            if v is None:
+                continue
+            full_values.append(float(v))
+        except Exception:
+            continue
+    full_avg = _capped_avg(full_values)
+
+    day_entry = {
+        "day": d,
+        "videos_total": videos_total,
+        "status_counts": status_counts,
+        "md_avg": md_avg,
+        "full_avg": full_avg,
+    }
+
+    pts = collect_away_back_points(entries)
+    events = [{"type": p["type"], "video": p["video"], "hhmmss": p["hhmmss"], "minute": p["minute"]} for p in pts]
+
+    return day_entry, events
+
+
 @app.get("/stats", response_class=HTMLResponse)
 def stats_view():
     """Aggregated statistics across all available log files."""
@@ -800,69 +883,37 @@ def stats_view():
 
     statuses_seen = set()
 
+    cache = load_stats_cache()
+    today = date.today().isoformat()
+    dirty = False
+
     for d in ordered_days:
+        if d != today and d in cache:
+            cached = cache[d]
+            per_day.append(cached["per_day"])
+            for p in cached["events"]:
+                p2 = dict(p)
+                p2["day"] = d
+                events_all.append(p2)
+            statuses_seen.update(cached["per_day"]["status_counts"].keys())
+            continue
+
         path = days[d]
-        entries = parse_log_lines(path, d)
-        metrics = collect_metrics(entries)
+        day_entry, events = compute_day_stats(path, d)
 
-        videos_total = int(metrics.get("videos_total") or 0)
-
-        status_counts_raw = metrics.get("status_counts") or {}
-        status_counts: Dict[str, int] = {}
-        try:
-            for k, v in dict(status_counts_raw).items():
-                if k is None:
-                    continue
-                try:
-                    status_counts[str(k)] = int(v or 0)
-                except Exception:
-                    status_counts[str(k)] = 0
-        except Exception:
-            status_counts = {}
-
-        missing = videos_total - sum(status_counts.values())
-        if missing > 0:
-            status_counts["unknown"] = int(missing)
-
-        statuses_seen.update(status_counts.keys())
-
-        md_values_raw = list((metrics.get("md_time_per_video") or {}).values())
-        md_values: List[float] = []
-        for v in md_values_raw:
-            try:
-                if v is None:
-                    continue
-                md_values.append(float(v))
-            except Exception:
-                continue
-        md_avg = _capped_avg(md_values)
-
-        full_values_raw = list((metrics.get("full_time_per_video") or {}).values())
-        full_values: List[float] = []
-        for v in full_values_raw:
-            try:
-                if v is None:
-                    continue
-                full_values.append(float(v))
-            except Exception:
-                continue
-        full_avg = _capped_avg(full_values)
-
-        per_day.append(
-            {
-                "day": d,
-                "videos_total": videos_total,
-                "status_counts": status_counts,
-                "md_avg": md_avg,
-                "full_avg": full_avg,
-            }
-        )
-
-        pts = collect_away_back_points(entries)
-        for p in pts:
+        per_day.append(day_entry)
+        for p in events:
             p2 = dict(p)
             p2["day"] = d
             events_all.append(p2)
+        statuses_seen.update(day_entry["status_counts"].keys())
+
+        if d != today:
+            cache[d] = {"per_day": day_entry, "events": events}
+            dirty = True
+
+    if dirty:
+        save_stats_cache(cache)
 
     # Events heatmap (alternate mode): for each 15-min bin, count how many distinct
     # days had >=1 event in that bin (separately for away/back).
