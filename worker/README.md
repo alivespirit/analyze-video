@@ -90,6 +90,10 @@ WORKER_URL=http://10.0.0.2:8741
 WORKER_TIMEOUT=120
 WORKER_HEALTH_CACHE_SECONDS=30
 WORKER_MIN_BATTERY=5       # skip worker if its battery is below this %
+
+# Wake-on-LAN (optional) — wake worker when it's offline and master is plugged in
+WORKER_WAKE_ON_LAN=true
+WORKER_WAKE_ON_LAN_MAC=XX:XX:XX:XX:XX:XX
 ```
 
 ---
@@ -110,18 +114,27 @@ uvicorn worker.server:app --host 0.0.0.0 --port 8741 --timeout-keep-alive 120
 
 ### `GET /health`
 
-Returns worker status. Used by master for availability checks.
+Returns worker status. Used by master for availability checks and by the Android dashboard for the Monitoring tab.
 
 ```json
 {
   "status": "ok",
   "active_tasks": 1,
   "max_tasks": 2,
-  "battery_percent": 87.0
+  "battery_percent": 87.0,
+  "load_avg_1m": 1.2,
+  "load_avg_5m": 0.8,
+  "load_avg_15m": 0.5,
+  "memory_percent": 45.0,
+  "memory_used_mb": 3200,
+  "memory_total_mb": 7892,
+  "cpu_temp_c": 44.0
 }
 ```
 
-Master skips the worker if `battery_percent` is below `WORKER_MIN_BATTERY`.
+- Master skips the worker if `battery_percent` is below `WORKER_MIN_BATTERY`.
+- `load_avg_*`: from `os.getloadavg()` (Linux only).
+- `cpu_temp_c`: Package id 0 from `psutil.sensors_temperatures()` coretemp (null if unavailable).
 
 ### `POST /detect-motion`
 
@@ -156,8 +169,12 @@ Response:
 | `WORKER_PATH_PREFIX` | `/mnt/nas/` | NAS mount point on the worker |
 | `WORKER_MAX_CONCURRENT` | `2` | Max simultaneous videos processed |
 | `REID_CACHE_DIR` | `temp/` (relative to script) | Directory for ReID embedding cache; point to master's `temp/` on CIFS to reuse prebuilt cache |
+| `WORKER_WAKE_ON_LAN` | `false` | Send WOL magic packet when worker health check fails and master is plugged in |
+| `WORKER_WAKE_ON_LAN_MAC` | (empty) | Worker's ethernet MAC address for WOL |
 
 All `detect_motion` env vars work on the worker the same way as on the master (`CONF_THRESHOLD`, `IOU_THRESHOLD`, `IMGSZ`, `TRACKER_CONFIG`, `OBJECT_DETECTION_MODEL_PATH`, `REID_*`, etc).
+
+WOL packets are sent via the `10.0.0.1` interface with a 5-minute cooldown. The worker must have Wake-on-LAN enabled in BIOS and via `ethtool -s <iface> wol g`.
 
 ---
 

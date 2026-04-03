@@ -1,6 +1,6 @@
 # Analyze-Video Log Dashboard
 
-A lightweight FastAPI server that parses your application logs and serves a simple dashboard for daily insights.
+A lightweight FastAPI server that parses your application logs and serves an HTML dashboard for daily insights, plus a JSON API for the [Android dashboard app](https://github.com/alivespirit/analyze-video-dashboard).
 
 ## Features
 
@@ -72,6 +72,26 @@ Requirements:
 - You can filter to a single video via `video=<basename>` (also available by clicking a video in the log list).
 - The header shows "Filtered videos" when any filter is active; a Clear control resets all filters back to the full day view.
 
+### JSON API (for Android app)
+
+The dashboard also serves JSON endpoints consumed by the Android dashboard app:
+
+- `GET /api/days` — available log days
+- `GET /api/today/videos?day=` — per-video summary (status, ReID, frames indicator, processing time)
+- `GET /api/today/video/{basename}/logs?day=` — log entries for a specific video
+- `GET /api/today/video/{basename}/reid-crops` — ReID crop image URLs
+- `GET /api/today/video/{basename}/frames` — insignificant/no_person frame URLs
+- `GET /api/today/video/{basename}/highlight` — highlight clip URL (if available)
+- `GET /api/today/stats?day=` — aggregated stats for a day
+- `GET /api/stats/overall` — overall stats with heatmaps
+- `GET /api/monitoring` — system monitoring (master CPU/RAM/battery, worker health proxy)
+- `GET /api/events/latest?since=` — away/back events with current home/away status
+- `POST /api/reid/copy` — copy a ReID crop to positive or negative gallery
+- `GET /api/image/{basename}` — serve images (crops, frames) from TEMP_DIR
+- `GET /api/highlight/{basename}` — serve highlight clips from TEMP_DIR daily dirs
+
+The `?day=YYYY-MM-DD` parameter is optional; when omitted, defaults to today (or the latest available day).
+
 ## Run
 
 1) Install dependencies:
@@ -102,7 +122,7 @@ Set in your `.env`:
 
 ```bash
 ENABLE_LOG_DASHBOARD=true
-LOG_DASHBOARD_PORT=8000        # optional, defaults to 8000
+LOG_DASHBOARD_PORT=8192        # optional, defaults to 8192
 LOG_DASHBOARD_HOST=0.0.0.0     # optional, defaults to 0.0.0.0
 ```
 
@@ -128,3 +148,6 @@ When `ENABLE_LOG_DASHBOARD` is true, `main.py` starts the dashboard in a backgro
 - Environment variables: `LOG_PATH` (directory) and optional `LOG_BASENAME` (default `video_processor.log`).
 - The Per-Video Summary table is collapsible (open by default).
 - Chart bars link to the first log entry of the related video and highlight the target entry.
+- JSON API responses are cached per-day (30s TTL, max 7 days) for efficiency.
+- The `/api/monitoring` endpoint proxies worker health (30s cache) and reads `psutil` stats without blocking the event loop.
+- ReID crops, insignificant frames, and highlight clips are served from `TEMP_DIR` daily subdirectories (`YYYYMMDD/`).

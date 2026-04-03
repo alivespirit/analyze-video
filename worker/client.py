@@ -27,6 +27,12 @@ WORKER_TIMEOUT = float(os.getenv("WORKER_TIMEOUT", "120"))
 WORKER_HEALTH_CACHE_SECONDS = float(os.getenv("WORKER_HEALTH_CACHE_SECONDS", "30"))
 WORKER_MIN_BATTERY = int(os.getenv("WORKER_MIN_BATTERY", "5"))
 
+# Wake-on-LAN configuration
+WORKER_WAKE_ON_LAN = os.getenv("WORKER_WAKE_ON_LAN", "false").lower() in ("true", "1", "yes")
+WORKER_WAKE_ON_LAN_MAC = os.getenv("WORKER_WAKE_ON_LAN_MAC", "")
+_WOL_COOLDOWN_SECONDS = 300  # 5 minutes between WOL attempts
+_last_wol_ts = 0.0
+
 # --- Cached health state ---
 _last_health_time = 0.0
 _last_health_ok = False
@@ -55,6 +61,41 @@ def get_worker_battery():
     return _last_worker_battery
 
 
+def _send_wol_packet(mac_address: str):
+    """Send Wake-on-LAN magic packet via the 10.0.0.1 interface."""
+    import socket
+    mac_bytes = bytes.fromhex(mac_address.replace(":", "").replace("-", ""))
+    magic = b'\xff' * 6 + mac_bytes * 16
+    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    try:
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
+        sock.bind(("10.0.0.1", 0))
+        sock.sendto(magic, ("255.255.255.255", 9))
+    finally:
+        sock.close()
+
+
+def _try_wol_if_needed():
+    """Send WOL if enabled, master is plugged in, and cooldown has elapsed."""
+    global _last_wol_ts
+    if not WORKER_WAKE_ON_LAN or not WORKER_WAKE_ON_LAN_MAC:
+        return
+    now = time.monotonic()
+    if now - _last_wol_ts < _WOL_COOLDOWN_SECONDS:
+        return
+    try:
+        import psutil
+        battery = psutil.sensors_battery()
+        if battery and battery.power_plugged:
+            _send_wol_packet(WORKER_WAKE_ON_LAN_MAC)
+            _last_wol_ts = now
+            logger.info("Sent WOL packet to %s (master plugged in)", WORKER_WAKE_ON_LAN_MAC)
+        else:
+            logger.debug("Skipping WOL: master not plugged in")
+    except Exception as e:
+        logger.warning("WOL failed: %s", e)
+
+
 def _check_worker_health() -> bool:
     """Query GET /health with a short timeout. Returns True if worker is available.
 
@@ -81,6 +122,7 @@ def _check_worker_health() -> bool:
                 time.sleep(1.0)
             else:
                 logger.warning("Worker health check failed: %r", e)
+                _try_wol_if_needed()
                 return False
 
 

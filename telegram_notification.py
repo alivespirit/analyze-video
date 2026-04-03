@@ -16,6 +16,8 @@ logger = logging.getLogger()
 VIDEO_FOLDER = os.getenv("VIDEO_FOLDER")
 CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 
+KEEP_HIGHLIGHTS_CLIPS = os.getenv("KEEP_HIGHLIGHTS_CLIPS", "true").strip().lower() in ("true", "1", "yes")
+
 # --- State for Grouping "No Motion" Messages ---
 # These are safe to use as module-level globals because the executor has max_workers=1,
 # ensuring sequential processing and preventing race conditions.
@@ -1064,13 +1066,16 @@ async def send_notifications(app, video_response, insignificant_frames, clip_pat
                         raise
 
             # Conditional cleanup: preserve media on failure if requested
-            try:
-                if (not preserve_media_on_failure) or send_success:
-                    await cleanup_temp_media(media_path, file_path, logger, file_basename)
-                else:
-                    logger.info(f"[{file_basename}] Preserving media for retries: {media_path}")
-            except Exception as e_clean:
-                logger.warning(f"[{file_basename}] Cleanup step encountered an error: {e_clean}")
+            if KEEP_HIGHLIGHTS_CLIPS:
+                logger.debug(f"[{file_basename}] Keeping highlight clip: {media_path}")
+            else:
+                try:
+                    if (not preserve_media_on_failure) or send_success:
+                        await cleanup_temp_media(media_path, file_path, logger, file_basename)
+                    else:
+                        logger.info(f"[{file_basename}] Preserving media for retries: {media_path}")
+                except Exception as e_clean:
+                    logger.warning(f"[{file_basename}] Cleanup step encountered an error: {e_clean}")
 
         else: # --- This block now handles ALL non-significant videos ---
             video_info = {'text': video_response, 'callback': callback_file, 'timestamp': timestamp_text}

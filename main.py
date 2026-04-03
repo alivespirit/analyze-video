@@ -299,6 +299,9 @@ RESTART_MARKER_PATH = os.path.join(TEMP_DIR, "restart_marker.json")
 PROCESSING_LEDGER_PATH = os.path.join(TEMP_DIR, "processing_ledger.json")
 PROCESSING_LEDGER_LOCK = threading.RLock()
 
+# Keep highlight clips after telegram send (cleaned up by daily dir retention instead)
+KEEP_HIGHLIGHTS_CLIPS = os.getenv("KEEP_HIGHLIGHTS_CLIPS", "true").strip().lower() in ("true", "1", "yes")
+
 # --- Check Environment Variables ---
 if not all([GEMINI_API_KEY, TELEGRAM_TOKEN, CHAT_ID, USERNAME, VIDEO_FOLDER]):
     logger.critical("ERROR: One or more essential environment variables are missing. Exiting.")
@@ -563,7 +566,7 @@ class FileHandler(FileSystemEventHandler):
             update_processing_ledger(file_path, "failed", {"end_ts": time.time(), "error": str(e)[:256]})
 
         battery = psutil.sensors_battery()
-        worker_bat = get_worker_battery() if WORKER_ENABLED else None
+        worker_bat = get_worker_battery() if WORKER_ENABLED and worker_available() else None
         worker_bat_text = f" / W {int(worker_bat)}%" if worker_bat is not None else ""
         if not battery.power_plugged:
             battery_time_left = time.strftime("%H:%M", time.gmtime(battery.secsleft))
@@ -963,8 +966,10 @@ def schedule_notification_retries(app,
             logger.error(f"[{file_basename}] Final plain message attempt failed: {e_final}")
             update_processing_ledger(file_path, "failed", {"telegram_status": "final_plain_failed", "last_error": str(e_final)[:256]})
         try:
-            if clip_path:
+            if clip_path and not KEEP_HIGHLIGHTS_CLIPS:
                 await cleanup_temp_media(clip_path, file_path, logger, file_basename)
+            elif clip_path and KEEP_HIGHLIGHTS_CLIPS:
+                logger.debug(f"[{file_basename}] Keeping highlight clip: {clip_path}")
         except Exception as e_clean:
             logger.warning(f"[{file_basename}] Cleanup after exhausted retries failed: {e_clean}")
 

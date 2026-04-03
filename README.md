@@ -17,7 +17,7 @@ This project is a Python-based application that monitors a folder for new video 
     - **Probation/trust mechanism**: New person entities start in probation and are drawn for visibility, but do not count toward ROI, crossing, or unique person stats until trusted. Trust is granted if the entity moves enough or accumulates sufficient confidence over time. This prevents static false positives from affecting event logic.
     - All suppression parameters are configurable in `detect_motion.py` (see "Customization" below).
   - **Smart Event Filtering**: Differentiates between significant, insignificant, and noisy motion events based on duration.
-  - **Highlight Clips**: Generates clips for significant motions with tracked objects and bounding boxes. Uses a CRF-based H.264 writer (libx264, preset=faster, CRF=28, yuv420p, faststart). For 1080p/4K sources, highlight output is written at 1080p.
+  - **Highlight Clips**: Generates clips for significant motions with tracked objects and bounding boxes. Uses a CRF-based H.264 writer (libx264, preset=faster, CRF=28, yuv420p, faststart). For 1080p/4K sources, highlight output is written at 1080p. Clips are saved to daily subdirectories (`TEMP_DIR/YYYYMMDD/`) and optionally kept after Telegram send (`KEEP_HIGHLIGHTS_CLIPS=true`, default) for viewing in the Android dashboard.
   - **Long-Event Speed-Up**: Long events are rendered faster by writing fewer frames (frame skipping) while keeping the output FPS unchanged.
   - **Insignificant Motion Snapshots**: Can extract a representative frame for brief motion events; sending snapshots to Telegram is optional.
   - **Approximate Car Speed Estimation**:
@@ -314,19 +314,68 @@ WORKER_MIN_BATTERY=5
 
 The worker machine runs `uvicorn worker.server:app` from the same `analyze-video` directory, with its own `.env` pointing to the shared NAS mount. It can use a different model, confidence threshold, or tracker config than the master.
 
+The worker `/health` endpoint reports: status, active/max tasks, battery percent, load averages (1m/5m/15m), memory usage, and CPU temperature (Package id 0 from coretemp).
+
+### Wake-on-LAN
+
+The master can automatically wake the worker when power is restored. When the worker health check fails and the master is plugged in, a WOL magic packet is sent (with a 5-minute cooldown between attempts).
+
+Master `.env`:
+```env
+WORKER_WAKE_ON_LAN=true
+WORKER_WAKE_ON_LAN_MAC=XX:XX:XX:XX:XX:XX
+```
+
+The packet is sent via the `10.0.0.1` interface (configurable in `worker/client.py`).
+
+Worker setup (Ubuntu Server):
+```bash
+# 1. Install ethtool
+sudo apt install ethtool
+
+# 2. Check/enable WOL on the ethernet interface
+sudo ethtool enp3s0 | grep Wake-on
+sudo ethtool -s enp3s0 wol g
+
+# 3. Make persistent (survives reboot)
+sudo tee /etc/systemd/network/50-wol.link << 'EOF'
+[Match]
+MACAddress=XX:XX:XX:XX:XX:XX
+
+[Link]
+WakeOnLan=magic
+EOF
+
+# 4. Enable "Wake on LAN" in BIOS/UEFI
+# 5. Get MAC address: ip link show enp3s0 | grep ether
+```
+
 See [worker/README.md](worker/README.md) for full setup instructions.
 
 ---
 
 ## Log Dashboard
 
-A lightweight web dashboard that reads existing log files and provides per-day insights and a readable log viewer.
+A lightweight web dashboard that reads existing log files and provides per-day insights, a readable log viewer, and a JSON API for the [Android dashboard app](https://github.com/alivespirit/analyze-video-dashboard).
 
-- Routes:
+- HTML routes:
    - `/` lists all available days (today first)
    - `/today` shows today (or latest available) with filters
    - `/day/{YYYY-MM-DD}` shows a specific day with filters
    - `/stats` shows aggregated stats across all log days
+- JSON API routes (for Android app):
+   - `/api/days` — list of available log days
+   - `/api/today/videos?day=` — per-video summary with status, ReID, frames indicator
+   - `/api/today/video/{basename}/logs?day=` — log entries per video
+   - `/api/today/video/{basename}/reid-crops` — ReID crop image URLs
+   - `/api/today/video/{basename}/frames` — insignificant/no_person frame URLs
+   - `/api/today/video/{basename}/highlight` — highlight clip URL
+   - `/api/today/stats?day=` — aggregated stats for a day
+   - `/api/stats/overall` — overall stats with heatmaps
+   - `/api/monitoring` — system monitoring (CPU, RAM, battery, worker health)
+   - `/api/events/latest?since=` — away/back events for notifications
+   - `/api/reid/copy` (POST) — copy ReID crop to gallery
+   - `/api/image/{basename}`, `/api/highlight/{basename}` — serve images/clips
 - Per-day views: timestamp, severity, video basename, message
 - Filters:
    - Severity (single-select)
@@ -388,7 +437,7 @@ Set in `.env`:
 
 ```bash
 ENABLE_LOG_DASHBOARD=true
-LOG_DASHBOARD_PORT=8000        # optional, defaults to 8000
+LOG_DASHBOARD_PORT=8192        # optional, defaults to 8192
 LOG_DASHBOARD_HOST=0.0.0.0     # optional, defaults to 0.0.0.0
 ```
 

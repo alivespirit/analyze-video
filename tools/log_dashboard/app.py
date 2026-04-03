@@ -1,13 +1,17 @@
 import json
 import os
 import re
+import shutil
 import sys
+import time
 import colorsys
 from datetime import datetime, date, timedelta
 from typing import List, Dict, Optional, Tuple
 
+import psutil
+
 from fastapi import FastAPI, Query, HTTPException
-from fastapi.responses import HTMLResponse, FileResponse
+from fastapi.responses import HTMLResponse, FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from jinja2 import Environment, FileSystemLoader, select_autoescape
 
@@ -42,6 +46,7 @@ GATE_RE = re.compile(r"Gate crossing detected! Direction: (?P<dir>up|down|both)"
 NEW_FILE_RE = re.compile(r"^New file detected:")
 # From main.py: "Queuing motion detection... (motion_queue_depth=..., fast_processing=True/False)"
 FAST_PROCESSING_RE = re.compile(r"fast_processing=(?P<val>True|False)")
+SAVED_FRAME_RE = re.compile(r"Saved \w+ frame to ")
 AWAY_RE = re.compile(r"Reaction detected: object went away")
 BACK_RE = re.compile(r"Reaction detected: object came back")
 REACTION_REMOVED_RE = re.compile(r"Reaction removed\.")
@@ -240,6 +245,8 @@ def collect_metrics(entries: List[Dict]) -> Dict:
     # Away/back reaction events and latest reaction state per video
     away_back_events: List[Dict] = []
     reaction_state_per_video: Dict[str, Optional[str]] = {}
+    # Saved frames indicator per video
+    has_frames_per_video: Dict[str, bool] = {}
     # ReID results per video
     reid_best_score_per_video: Dict[str, float] = {}
     reid_neg_score_per_video: Dict[str, float] = {}
@@ -313,6 +320,10 @@ def collect_metrics(entries: List[Dict]) -> Dict:
                     reid_matched_per_video[vid] = matched
                 except Exception:
                     pass
+
+            # Saved frame indicator
+            if SAVED_FRAME_RE.search(content):
+                has_frames_per_video[vid] = True
 
             # If a later error-level line appears for this video, treat it as status=error
             level = e.get("level")
@@ -413,6 +424,7 @@ def collect_metrics(entries: List[Dict]) -> Dict:
         "reid_neg_score_per_video": reid_neg_score_per_video,
         "reid_delta_per_video": reid_delta_per_video,
         "reid_matched_per_video": reid_matched_per_video,
+        "has_frames_per_video": has_frames_per_video,
     }
 
 
@@ -1335,6 +1347,570 @@ def stream_video(basename: str):
     if not path:
         raise HTTPException(status_code=404, detail="Video not found")
     return FileResponse(path, media_type="video/mp4")
+
+
+# ---------------------------------------------------------------------------
+# JSON API endpoints (for Android app)
+# ---------------------------------------------------------------------------
+
+# ReID gallery paths (same defaults as telegram_notification.py)
+_SCRIPT_DIR = os.path.dirname(os.path.dirname(os.path.dirname(__file__)))
+REID_GALLERY_PATH = os.getenv("REID_GALLERY_PATH", os.path.join(_SCRIPT_DIR, "person_of_interest"))
+REID_NEGATIVE_GALLERY_PATH = os.getenv("REID_NEGATIVE_GALLERY_PATH", os.path.join(_SCRIPT_DIR, "person_of_interest_negative"))
+
+# Processing ledger path (same default as main.py)
+TEMP_DIR = os.getenv("TEMP_DIR", os.path.join(_SCRIPT_DIR, "temp"))
+PROCESSING_LEDGER_PATH = os.path.join(TEMP_DIR, "processing_ledger.json")
+
+# Worker URL for proxying health checks
+WORKER_URL = os.getenv("WORKER_URL", "")
+
+# In-memory per-day cache for parsed log data (max 7 entries, 30s TTL)
+_day_cache: Dict[str, Dict[str, object]] = {}
+_DAY_CACHE_TTL = 30.0
+_DAY_CACHE_MAX = 7
+
+# CPU percent cache (non-blocking reads)
+_cpu_cache: Dict[str, object] = {"value": 0.0, "ts": 0.0}
+_CPU_CACHE_TTL = 10.0
+
+# Worker health cache
+_worker_health_cache: Dict[str, object] = {"data": None, "ts": 0.0}
+_WORKER_HEALTH_CACHE_TTL = 30.0
+
+
+_EMPTY_METRICS = {
+    "status_counts": {}, "status_per_video": {}, "processing_time_per_video": {},
+    "gate_direction_per_video": {}, "first_seen_ts_per_video": {},
+    "fast_processing_per_video": {}, "worker_per_video": {},
+    "reid_best_score_per_video": {}, "reid_neg_score_per_video": {},
+    "reid_delta_per_video": {}, "reid_matched_per_video": {},
+    "has_frames_per_video": {},
+    "away_videos": [], "back_videos": [], "away_back_events": [],
+    "videos_total": 0, "full_processing_stats": None, "motion_detection_stats": None,
+    "gate_counts": {"up": 0, "down": 0}, "raw_events_per_video": {},
+    "full_time_per_video": {}, "md_time_per_video": {},
+}
+
+
+def _get_day_parsed(day_str: Optional[str] = None) -> Tuple[str, List[Dict], Dict]:
+    """Return (day, entries, metrics) for the given day (or today), with per-day caching."""
+    now = time.time()
+    days = list_log_files()
+    if day_str and day_str in days:
+        day = day_str
+    else:
+        today_str = date.today().strftime("%Y-%m-%d")
+        day = today_str if today_str in days else (sorted(days.keys())[-1] if days else None)
+
+    if not day or day not in days:
+        return (day_str or date.today().strftime("%Y-%m-%d"), [], dict(_EMPTY_METRICS))
+
+    # Check cache
+    cached = _day_cache.get(day)
+    if cached and now - cached["ts"] < _DAY_CACHE_TTL:
+        return cached["data"]
+
+    path = days[day]
+    entries = parse_log_lines(path, day)
+    metrics = collect_metrics(entries)
+    result = (day, entries, metrics)
+
+    # Store in cache, evict oldest if full
+    _day_cache[day] = {"data": result, "ts": now}
+    if len(_day_cache) > _DAY_CACHE_MAX:
+        oldest_key = min(_day_cache, key=lambda k: _day_cache[k]["ts"])
+        del _day_cache[oldest_key]
+
+    return result
+
+
+def _get_worker_health() -> Optional[Dict]:
+    """Fetch worker health with caching."""
+    if not WORKER_URL:
+        return None
+    now = time.time()
+    if _worker_health_cache["data"] is not None and now - _worker_health_cache["ts"] < _WORKER_HEALTH_CACHE_TTL:
+        return _worker_health_cache["data"]
+    try:
+        import urllib.request
+        req = urllib.request.Request(f"{WORKER_URL}/health", method="GET")
+        with urllib.request.urlopen(req, timeout=3) as resp:
+            data = json.loads(resp.read().decode())
+        _worker_health_cache["data"] = data
+        _worker_health_cache["ts"] = now
+        return data
+    except Exception:
+        offline = {"status": "offline"}
+        _worker_health_cache["data"] = offline
+        _worker_health_cache["ts"] = now
+        return offline
+
+
+@app.get("/api/days")
+def api_days():
+    """Return list of available log days."""
+    days = sorted(list_log_files().keys())
+    return {"days": days}
+
+
+@app.get("/api/today/videos")
+def api_today_videos(day: Optional[str] = Query(default=None)):
+    day, entries, metrics = _get_day_parsed(day)
+    spv = metrics.get("status_per_video", {})
+    ptpv = metrics.get("processing_time_per_video", {})
+    gpv = metrics.get("gate_direction_per_video", {})
+    fst = metrics.get("first_seen_ts_per_video", {})
+    fpv = metrics.get("fast_processing_per_video", {})
+    wpv = metrics.get("worker_per_video", {})
+    rspv = metrics.get("reid_best_score_per_video", {})
+    rnpv = metrics.get("reid_neg_score_per_video", {})
+    rmpv = metrics.get("reid_matched_per_video", {})
+    hfpv = metrics.get("has_frames_per_video", {})
+    away_videos = set(metrics.get("away_videos", []))
+    back_videos = set(metrics.get("back_videos", []))
+
+    all_vids = set(spv.keys()) | set(ptpv.keys())
+    videos = []
+    for v in sorted(all_vids, key=lambda x: (fst.get(x) or datetime.min, x)):
+        t = _hhmmss_from_video_path(v, fallback_ts=fst.get(v))
+        away_back = None
+        if v in away_videos:
+            away_back = "away"
+        elif v in back_videos:
+            away_back = "back"
+        videos.append({
+            "basename": v,
+            "time": t,
+            "status": spv.get(v),
+            "gate_direction": gpv.get(v),
+            "processing_time_s": round(ptpv[v], 2) if v in ptpv else None,
+            "raw_events": metrics.get("raw_events_per_video", {}).get(v),
+            "fast_processing": fpv.get(v, False),
+            "worker": wpv.get(v, False),
+            "reid_matched": rmpv.get(v),
+            "reid_score": round(rspv[v], 3) if v in rspv else None,
+            "reid_neg": round(rnpv[v], 3) if v in rnpv else None,
+            "away_back": away_back,
+            "has_frames": hfpv.get(v, False),
+        })
+    return {"day": day, "videos": videos}
+
+
+@app.get("/api/today/video/{basename}/logs")
+def api_today_video_logs(basename: str, severity: Optional[str] = Query(default=None), day: Optional[str] = Query(default=None)):
+    day, entries, _metrics = _get_day_parsed(day)
+    filtered = [e for e in entries if e.get("video") == basename]
+    if severity:
+        filtered = [e for e in filtered if e["level"] == severity]
+    return {
+        "basename": basename,
+        "entries": [
+            {
+                "ts": e["ts"].strftime("%Y-%m-%d %H:%M:%S"),
+                "level": e["level"],
+                "content": e["content"],
+                "worker": e.get("worker", False),
+            }
+            for e in filtered
+        ],
+    }
+
+
+@app.get("/api/today/video/{basename}/reid-crops")
+def api_today_video_reid_crops(basename: str):
+    stem = os.path.splitext(basename)[0]
+    prefix = stem + "_reid_best"
+    crops = []
+    for dirpath, files in _walk_daily_dirs(TEMP_DIR):
+        for fname in sorted(files):
+            if fname.startswith(prefix) and fname.lower().endswith(".jpg"):
+                crops.append(f"/api/image/{fname}")
+    return {"basename": basename, "crops": crops}
+
+
+@app.get("/api/today/video/{basename}/frames")
+def api_today_video_frames(basename: str):
+    """Return insignificant/no_person frame image URLs for a video."""
+    stem = os.path.splitext(basename)[0]
+    frames = []
+    for dirpath, files in _walk_daily_dirs(TEMP_DIR):
+        for fname in sorted(files):
+            if stem in fname and fname.lower().endswith(".jpg") and "_reid_best" not in fname:
+                frames.append(f"/api/image/{fname}")
+    return {"basename": basename, "frames": frames}
+
+
+_DAILY_DIR_RE = re.compile(r"^\d{8}$")
+
+
+def _walk_daily_dirs(base_dir: str):
+    """Yield (root, files) only for YYYYMMDD daily subdirectories of base_dir."""
+    try:
+        for entry in os.scandir(base_dir):
+            if entry.is_dir() and _DAILY_DIR_RE.match(entry.name):
+                try:
+                    files = os.listdir(entry.path)
+                    yield entry.path, files
+                except OSError:
+                    continue
+    except OSError:
+        return
+
+
+@app.get("/api/today/video/{basename}/highlight")
+def api_today_video_highlight(basename: str):
+    """Check if a highlight clip exists for this video and return its URL."""
+    name = os.path.basename(basename)
+    if not name.lower().endswith(".mp4"):
+        return {"basename": basename, "highlight_url": None}
+    for dirpath, files in _walk_daily_dirs(TEMP_DIR):
+        if name in files:
+            return {"basename": basename, "highlight_url": f"/api/highlight/{name}"}
+    return {"basename": basename, "highlight_url": None}
+
+
+@app.get("/api/highlight/{basename}")
+def api_serve_highlight(basename: str):
+    """Serve a highlight clip by basename from TEMP_DIR daily subdirectories."""
+    name = os.path.basename(basename)
+    if not name.lower().endswith(".mp4"):
+        raise HTTPException(status_code=400, detail="Only mp4 files allowed")
+    if ".." in name or "/" in name or "\\" in name:
+        raise HTTPException(status_code=400, detail="Invalid filename")
+    for dirpath, files in _walk_daily_dirs(TEMP_DIR):
+        if name in files:
+            return FileResponse(os.path.join(dirpath, name), media_type="video/mp4")
+    raise HTTPException(status_code=404, detail="Highlight not found")
+
+
+@app.get("/api/today/stats")
+def api_today_stats(day: Optional[str] = Query(default=None)):
+    day, entries, metrics = _get_day_parsed(day)
+    away_intervals = build_away_intervals(entries)
+
+    fst = metrics.get("first_seen_ts_per_video", {})
+    ptpv = metrics.get("processing_time_per_video", {})
+    spv = metrics.get("status_per_video", {})
+    ordered_videos = sorted(ptpv.keys(), key=lambda v: (fst.get(v) or datetime.min, v))
+
+    chart = []
+    for v in ordered_videos:
+        t = _hhmmss_from_video_path(v, fallback_ts=fst.get(v))
+        chart.append({
+            "basename": v,
+            "time": t,
+            "seconds": round(ptpv[v], 2),
+            "status": spv.get(v),
+        })
+
+    md_stats = metrics.get("motion_detection_stats")
+    full_stats = metrics.get("full_processing_stats")
+
+    processing_stats = {}
+    if md_stats:
+        processing_stats["md_min"] = round(md_stats["min"], 2)
+        processing_stats["md_max"] = round(md_stats["max"], 2)
+        processing_stats["md_avg"] = round(md_stats["avg"], 2)
+    if full_stats:
+        processing_stats["full_min"] = round(full_stats["min"], 2)
+        processing_stats["full_max"] = round(full_stats["max"], 2)
+        processing_stats["full_avg"] = round(full_stats["avg"], 2)
+
+    return {
+        "day": day,
+        "videos_total": metrics.get("videos_total", 0),
+        "status_counts": metrics.get("status_counts", {}),
+        "gate_counts": metrics.get("gate_counts", {"up": 0, "down": 0}),
+        "processing_stats": processing_stats,
+        "processing_chart": chart,
+        "away_intervals": away_intervals,
+    }
+
+
+@app.get("/api/stats/overall")
+def api_stats_overall():
+    days = list_log_files()
+    ordered_days = sorted(days.keys())
+
+    per_day: List[Dict] = []
+    events_all: List[Dict] = []
+    cache = load_stats_cache()
+    today = date.today().isoformat()
+    dirty = False
+
+    for d in ordered_days:
+        if d != today and d in cache:
+            cached = cache[d]
+            per_day.append(cached["per_day"])
+            for p in cached["events"]:
+                p2 = dict(p)
+                p2["day"] = d
+                events_all.append(p2)
+            continue
+
+        path = days[d]
+        day_entry, events = compute_day_stats(path, d)
+        per_day.append(day_entry)
+        for p in events:
+            p2 = dict(p)
+            p2["day"] = d
+            events_all.append(p2)
+
+        if d != today:
+            cache[d] = {"per_day": day_entry, "events": events}
+            dirty = True
+
+    if dirty:
+        save_stats_cache(cache)
+
+    # Build heatmaps (same logic as stats_view but return JSON)
+    start_offset = 6 * 60
+    total_minutes = 18 * 60
+    bin_minutes = 15
+    bins = total_minutes // bin_minutes
+    days_count = len(ordered_days)
+
+    away_bin_days: Dict[int, set] = {}
+    back_bin_days: Dict[int, set] = {}
+    for p in events_all:
+        try:
+            minute = int(p.get("minute"))
+            d = p.get("day")
+            typ = p.get("type")
+        except Exception:
+            continue
+        if d is None or minute < start_offset or minute >= (start_offset + total_minutes):
+            continue
+        idx = max(0, min(bins - 1, (minute - start_offset) // bin_minutes))
+        if typ == "away":
+            away_bin_days.setdefault(idx, set()).add(d)
+        else:
+            back_bin_days.setdefault(idx, set()).add(d)
+
+    events_heatmap = {
+        "start_offset": start_offset,
+        "bin_minutes": bin_minutes,
+        "bins": bins,
+        "days_count": days_count,
+        "away_days": [len(away_bin_days.get(i, set())) for i in range(bins)],
+        "back_days": [len(back_bin_days.get(i, set())) for i in range(bins)],
+    }
+
+    # Weekday heatmap
+    wd_bin_minutes = 60
+    wd_bins = total_minutes // wd_bin_minutes
+    weekday_labels = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
+    day_to_weekday: Dict[str, int] = {}
+    weekday_day_counts = [0] * 7
+    for d in ordered_days:
+        try:
+            wd = date.fromisoformat(d).weekday()
+            day_to_weekday[d] = wd
+            weekday_day_counts[wd] += 1
+        except Exception:
+            continue
+
+    away_wd: Dict[tuple, set] = {}
+    back_wd: Dict[tuple, set] = {}
+    for p in events_all:
+        try:
+            minute = int(p.get("minute"))
+            d = p.get("day")
+            typ = p.get("type")
+        except Exception:
+            continue
+        if not d or d not in day_to_weekday:
+            continue
+        if minute < start_offset or minute >= (start_offset + total_minutes):
+            continue
+        wd = day_to_weekday[d]
+        idx = max(0, min(wd_bins - 1, (minute - start_offset) // wd_bin_minutes))
+        key = (wd, idx)
+        if typ == "away":
+            away_wd.setdefault(key, set()).add(d)
+        else:
+            back_wd.setdefault(key, set()).add(d)
+
+    away_counts = [[len(away_wd.get((wd, idx), set())) for idx in range(wd_bins)] for wd in range(7)]
+    back_counts = [[len(back_wd.get((wd, idx), set())) for idx in range(wd_bins)] for wd in range(7)]
+
+    weekday_heatmap = {
+        "start_offset": start_offset,
+        "bin_minutes": wd_bin_minutes,
+        "bins": wd_bins,
+        "weekday_labels": weekday_labels,
+        "weekday_day_counts": weekday_day_counts,
+        "away_counts": away_counts,
+        "back_counts": back_counts,
+    }
+
+    return {
+        "per_day": per_day,
+        "events_heatmap": events_heatmap,
+        "weekday_heatmap": weekday_heatmap,
+    }
+
+
+@app.get("/api/monitoring")
+def api_monitoring():
+    # Master stats
+    now = time.time()
+    if now - _cpu_cache["ts"] > _CPU_CACHE_TTL:
+        _cpu_cache["value"] = psutil.cpu_percent(interval=None)
+        _cpu_cache["ts"] = now
+
+    mem = psutil.virtual_memory()
+    bat = psutil.sensors_battery()
+    master = {
+        "cpu_percent": _cpu_cache["value"],
+        "memory_percent": mem.percent,
+        "memory_used_mb": mem.used // (1024 * 1024),
+        "memory_total_mb": mem.total // (1024 * 1024),
+        "battery_percent": bat.percent if bat else None,
+        "battery_plugged": bat.power_plugged if bat else None,
+        "battery_time_left_s": bat.secsleft if bat and bat.secsleft > 0 else None,
+    }
+
+    # Worker stats (proxied with caching)
+    worker = _get_worker_health()
+
+    # Recent processing ledger entries
+    ledger_recent = []
+    try:
+        with open(PROCESSING_LEDGER_PATH, "r") as f:
+            ledger = json.load(f)
+        items = sorted(
+            ledger.items(),
+            key=lambda x: x[1].get("end_ts") or x[1].get("start_ts") or x[1].get("detected_ts") or 0,
+            reverse=True,
+        )[:10]
+        for k, v in items:
+            ledger_recent.append({
+                "file": os.path.basename(k),
+                "status": v.get("status"),
+                "detected_ts": v.get("detected_ts"),
+                "start_ts": v.get("start_ts"),
+                "end_ts": v.get("end_ts"),
+                "fast_processing": v.get("fast_processing"),
+                "telegram_status": v.get("telegram_status"),
+            })
+    except (OSError, json.JSONDecodeError, ValueError):
+        pass
+
+    return {"master": master, "worker": worker, "ledger_recent": ledger_recent}
+
+
+@app.get("/api/events/latest")
+def api_events_latest(since: Optional[str] = Query(default=None, description="ISO timestamp or HH:MM:SS")):
+    day, entries, _metrics = _get_day_parsed()
+    points = collect_away_back_points(entries)
+
+    since_dt = None
+    if since:
+        try:
+            since_dt = datetime.strptime(since, "%Y-%m-%d %H:%M:%S")
+        except ValueError:
+            try:
+                since_dt = datetime.strptime(f"{day} {since}", "%Y-%m-%d %H:%M:%S")
+            except ValueError:
+                try:
+                    since_dt = datetime.strptime(f"{day} {since}", "%Y-%m-%d %H:%M")
+                except ValueError:
+                    pass
+
+    events = []
+    for p in points:
+        if since_dt and p["ts"] and p["ts"] <= since_dt:
+            continue
+        events.append({
+            "type": p["type"],
+            "video": p["video"],
+            "ts": p["ts"].strftime("%Y-%m-%d %H:%M:%S") if p["ts"] else None,
+            "hhmmss": p["hhmmss"],
+        })
+
+    # Determine current home/away status from the latest event
+    current_status = None
+    current_status_since = None
+    if points:
+        latest = points[-1]
+        current_status = "home" if latest["type"] == "back" else "away"
+        current_status_since = latest["hhmmss"]
+
+    return {
+        "events": events,
+        "current_status": current_status,
+        "current_status_since": current_status_since,
+        "server_ts": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+    }
+
+
+@app.get("/api/image/{basename}")
+def api_serve_image(basename: str):
+    """Serve a ReID crop image by basename from TEMP_DIR or VIDEO_FOLDER."""
+    name = os.path.basename(basename)
+    if not name.lower().endswith((".jpg", ".jpeg", ".png")):
+        raise HTTPException(status_code=400, detail="Only image files allowed")
+    if ".." in name or "/" in name or "\\" in name:
+        raise HTTPException(status_code=400, detail="Invalid filename")
+    # Search in TEMP_DIR first (where crops are saved), then VIDEO_FOLDER
+    for search_dir in [TEMP_DIR, VIDEO_FOLDER]:
+        if not search_dir:
+            continue
+        try:
+            for root, _dirs, files in os.walk(search_dir):
+                if name in files:
+                    return FileResponse(os.path.join(root, name), media_type="image/jpeg")
+        except OSError:
+            continue
+    raise HTTPException(status_code=404, detail="Image not found")
+
+
+from pydantic import BaseModel
+
+
+class ReidCopyRequest(BaseModel):
+    image_path: str
+    target: str  # "positive" or "negative"
+
+
+@app.post("/api/reid/copy")
+def api_reid_copy(req: ReidCopyRequest):
+    """Copy a ReID crop image to the positive or negative gallery."""
+    if req.target not in ("positive", "negative"):
+        raise HTTPException(status_code=400, detail="target must be 'positive' or 'negative'")
+
+    # Resolve source: basename only, find in VIDEO_FOLDER
+    src_name = os.path.basename(req.image_path)
+    if ".." in src_name or "/" in src_name or "\\" in src_name:
+        raise HTTPException(status_code=400, detail="Invalid filename")
+
+    src_path = None
+    for search_dir in [TEMP_DIR, VIDEO_FOLDER]:
+        if not search_dir:
+            continue
+        try:
+            for root, _dirs, files in os.walk(search_dir):
+                if src_name in files:
+                    src_path = os.path.join(root, src_name)
+                    break
+        except OSError:
+            continue
+        if src_path:
+            break
+    if not src_path:
+        raise HTTPException(status_code=404, detail="Source image not found")
+
+    gallery = REID_GALLERY_PATH if req.target == "positive" else REID_NEGATIVE_GALLERY_PATH
+    os.makedirs(gallery, exist_ok=True)
+    dst = os.path.join(gallery, src_name)
+    try:
+        shutil.copy2(src_path, dst)
+    except OSError as e:
+        raise HTTPException(status_code=500, detail=f"Copy failed: {e}")
+
+    return {"status": "ok", "destination": dst}
 
 
 # Static files (CSS)

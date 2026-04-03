@@ -257,11 +257,33 @@ async def startup():
 async def health():
     battery = psutil.sensors_battery()
     battery_pct = battery.percent if battery else None
+    mem = psutil.virtual_memory()
+    try:
+        load1, load5, load15 = os.getloadavg()
+    except (OSError, AttributeError):
+        load1 = load5 = load15 = None
+    cpu_temp = None
+    try:
+        temps = psutil.sensors_temperatures()
+        if temps:
+            for entry in temps.get("coretemp", []):
+                if entry.label == "Package id 0":
+                    cpu_temp = entry.current
+                    break
+    except Exception:
+        pass
     return {
         "status": "ok",
         "active_tasks": _active_tasks,
         "max_tasks": WORKER_MAX_CONCURRENT,
         "battery_percent": battery_pct,
+        "load_avg_1m": load1,
+        "load_avg_5m": load5,
+        "load_avg_15m": load15,
+        "memory_percent": mem.percent,
+        "memory_used_mb": mem.used // (1024 * 1024),
+        "memory_total_mb": mem.total // (1024 * 1024),
+        "cpu_temp_c": cpu_temp,
     }
 
 

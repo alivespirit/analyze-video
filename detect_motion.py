@@ -1438,7 +1438,11 @@ def detect_motion(input_video_path, output_dir, fast_processing: bool = False):
         maybe_log_profile("no_significant_motion")
         return {'status': 'no_significant_motion', 'clip_path': None, 'insignificant_frames': insignificant_motion_frames}
 
-    output_filename = os.path.join(output_dir, file_basename)
+    # Save highlight clip to daily subfolder (YYYYMMDD) instead of directly to output_dir
+    date_folder = datetime.now().strftime("%Y%m%d")
+    daily_clip_dir = os.path.join(output_dir, date_folder)
+    os.makedirs(daily_clip_dir, exist_ok=True)
+    output_filename = os.path.join(daily_clip_dir, file_basename)
 
     if low_res_mode:
         # Low-res lightweight path: no tracking, no ReID, no gate crossing.
