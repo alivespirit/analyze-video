@@ -277,6 +277,8 @@ async def health():
         "active_tasks": _active_tasks,
         "max_tasks": WORKER_MAX_CONCURRENT,
         "battery_percent": battery_pct,
+        "battery_plugged": battery.power_plugged if battery else None,
+        "battery_time_left_s": battery.secsleft if battery and battery.secsleft > 0 else None,
         "load_avg_1m": load1,
         "load_avg_5m": load5,
         "load_avg_15m": load15,
