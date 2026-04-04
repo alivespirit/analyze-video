@@ -53,6 +53,7 @@ REACTION_REMOVED_RE = re.compile(r"Reaction removed\.")
 # ReID result patterns (old and new)
 # Old:  "ReID result: matched=True/False, best_score=0.xxx, threshold=..."
 # New:  "ReID result: matched=True/False, pos=0.xxx, neg=0.xxx, delta=0.xxx, thr=0.xxx, margin=0.xxx."
+SPEEDTRAP_RE = re.compile(r"SpeedTrap (?P<kmh>\d+) km/h")
 REID_RESULT_RE_OLD = re.compile(
     r"ReID result:\s*matched=(?P<matched>True|False),\s*best_score=(?P<score>[0-9]*\.?[0-9]+),\s*threshold=(?P<thresh>[0-9]*\.?[0-9]+)"
 )
@@ -247,6 +248,8 @@ def collect_metrics(entries: List[Dict]) -> Dict:
     reaction_state_per_video: Dict[str, Optional[str]] = {}
     # Saved frames indicator per video
     has_frames_per_video: Dict[str, bool] = {}
+    # SpeedTrap max speed per video
+    speedtrap_per_video: Dict[str, int] = {}
     # ReID results per video
     reid_best_score_per_video: Dict[str, float] = {}
     reid_neg_score_per_video: Dict[str, float] = {}
@@ -324,6 +327,14 @@ def collect_metrics(entries: List[Dict]) -> Dict:
             # Saved frame indicator
             if SAVED_FRAME_RE.search(content):
                 has_frames_per_video[vid] = True
+
+            # SpeedTrap detection
+            m = SPEEDTRAP_RE.search(content)
+            if m:
+                kmh = int(m.group("kmh"))
+                prev = speedtrap_per_video.get(vid, 0)
+                if kmh > prev:
+                    speedtrap_per_video[vid] = kmh
 
             # If a later error-level line appears for this video, treat it as status=error
             level = e.get("level")
@@ -425,6 +436,7 @@ def collect_metrics(entries: List[Dict]) -> Dict:
         "reid_delta_per_video": reid_delta_per_video,
         "reid_matched_per_video": reid_matched_per_video,
         "has_frames_per_video": has_frames_per_video,
+        "speedtrap_per_video": speedtrap_per_video,
     }
 
 
@@ -1385,7 +1397,7 @@ _EMPTY_METRICS = {
     "fast_processing_per_video": {}, "worker_per_video": {},
     "reid_best_score_per_video": {}, "reid_neg_score_per_video": {},
     "reid_delta_per_video": {}, "reid_matched_per_video": {},
-    "has_frames_per_video": {},
+    "has_frames_per_video": {}, "speedtrap_per_video": {},
     "away_videos": [], "back_videos": [], "away_back_events": [],
     "videos_total": 0, "full_processing_stats": None, "motion_detection_stats": None,
     "gate_counts": {"up": 0, "down": 0}, "raw_events_per_video": {},
@@ -1467,6 +1479,7 @@ def api_today_videos(day: Optional[str] = Query(default=None)):
     rnpv = metrics.get("reid_neg_score_per_video", {})
     rmpv = metrics.get("reid_matched_per_video", {})
     hfpv = metrics.get("has_frames_per_video", {})
+    stpv = metrics.get("speedtrap_per_video", {})
     away_videos = set(metrics.get("away_videos", []))
     back_videos = set(metrics.get("back_videos", []))
 
@@ -1493,6 +1506,7 @@ def api_today_videos(day: Optional[str] = Query(default=None)):
             "reid_neg": round(rnpv[v], 3) if v in rnpv else None,
             "away_back": away_back,
             "has_frames": hfpv.get(v, False),
+            "speed_kmh": stpv.get(v),
         })
     return {"day": day, "videos": videos}
 

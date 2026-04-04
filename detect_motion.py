@@ -1807,6 +1807,7 @@ def detect_motion(input_video_path, output_dir, fast_processing: bool = False):
                                         if 0.0 < trap_kmh <= CAR_SPEEDTRAP_MAX_VALID_KMH:
                                             direction = "->" if int(start_line) == int(CAR_SPEEDTRAP_X1) else "<-"
                                             speedtrap_overlay_text = f"SpeedTrap {int(round(trap_kmh))} km/h {direction}"
+                                            logger.info(f"[{file_basename}] {speedtrap_overlay_text}, car_id={global_id}, df={df} frames, dt={dt:.2f}s")
 
                                     # Reset start at current line for subsequent measurements.
                                     st_trap['line'] = int(crossed_line)
