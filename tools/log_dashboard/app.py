@@ -1798,7 +1798,37 @@ def api_monitoring():
     except (OSError, json.JSONDecodeError, ValueError):
         pass
 
-    return {"master": master, "worker": worker, "ledger_recent": ledger_recent}
+    # Tesla SoC: try today's log first, fall back to cache file
+    tesla = None
+    tesla_soc_file = os.path.join(TEMP_DIR, "tesla_soc.txt")
+    try:
+        day, entries, _metrics = _get_day_parsed()
+        tesla_re = re.compile(r"Tesla SoC fetched: (?P<pct>\d+)%")
+        # Find the latest Tesla SoC log entry
+        for e in reversed(entries):
+            m = tesla_re.search(e.get("content", ""))
+            if m:
+                tesla = {
+                    "battery_percent": int(m.group("pct")),
+                    "fetched_ts": e["ts"].strftime("%Y-%m-%d %H:%M:%S"),
+                }
+                break
+    except Exception:
+        pass
+    if tesla is None:
+        try:
+            with open(tesla_soc_file, "r") as f:
+                soc_val = f.read().strip()
+            if soc_val:
+                mtime = os.path.getmtime(tesla_soc_file)
+                tesla = {
+                    "battery_percent": int(soc_val),
+                    "fetched_ts": datetime.fromtimestamp(mtime).strftime("%Y-%m-%d %H:%M:%S"),
+                }
+        except (OSError, ValueError):
+            pass
+
+    return {"master": master, "worker": worker, "tesla": tesla, "ledger_recent": ledger_recent}
 
 
 @app.get("/api/events/latest")
