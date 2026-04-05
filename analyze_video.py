@@ -323,14 +323,14 @@ def analyze_video(motion_result, video_path):
         if details:
             analysis_result += f" ({', '.join(details)})"
 
+        low_res_prefix = "\U0001F52C" if motion_result.get('low_res_clip') else ""
         if detected_motion_status == "significant_motion":
-            low_res_prefix = "\U0001F52C" if motion_result.get('low_res_clip') else ""
             timestamp += f"\u2705{low_res_prefix} *Отакої!* "
             analysis_result += reid_text
         elif detected_motion_status == "no_person":
-            timestamp += "\u274E "
+            timestamp += f"\u274E{low_res_prefix} "
         else:
-            timestamp += "\u2747\uFE0F "
+            timestamp += f"\u2747\uFE0F{low_res_prefix} "
 
         return {'response': timestamp + analysis_result, 'insignificant_frames': motion_result['insignificant_frames'], 'clip_path': motion_result.get('clip_path')}
 
