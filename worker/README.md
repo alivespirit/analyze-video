@@ -94,6 +94,7 @@ WORKER_MIN_BATTERY=5       # skip worker if its battery is below this %
 # Wake-on-LAN (optional) — wake worker when it's offline and master is plugged in
 WORKER_WAKE_ON_LAN=true
 WORKER_WAKE_ON_LAN_MAC=XX:XX:XX:XX:XX:XX
+WORKER_WAKE_ON_LAN_IFACE_IP=YYY.YYY.YYY.YYY
 ```
 
 ---
@@ -106,7 +107,7 @@ Run from the `analyze-video` directory:
 uvicorn worker.server:app --host 0.0.0.0 --port 8741 --timeout-keep-alive 120
 ```
 
-`--timeout-keep-alive 120` raises the idle connection timeout from uvicorn's default of 5 s, preventing TCP resets on long-running detection jobs.
+`--timeout-keep-alive 120` raises the idle connection timeout from uvicorn's default of 5s, preventing TCP resets on long-running detection jobs.
 
 ---
 
@@ -122,6 +123,8 @@ Returns worker status. Used by master for availability checks and by the Android
   "active_tasks": 1,
   "max_tasks": 2,
   "battery_percent": 87.0,
+  "battery_plugged": false,
+  "battery_time_left_s": 7200,
   "load_avg_1m": 1.2,
   "load_avg_5m": 0.8,
   "load_avg_15m": 0.5,
@@ -133,7 +136,9 @@ Returns worker status. Used by master for availability checks and by the Android
 ```
 
 - Master skips the worker if `battery_percent` is below `WORKER_MIN_BATTERY`.
-- `load_avg_*`: from `os.getloadavg()` (Linux only).
+- `battery_plugged`: whether AC power is connected (null if no battery sensor).
+- `battery_time_left_s`: estimated seconds remaining on battery (null if plugged in or unavailable).
+- `load_avg_*`: from `os.getloadavg()` (Linux only, null on unsupported platforms).
 - `cpu_temp_c`: Package id 0 from `psutil.sensors_temperatures()` coretemp (null if unavailable).
 
 ### `POST /detect-motion`

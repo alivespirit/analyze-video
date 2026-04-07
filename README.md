@@ -324,6 +324,7 @@ Master `.env`:
 ```env
 WORKER_WAKE_ON_LAN=true
 WORKER_WAKE_ON_LAN_MAC=XX:XX:XX:XX:XX:XX
+WORKER_WAKE_ON_LAN_IFACE_IP=YYY.YYY.YYY.YYY
 ```
 
 The packet is sent via the `10.0.0.1` interface (configurable in `worker/client.py`).

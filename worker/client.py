@@ -30,6 +30,7 @@ WORKER_MIN_BATTERY = int(os.getenv("WORKER_MIN_BATTERY", "5"))
 # Wake-on-LAN configuration
 WORKER_WAKE_ON_LAN = os.getenv("WORKER_WAKE_ON_LAN", "false").lower() in ("true", "1", "yes")
 WORKER_WAKE_ON_LAN_MAC = os.getenv("WORKER_WAKE_ON_LAN_MAC", "")
+WORKER_WAKE_ON_LAN_IFACE_IP = os.getenv("WORKER_WAKE_ON_LAN_IFACE_IP", "10.0.0.1")
 _WOL_COOLDOWN_SECONDS = 300  # 5 minutes between WOL attempts
 _last_wol_ts = 0.0
 
@@ -62,14 +63,14 @@ def get_worker_battery():
 
 
 def _send_wol_packet(mac_address: str):
-    """Send Wake-on-LAN magic packet via the 10.0.0.1 interface."""
+    """Send Wake-on-LAN magic packet via the configured interface."""
     import socket
     mac_bytes = bytes.fromhex(mac_address.replace(":", "").replace("-", ""))
     magic = b'\xff' * 6 + mac_bytes * 16
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     try:
         sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
-        sock.bind(("10.0.0.1", 0))
+        sock.bind((WORKER_WAKE_ON_LAN_IFACE_IP, 0))
         sock.sendto(magic, ("255.255.255.255", 9))
     finally:
         sock.close()
