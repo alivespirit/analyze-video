@@ -176,10 +176,11 @@ Response:
 | `REID_CACHE_DIR` | `temp/` (relative to script) | Directory for ReID embedding cache; point to master's `temp/` on CIFS to reuse prebuilt cache |
 | `WORKER_WAKE_ON_LAN` | `false` | Send WOL magic packet when worker health check fails and master is plugged in |
 | `WORKER_WAKE_ON_LAN_MAC` | (empty) | Worker's ethernet MAC address for WOL |
+| `WORKER_WAKE_ON_LAN_IFACE_IP` | `10.0.0.1` | Local IP of the network interface to send WOL packets from |
 
 All `detect_motion` env vars work on the worker the same way as on the master (`CONF_THRESHOLD`, `IOU_THRESHOLD`, `IMGSZ`, `TRACKER_CONFIG`, `OBJECT_DETECTION_MODEL_PATH`, `REID_*`, etc).
 
-WOL packets are sent via the `10.0.0.1` interface with a 5-minute cooldown. The worker must have Wake-on-LAN enabled in BIOS and via `ethtool -s <iface> wol g`.
+WOL packets are sent via the configured interface (`WORKER_WAKE_ON_LAN_IFACE_IP`) with a 5-minute cooldown. The worker must have Wake-on-LAN enabled in BIOS and via `ethtool -s <iface> wol g`.
 
 ---
 

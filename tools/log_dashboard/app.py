@@ -1598,6 +1598,48 @@ def api_serve_highlight(basename: str):
     raise HTTPException(status_code=404, detail="Highlight not found")
 
 
+@app.get("/api/today/gate-crossings")
+def api_today_gate_crossings(day: Optional[str] = Query(default=None)):
+    """Return all videos that have ReID crops, with crop URLs pre-fetched."""
+    day_str, entries, metrics = _get_day_parsed(day)
+    spv = metrics.get("status_per_video", {})
+    gpv = metrics.get("gate_direction_per_video", {})
+    fst = metrics.get("first_seen_ts_per_video", {})
+    rspv = metrics.get("reid_best_score_per_video", {})
+    rmpv = metrics.get("reid_matched_per_video", {})
+    rnpv = metrics.get("reid_neg_score_per_video", {})
+
+    # Pre-scan all daily dirs for reid crop files
+    crop_files: Dict[str, List[str]] = {}  # video_stem -> [crop_urls]
+    for dirpath, files in _walk_daily_dirs(TEMP_DIR):
+        for fname in sorted(files):
+            if "_reid_best" in fname and fname.lower().endswith(".jpg"):
+                # Extract video stem: everything before _reid_best
+                stem = fname.split("_reid_best")[0]
+                crop_files.setdefault(stem, []).append(f"/api/image/{fname}")
+
+    all_vids = set(spv.keys()) | set(fst.keys())
+    gate_crossings = []
+    for v in sorted(all_vids, key=lambda x: (fst.get(x) or datetime.min, x), reverse=True):
+        stem = os.path.splitext(v)[0]
+        crops = crop_files.get(stem, [])
+        if not crops:
+            continue
+        t = _hhmmss_from_video_path(v, fallback_ts=fst.get(v))
+        gate_crossings.append({
+            "basename": v,
+            "time": t,
+            "direction": gpv.get(v),
+            "status": spv.get(v),
+            "reid_matched": rmpv.get(v),
+            "reid_score": round(rspv[v], 3) if v in rspv else None,
+            "reid_neg": round(rnpv[v], 3) if v in rnpv else None,
+            "crops": crops,
+        })
+
+    return {"day": day_str, "gate_crossings": gate_crossings}
+
+
 @app.get("/api/today/stats")
 def api_today_stats(day: Optional[str] = Query(default=None)):
     day, entries, metrics = _get_day_parsed(day)

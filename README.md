@@ -371,6 +371,7 @@ A lightweight web dashboard that reads existing log files and provides per-day i
    - `/api/today/video/{basename}/reid-crops` — ReID crop image URLs
    - `/api/today/video/{basename}/frames` — insignificant/no_person frame URLs
    - `/api/today/video/{basename}/highlight` — highlight clip URL
+   - `/api/today/gate-crossings?day=` — videos with ReID crops: basename, time, direction, scores, crop URLs
    - `/api/today/stats?day=` — aggregated stats for a day
    - `/api/stats/overall` — overall stats with heatmaps
    - `/api/monitoring` — system monitoring (CPU, RAM, battery, worker health)

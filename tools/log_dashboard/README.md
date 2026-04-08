@@ -82,6 +82,7 @@ The dashboard also serves JSON endpoints consumed by the Android dashboard app:
 - `GET /api/today/video/{basename}/reid-crops` — ReID crop image URLs
 - `GET /api/today/video/{basename}/frames` — insignificant/no_person frame URLs
 - `GET /api/today/video/{basename}/highlight` — highlight clip URL (if available)
+- `GET /api/today/gate-crossings?day=` — videos with ReID crops: basename, time, direction, scores, crop URLs
 - `GET /api/today/stats?day=` — aggregated stats for a day
 - `GET /api/stats/overall` — overall stats with heatmaps
 - `GET /api/monitoring` — system monitoring (master CPU/RAM/battery, worker health proxy with load/RAM/CPU temp, Tesla SoC, recent ledger)
