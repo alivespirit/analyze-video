@@ -566,7 +566,7 @@ class FileHandler(FileSystemEventHandler):
             update_processing_ledger(file_path, "failed", {"end_ts": time.time(), "error": str(e)[:256]})
 
         battery = psutil.sensors_battery()
-        worker_bat = get_worker_battery() if WORKER_ENABLED and worker_available() else None
+        worker_bat = get_worker_battery() if WORKER_ENABLED else None
         worker_bat_text = f" / W {int(worker_bat)}%" if worker_bat is not None else ""
         if not battery.power_plugged:
             battery_time_left = time.strftime("%H:%M", time.gmtime(battery.secsleft))

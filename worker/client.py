@@ -31,6 +31,7 @@ WORKER_MIN_BATTERY = int(os.getenv("WORKER_MIN_BATTERY", "5"))
 WORKER_WAKE_ON_LAN = os.getenv("WORKER_WAKE_ON_LAN", "false").lower() in ("true", "1", "yes")
 WORKER_WAKE_ON_LAN_MAC = os.getenv("WORKER_WAKE_ON_LAN_MAC", "")
 WORKER_WAKE_ON_LAN_IFACE_IP = os.getenv("WORKER_WAKE_ON_LAN_IFACE_IP", "10.0.0.1")
+WORKER_WAKE_ON_LAN_BROADCAST_IP = os.getenv("WORKER_WAKE_ON_LAN_BROADCAST_IP", "10.0.0.255")
 _WOL_COOLDOWN_SECONDS = 300  # 5 minutes between WOL attempts
 _last_wol_ts = 0.0
 
@@ -71,7 +72,7 @@ def _send_wol_packet(mac_address: str):
     try:
         sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
         sock.bind((WORKER_WAKE_ON_LAN_IFACE_IP, 0))
-        sock.sendto(magic, ("255.255.255.255", 9))
+        sock.sendto(magic, (WORKER_WAKE_ON_LAN_BROADCAST_IP, 9))
     finally:
         sock.close()
 
