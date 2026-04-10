@@ -1437,13 +1437,18 @@ def _get_day_parsed(day_str: Optional[str] = None) -> Tuple[str, List[Dict], Dic
     return result
 
 
+def _fetch_worker_health_sync(timeout: float = 3.0) -> Dict:
+    """Fetch worker health. Returns status dict or raises on failure."""
+    import urllib.request
+    req = urllib.request.Request(f"{WORKER_URL}/health", method="GET")
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
+        return json.loads(resp.read().decode())
+
+
 def _fetch_worker_health_bg():
     """Background thread: fetch worker health and update cache."""
     try:
-        import urllib.request
-        req = urllib.request.Request(f"{WORKER_URL}/health", method="GET")
-        with urllib.request.urlopen(req, timeout=3) as resp:
-            data = json.loads(resp.read().decode())
+        data = _fetch_worker_health_sync()
         _worker_health_cache["data"] = data
         _worker_health_cache["ts"] = time.time()
     except Exception:
@@ -1457,19 +1462,27 @@ def _fetch_worker_health_bg():
 
 
 def _get_worker_health() -> Optional[Dict]:
-    """Return cached worker health, refreshing in background when stale."""
+    """Return cached worker health. Uses a short sync attempt first, falls back to background."""
     if not WORKER_URL:
         return None
     now = time.time()
     if now - _worker_health_cache["ts"] < _WORKER_HEALTH_CACHE_TTL:
         return _worker_health_cache["data"]
-    # Kick off a background refresh
+    # Try a quick synchronous fetch (covers the online-worker case)
+    try:
+        data = _fetch_worker_health_sync(timeout=0.5)
+        _worker_health_cache["data"] = data
+        _worker_health_cache["ts"] = time.time()
+        return data
+    except Exception:
+        pass
+    # Worker didn't respond quickly — do the full retry in background
     import threading
     threading.Thread(target=_fetch_worker_health_bg, daemon=True).start()
-    # Return stale cache if available, otherwise "checking"
+    # Return stale cache if available, otherwise "offline"
     if _worker_health_cache["data"] is not None:
         return _worker_health_cache["data"]
-    return {"status": "checking"}
+    return {"status": "offline"}
 
 
 @app.get("/api/days")
