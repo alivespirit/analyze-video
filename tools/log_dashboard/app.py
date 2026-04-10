@@ -1456,6 +1456,11 @@ def _get_worker_health() -> Optional[Dict]:
         offline = {"status": "offline"}
         _worker_health_cache["data"] = offline
         _worker_health_cache["ts"] = now
+        try:
+            from worker.client import try_wol_if_needed
+            try_wol_if_needed()
+        except Exception:
+            pass
         return offline
 
 

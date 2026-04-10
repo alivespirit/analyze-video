@@ -77,7 +77,7 @@ def _send_wol_packet(mac_address: str):
         sock.close()
 
 
-def _try_wol_if_needed():
+def try_wol_if_needed():
     """Send WOL if enabled, master is plugged in, and cooldown has elapsed."""
     global _last_wol_ts
     if not WORKER_WAKE_ON_LAN or not WORKER_WAKE_ON_LAN_MAC:
@@ -124,7 +124,7 @@ def _check_worker_health() -> bool:
                 time.sleep(1.0)
             else:
                 logger.warning("Worker health check failed: %r", e)
-                _try_wol_if_needed()
+                try_wol_if_needed()
                 return False
 
 
