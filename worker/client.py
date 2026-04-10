@@ -124,6 +124,7 @@ def _check_worker_health() -> bool:
                 time.sleep(1.0)
             else:
                 logger.warning("Worker health check failed: %r", e)
+                _last_worker_battery = None
                 try_wol_if_needed()
                 return False
 
