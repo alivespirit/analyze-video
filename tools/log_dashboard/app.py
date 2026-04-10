@@ -1437,31 +1437,39 @@ def _get_day_parsed(day_str: Optional[str] = None) -> Tuple[str, List[Dict], Dic
     return result
 
 
-def _get_worker_health() -> Optional[Dict]:
-    """Fetch worker health with caching."""
-    if not WORKER_URL:
-        return None
-    now = time.time()
-    if _worker_health_cache["data"] is not None and now - _worker_health_cache["ts"] < _WORKER_HEALTH_CACHE_TTL:
-        return _worker_health_cache["data"]
+def _fetch_worker_health_bg():
+    """Background thread: fetch worker health and update cache."""
     try:
         import urllib.request
         req = urllib.request.Request(f"{WORKER_URL}/health", method="GET")
         with urllib.request.urlopen(req, timeout=3) as resp:
             data = json.loads(resp.read().decode())
         _worker_health_cache["data"] = data
-        _worker_health_cache["ts"] = now
-        return data
+        _worker_health_cache["ts"] = time.time()
     except Exception:
-        offline = {"status": "offline"}
-        _worker_health_cache["data"] = offline
-        _worker_health_cache["ts"] = now
+        _worker_health_cache["data"] = {"status": "offline"}
+        _worker_health_cache["ts"] = time.time()
         try:
             from worker.client import try_wol_if_needed
             try_wol_if_needed()
         except Exception:
             pass
-        return offline
+
+
+def _get_worker_health() -> Optional[Dict]:
+    """Return cached worker health, refreshing in background when stale."""
+    if not WORKER_URL:
+        return None
+    now = time.time()
+    if now - _worker_health_cache["ts"] < _WORKER_HEALTH_CACHE_TTL:
+        return _worker_health_cache["data"]
+    # Kick off a background refresh
+    import threading
+    threading.Thread(target=_fetch_worker_health_bg, daemon=True).start()
+    # Return stale cache if available, otherwise "checking"
+    if _worker_health_cache["data"] is not None:
+        return _worker_health_cache["data"]
+    return {"status": "checking"}
 
 
 @app.get("/api/days")
