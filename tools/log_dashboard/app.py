@@ -1389,6 +1389,9 @@ _CPU_CACHE_TTL = 10.0
 # Worker health cache
 _worker_health_cache: Dict[str, object] = {"data": None, "ts": 0.0}
 _WORKER_HEALTH_CACHE_TTL = 30.0
+# Timestamp (epoch seconds) when the worker first went offline in the current offline streak.
+# Cleared as soon as the worker reports healthy again.
+_worker_offline_since: Optional[float] = None
 
 
 _EMPTY_METRICS = {
@@ -1445,15 +1448,31 @@ def _fetch_worker_health_sync(timeout: float = 3.0) -> Dict:
         return json.loads(resp.read().decode())
 
 
+def _store_worker_health(data: Dict) -> Dict:
+    """Update cache + offline_since tracking. Returns `data` possibly annotated with offline_since."""
+    global _worker_offline_since
+    now = time.time()
+    is_offline = data.get("status") != "ok"
+    if is_offline:
+        if _worker_offline_since is None:
+            _worker_offline_since = now
+        # Stamp the response with the offline_since time for downstream consumers.
+        data = dict(data)
+        data["offline_since"] = datetime.fromtimestamp(_worker_offline_since).strftime("%H:%M:%S")
+    else:
+        _worker_offline_since = None
+    _worker_health_cache["data"] = data
+    _worker_health_cache["ts"] = now
+    return data
+
+
 def _fetch_worker_health_bg():
     """Background thread: fetch worker health and update cache."""
     try:
         data = _fetch_worker_health_sync()
-        _worker_health_cache["data"] = data
-        _worker_health_cache["ts"] = time.time()
+        _store_worker_health(data)
     except Exception:
-        _worker_health_cache["data"] = {"status": "offline"}
-        _worker_health_cache["ts"] = time.time()
+        _store_worker_health({"status": "offline"})
         try:
             from worker.client import try_wol_if_needed
             try_wol_if_needed()
@@ -1471,18 +1490,16 @@ def _get_worker_health() -> Optional[Dict]:
     # Try a quick synchronous fetch (covers the online-worker case)
     try:
         data = _fetch_worker_health_sync(timeout=0.5)
-        _worker_health_cache["data"] = data
-        _worker_health_cache["ts"] = time.time()
-        return data
+        return _store_worker_health(data)
     except Exception:
         pass
     # Worker didn't respond quickly — do the full retry in background
     import threading
     threading.Thread(target=_fetch_worker_health_bg, daemon=True).start()
-    # Return stale cache if available, otherwise "offline"
+    # Return stale cache if available, otherwise record a fresh offline state.
     if _worker_health_cache["data"] is not None:
         return _worker_health_cache["data"]
-    return {"status": "offline"}
+    return _store_worker_health({"status": "offline"})
 
 
 @app.get("/api/days")
