@@ -2493,11 +2493,12 @@ def detect_motion(input_video_path, output_dir, fast_processing: bool = False):
                             selected.append(cand)
 
                     # Phase 2: fill remaining slots with diversity-filtered crops
+                    selected_ids = set(id(s) for s in selected)
                     if len(selected) < top_k:
                         for cand in scored:
                             if len(selected) >= top_k:
                                 break
-                            if cand in selected:
+                            if id(cand) in selected_ids:
                                 continue
                             ok = True
                             for s in selected:
