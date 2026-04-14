@@ -2266,7 +2266,7 @@ def detect_motion(input_video_path, output_dir, fast_processing: bool = False):
                             if x2 > x1 and y2 > y1:
                                 crop = frame_for_reid[y1:y2, x1:x2]
                                 if crop is not None and crop.size > 0:
-                                    reid_candidate_crops.append(crop)
+                                    reid_candidate_crops.append((crop, _eid))
                 if prof.enabled:
                     prof.add("track.reid_sampling", time.perf_counter() - t0)
 
@@ -2418,7 +2418,7 @@ def detect_motion(input_video_path, output_dir, fast_processing: bool = False):
                 scored = []
                 best_score = 0.0
                 best_gallery_path = None
-                for crop in samples:
+                for crop, crop_eid in samples:
                     try:
                         emb = reid.get_embedding(crop)
                         score = 0.0
@@ -2443,6 +2443,7 @@ def detect_motion(input_video_path, output_dir, fast_processing: bool = False):
                             "neg": float(neg_score),
                             "emb": emb,
                             "best_gallery_path": sample_best_gallery_path,
+                            "entity_id": crop_eid,
                         })
                         if score > best_score:
                             best_score = score
@@ -2475,28 +2476,41 @@ def detect_motion(input_video_path, output_dir, fast_processing: bool = False):
                 elif best_score > 0:
                     logger.info(f"[{file_basename}] ReID best gallery match path unavailable; score={best_score:.3f}")
 
-                # Select up to REID_TOP_K diverse top crops
+                # Select up to REID_TOP_K diverse top crops, ensuring per-person coverage
+                top_k = max(1, int(REID_TOP_K))
                 selected = []
                 if scored:
                     scored.sort(key=lambda x: x["score"], reverse=True)
+
+                    # Phase 1: pick the best crop for each unique person (entity_id)
+                    seen_eids = set()
                     for cand in scored:
-                        if len(selected) >= max(1, int(REID_TOP_K)):
+                        if len(selected) >= top_k:
                             break
-                        ok = True
-                        for s in selected:
-                            # cosine distance between normalized embeddings
-                            try:
-                                sim = float(np.dot(cand["emb"], s["emb"]))
-                            except Exception:
-                                sim = 1.0
-                            if (1.0 - sim) < REID_DIVERSITY_MIN_DIST:
-                                ok = False
-                                break
-                        if ok:
+                        eid = cand.get("entity_id")
+                        if eid is not None and eid >= 0 and eid not in seen_eids:
+                            seen_eids.add(eid)
                             selected.append(cand)
-                    # Note: we intentionally do NOT backfill to K.
-                    # If additional candidates are too similar, it's better to save fewer crops
-                    # than fill the gallery with near-duplicates.
+
+                    # Phase 2: fill remaining slots with diversity-filtered crops
+                    if len(selected) < top_k:
+                        for cand in scored:
+                            if len(selected) >= top_k:
+                                break
+                            if cand in selected:
+                                continue
+                            ok = True
+                            for s in selected:
+                                # cosine distance between normalized embeddings
+                                try:
+                                    sim = float(np.dot(cand["emb"], s["emb"]))
+                                except Exception:
+                                    sim = 1.0
+                                if (1.0 - sim) < REID_DIVERSITY_MIN_DIST:
+                                    ok = False
+                                    break
+                            if ok:
+                                selected.append(cand)
 
                 # Save selected crops (indexed only, no legacy duplicate)
                 if SAVE_REID_BEST_CROP and selected:
