@@ -1959,11 +1959,12 @@ def api_events_latest(since: Optional[str] = Query(default=None, description="IS
             "hhmmss": p["hhmmss"],
         })
 
-    # Determine current home/away status from the latest event
+    # Determine current home/away status from the latest event by real-world event time
+    # (not log/processing time — videos can be processed out of order when there's a backlog).
     current_status = None
     current_status_since = None
     if points:
-        latest = points[-1]
+        latest = max(points, key=lambda p: (p.get("minute") or -1, p.get("ts") or datetime.min))
         current_status = "home" if latest["type"] == "back" else "away"
         current_status_since = latest["hhmmss"]
 
