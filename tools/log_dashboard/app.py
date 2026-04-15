@@ -11,7 +11,7 @@ from typing import List, Dict, Optional, Tuple
 import psutil
 
 from fastapi import FastAPI, Query, HTTPException
-from fastapi.responses import HTMLResponse, FileResponse, JSONResponse
+from fastapi.responses import HTMLResponse, FileResponse
 from fastapi.staticfiles import StaticFiles
 from jinja2 import Environment, FileSystemLoader, select_autoescape
 
@@ -42,7 +42,10 @@ STATUS_ANY_RE = re.compile(r"Status:\s*(?P<status>[a-z_]+)")
 FULL_TIME_RE = re.compile(r"Full processing took (?P<seconds>[0-9]+\.[0-9]+|[0-9]+) seconds")
 RAW_EVENTS_RE = re.compile(r"Found (?P<count>\d+) raw motion event\(s\)")
 MD_TIME_RE = re.compile(r"Motion detection took (?P<seconds>[0-9]+\.[0-9]+|[0-9]+) seconds")
-GATE_RE = re.compile(r"Gate crossing detected! Direction: (?P<dir>up|down|both)")
+GATE_RE = re.compile(
+    r"Gate crossing detected! Direction: (?P<dir>up|down|both)"
+    r"(?:\. Persons Up: (?P<up>\d+), Down: (?P<down>\d+))?"
+)
 NEW_FILE_RE = re.compile(r"^New file detected:")
 # From main.py: "Queuing motion detection... (motion_queue_depth=..., fast_processing=True/False)"
 FAST_PROCESSING_RE = re.compile(r"fast_processing=(?P<val>True|False)")
@@ -238,6 +241,8 @@ def collect_metrics(entries: List[Dict]) -> Dict:
     md_time_seconds: List[float] = []
     gate_counts = {"up": 0, "down": 0}
     gate_direction_per_video: Dict[str, str] = {}
+    gate_persons_up_per_video: Dict[str, int] = {}
+    gate_persons_down_per_video: Dict[str, int] = {}
     first_seen_ts_per_video: Dict[str, datetime] = {}
     # Fast-processing mode (per video)
     fast_processing_per_video: Dict[str, bool] = {}
@@ -372,6 +377,12 @@ def collect_metrics(entries: List[Dict]) -> Dict:
                 elif current != direction and current != "both":
                     gate_direction_per_video[vid] = "both"
 
+                # Accumulate per-video person counts (video may have multiple events)
+                up_s, down_s = m.group("up"), m.group("down")
+                if up_s is not None and down_s is not None:
+                    gate_persons_up_per_video[vid] = gate_persons_up_per_video.get(vid, 0) + int(up_s)
+                    gate_persons_down_per_video[vid] = gate_persons_down_per_video.get(vid, 0) + int(down_s)
+
     # Count videos per status
     status_counts: Dict[str, int] = {}
     for s in status_per_video.values():
@@ -422,6 +433,8 @@ def collect_metrics(entries: List[Dict]) -> Dict:
         "motion_detection_stats": md_stats,
         "gate_counts": gate_counts,
         "gate_direction_per_video": gate_direction_per_video,
+        "gate_persons_up_per_video": gate_persons_up_per_video,
+        "gate_persons_down_per_video": gate_persons_down_per_video,
         "first_seen_ts_per_video": first_seen_ts_per_video,
         "fast_processing_per_video": fast_processing_per_video,
         "worker_per_video": worker_per_video,
@@ -1396,7 +1409,9 @@ _worker_offline_since: Optional[float] = None
 
 _EMPTY_METRICS = {
     "status_counts": {}, "status_per_video": {}, "processing_time_per_video": {},
-    "gate_direction_per_video": {}, "first_seen_ts_per_video": {},
+    "gate_direction_per_video": {},
+    "gate_persons_up_per_video": {}, "gate_persons_down_per_video": {},
+    "first_seen_ts_per_video": {},
     "fast_processing_per_video": {}, "worker_per_video": {},
     "reid_best_score_per_video": {}, "reid_neg_score_per_video": {},
     "reid_delta_per_video": {}, "reid_matched_per_video": {},
@@ -1647,6 +1662,8 @@ def api_today_gate_crossings(day: Optional[str] = Query(default=None)):
     day_str, entries, metrics = _get_day_parsed(day)
     spv = metrics.get("status_per_video", {})
     gpv = metrics.get("gate_direction_per_video", {})
+    gup = metrics.get("gate_persons_up_per_video", {})
+    gdn = metrics.get("gate_persons_down_per_video", {})
     fst = metrics.get("first_seen_ts_per_video", {})
     rspv = metrics.get("reid_best_score_per_video", {})
     rmpv = metrics.get("reid_matched_per_video", {})
@@ -1673,6 +1690,8 @@ def api_today_gate_crossings(day: Optional[str] = Query(default=None)):
             "basename": v,
             "time": t,
             "direction": gpv.get(v),
+            "persons_up": gup.get(v),
+            "persons_down": gdn.get(v),
             "status": spv.get(v),
             "reid_matched": rmpv.get(v),
             "reid_score": round(rspv[v], 3) if v in rspv else None,
