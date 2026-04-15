@@ -145,6 +145,8 @@ REID_MAX_SAMPLES = 128 # maximum number of ReID samples to collect per event
 SAVE_REID_BEST_CROP = True
 REID_TOP_K = 3  # save up to K best, diverse crops per event
 REID_DIVERSITY_MIN_DIST = 0.2  # min cosine distance between selected embeddings
+REID_SAME_PERSON_SIM = 0.75  # cosine similarity above this = likely same physical person
+                              # (used to dedupe crops from fragmented tracker IDs)
 REID_NEGATIVE_GALLERY_PATH = os.getenv("REID_NEGATIVE_GALLERY_PATH", os.path.join(SCRIPT_DIR, "person_of_interest_negative"))
 REID_NEGATIVE_MARGIN = 0.08  # match must exceed negatives by at least this cosine margin
 
@@ -2266,7 +2268,11 @@ def detect_motion(input_video_path, output_dir, fast_processing: bool = False):
                             if x2 > x1 and y2 > y1:
                                 crop = frame_for_reid[y1:y2, x1:x2]
                                 if crop is not None and crop.size > 0:
-                                    reid_candidate_crops.append((crop, _eid))
+                                    # Namespace entity_id with clip_index because
+                                    # event_next_entity_id resets per event — otherwise
+                                    # different persons in different events collide.
+                                    composite_eid = (clip_index, _eid) if _eid is not None and _eid >= 0 else None
+                                    reid_candidate_crops.append((crop, composite_eid))
                 if prof.enabled:
                     prof.add("track.reid_sampling", time.perf_counter() - t0)
 
@@ -2476,41 +2482,69 @@ def detect_motion(input_video_path, output_dir, fast_processing: bool = False):
                 elif best_score > 0:
                     logger.info(f"[{file_basename}] ReID best gallery match path unavailable; score={best_score:.3f}")
 
-                # Select up to REID_TOP_K diverse top crops, ensuring per-person coverage
+                # Select up to REID_TOP_K top crops with per-person coverage.
+                # Strategy:
+                #   Phase 1 — pick highest-scored crop per distinct tracker entity_id
+                #             (up to 2*top_k candidates so we have room to dedupe).
+                #   Phase 2 — dedupe same-physical-person crops using a strict
+                #             embedding similarity check (handles tracker ID
+                #             fragmentation where the same person gets multiple
+                #             track IDs after occlusion/re-acquisition).
+                #   Phase 3 — if slots remain, backfill with mild diversity filter
+                #             (REID_DIVERSITY_MIN_DIST) to avoid near-duplicate frames.
                 top_k = max(1, int(REID_TOP_K))
                 selected = []
                 if scored:
                     scored.sort(key=lambda x: x["score"], reverse=True)
 
-                    # Phase 1: pick the best crop for each unique person (entity_id)
+                    # Phase 1: best crop per entity_id (namespaced with clip_index
+                    # so entities in different events don't collide on reset id=1)
+                    phase1 = []
                     seen_eids = set()
                     for cand in scored:
-                        if len(selected) >= top_k:
+                        if len(phase1) >= top_k * 2:
                             break
                         eid = cand.get("entity_id")
-                        if eid is not None and eid >= 0 and eid not in seen_eids:
+                        if eid is not None and eid in seen_eids:
+                            continue
+                        if eid is not None:
                             seen_eids.add(eid)
+                        phase1.append(cand)
+
+                    # Phase 2: dedupe same-person crops by strict similarity
+                    for cand in phase1:
+                        if len(selected) >= top_k:
+                            break
+                        is_dup = False
+                        for s in selected:
+                            try:
+                                sim = float(np.dot(cand["emb"], s["emb"]))
+                            except Exception:
+                                sim = 1.0
+                            if sim >= REID_SAME_PERSON_SIM:
+                                is_dup = True
+                                break
+                        if not is_dup:
                             selected.append(cand)
 
-                    # Phase 2: fill remaining slots with diversity-filtered crops
-                    selected_ids = set(id(s) for s in selected)
+                    # Phase 3: fill remaining slots with diversity-filtered crops
                     if len(selected) < top_k:
+                        selected_ids = set(id(s) for s in selected)
                         for cand in scored:
                             if len(selected) >= top_k:
                                 break
                             if id(cand) in selected_ids:
                                 continue
-                            ok = True
+                            too_similar = False
                             for s in selected:
-                                # cosine distance between normalized embeddings
                                 try:
                                     sim = float(np.dot(cand["emb"], s["emb"]))
                                 except Exception:
                                     sim = 1.0
                                 if (1.0 - sim) < REID_DIVERSITY_MIN_DIST:
-                                    ok = False
+                                    too_similar = True
                                     break
-                            if ok:
+                            if not too_similar:
                                 selected.append(cand)
 
                 # Save selected crops (indexed only, no legacy duplicate)
