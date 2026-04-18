@@ -144,6 +144,7 @@ REID_SAMPLING_STRIDE = 2  # sample every Nth frame near the line for ReID
 REID_MAX_SAMPLES = 128 # maximum number of ReID samples to collect per event
 SAVE_REID_BEST_CROP = True
 REID_TOP_K = 3  # save up to K best, diverse crops per event
+REID_MATCHED_CROPS_MAX = 2  # when matched, reserve up to this many slots for pose-diverse crops of the matched person (remainder filled with other persons)
 REID_DIVERSITY_MIN_DIST = 0.2  # min cosine distance between selected embeddings
 REID_SAME_PERSON_SIM = 0.75  # cosine similarity above this = likely same physical person
                               # (used to dedupe crops from fragmented tracker IDs)
@@ -2486,8 +2487,8 @@ def detect_motion(input_video_path, output_dir, fast_processing: bool = False):
                 # Link the match to the specific person's crossing direction so
                 # downstream code can emit the correct AUTO Reaction when multiple
                 # people cross in different directions within one video.
+                best_crop = max(scored, key=lambda x: x["score"]) if scored else None
                 if reid_result["matched"]:
-                    best_crop = max(scored, key=lambda x: x["score"]) if scored else None
                     best_eid = best_crop.get("entity_id") if best_crop else None
                     matched_dir = entity_directions.get(best_eid) if best_eid is not None else None
                     if matched_dir:
@@ -2506,59 +2507,42 @@ def detect_motion(input_video_path, output_dir, fast_processing: bool = False):
                 elif best_score > 0:
                     logger.info(f"[{file_basename}] ReID best gallery match path unavailable; score={best_score:.3f}")
 
-                # Select up to REID_TOP_K top crops with per-person coverage.
-                # Strategy:
-                #   Phase 1 — pick highest-scored crop per distinct tracker entity_id
-                #             (up to 2*top_k candidates so we have room to dedupe).
-                #   Phase 2 — dedupe same-physical-person crops using a strict
-                #             embedding similarity check (handles tracker ID
-                #             fragmentation where the same person gets multiple
-                #             track IDs after occlusion/re-acquisition).
-                #   Phase 3 — if slots remain, backfill with mild diversity filter
-                #             (REID_DIVERSITY_MIN_DIST) to avoid near-duplicate frames.
+                # Select up to REID_TOP_K top crops. Two paths:
+                # - When ReID matched: partition candidates into matched-person vs
+                #   others (sim vs best_crop ≥ REID_SAME_PERSON_SIM). Reserve up to
+                #   REID_MATCHED_CROPS_MAX slots for pose-diverse matched crops
+                #   (different poses — diversity via REID_DIVERSITY_MIN_DIST, not
+                #   the strict same-person dedup which would collapse them to 1).
+                #   Fill remaining slots from the "others" pool via the standard
+                #   phase 1/2/3 (per-entity best → same-person dedup → diversity).
+                #   Matched crops are tagged so they can be saved with an "_m"
+                #   filename suffix for AUTO_CONFIRM targeting.
+                # - When not matched: existing phase 1/2/3 over the full pool.
                 top_k = max(1, int(REID_TOP_K))
                 selected = []
+                matched_flags = []
                 if scored:
                     scored.sort(key=lambda x: x["score"], reverse=True)
 
-                    # Phase 1: best crop per entity_id (namespaced with clip_index
-                    # so entities in different events don't collide on reset id=1)
-                    phase1 = []
-                    seen_eids = set()
-                    for cand in scored:
-                        if len(phase1) >= top_k * 2:
-                            break
-                        eid = cand.get("entity_id")
-                        if eid is not None and eid in seen_eids:
-                            continue
-                        if eid is not None:
-                            seen_eids.add(eid)
-                        phase1.append(cand)
+                    ref_emb = best_crop["emb"] if (reid_result.get("matched") and best_crop is not None) else None
 
-                    # Phase 2: dedupe same-person crops by strict similarity
-                    for cand in phase1:
-                        if len(selected) >= top_k:
-                            break
-                        is_dup = False
-                        for s in selected:
+                    if ref_emb is not None:
+                        matched_pool = []
+                        other_pool = []
+                        for c in scored:
                             try:
-                                sim = float(np.dot(cand["emb"], s["emb"]))
+                                sim = float(np.dot(c["emb"], ref_emb))
                             except Exception:
-                                sim = 1.0
+                                sim = 0.0
                             if sim >= REID_SAME_PERSON_SIM:
-                                is_dup = True
-                                break
-                        if not is_dup:
-                            selected.append(cand)
+                                matched_pool.append(c)
+                            else:
+                                other_pool.append(c)
 
-                    # Phase 3: fill remaining slots with diversity-filtered crops
-                    if len(selected) < top_k:
-                        selected_ids = set(id(s) for s in selected)
-                        for cand in scored:
-                            if len(selected) >= top_k:
+                        matched_budget = min(REID_MATCHED_CROPS_MAX, top_k)
+                        for cand in matched_pool:
+                            if len([f for f in matched_flags if f]) >= matched_budget:
                                 break
-                            if id(cand) in selected_ids:
-                                continue
                             too_similar = False
                             for s in selected:
                                 try:
@@ -2570,6 +2554,60 @@ def detect_motion(input_video_path, output_dir, fast_processing: bool = False):
                                     break
                             if not too_similar:
                                 selected.append(cand)
+                                matched_flags.append(True)
+                    else:
+                        other_pool = scored
+
+                    # Fill remaining slots from the "others" pool using phase 1/2/3.
+                    others_remaining = top_k - len(selected)
+                    if others_remaining > 0 and other_pool:
+                        phase1 = []
+                        seen_eids = set()
+                        for cand in other_pool:
+                            if len(phase1) >= others_remaining * 2:
+                                break
+                            eid = cand.get("entity_id")
+                            if eid is not None and eid in seen_eids:
+                                continue
+                            if eid is not None:
+                                seen_eids.add(eid)
+                            phase1.append(cand)
+
+                        for cand in phase1:
+                            if len(selected) >= top_k:
+                                break
+                            is_dup = False
+                            for s in selected:
+                                try:
+                                    sim = float(np.dot(cand["emb"], s["emb"]))
+                                except Exception:
+                                    sim = 1.0
+                                if sim >= REID_SAME_PERSON_SIM:
+                                    is_dup = True
+                                    break
+                            if not is_dup:
+                                selected.append(cand)
+                                matched_flags.append(False)
+
+                        if len(selected) < top_k:
+                            selected_ids = set(id(s) for s in selected)
+                            for cand in other_pool:
+                                if len(selected) >= top_k:
+                                    break
+                                if id(cand) in selected_ids:
+                                    continue
+                                too_similar = False
+                                for s in selected:
+                                    try:
+                                        sim = float(np.dot(cand["emb"], s["emb"]))
+                                    except Exception:
+                                        sim = 1.0
+                                    if (1.0 - sim) < REID_DIVERSITY_MIN_DIST:
+                                        too_similar = True
+                                        break
+                                if not too_similar:
+                                    selected.append(cand)
+                                    matched_flags.append(False)
 
                 # Save selected crops (indexed only, no legacy duplicate)
                 if SAVE_REID_BEST_CROP and selected:
@@ -2579,14 +2617,16 @@ def detect_motion(input_video_path, output_dir, fast_processing: bool = False):
                         os.makedirs(daily_dir, exist_ok=True)
 
                         saved_paths = []
-                        for idx, item in enumerate(selected, start=1):
-                            fname_idxed = f"{os.path.splitext(file_basename)[0]}_reid_best{idx}.jpg"
+                        for idx, (item, is_matched) in enumerate(zip(selected, matched_flags), start=1):
+                            suffix = "_m" if is_matched else ""
+                            fname_idxed = f"{os.path.splitext(file_basename)[0]}_reid_best{idx}{suffix}.jpg"
                             save_path_idxed = os.path.join(daily_dir, fname_idxed)
                             cv2.imwrite(save_path_idxed, item["crop"], [cv2.IMWRITE_JPEG_QUALITY, 90])
                             saved_paths.append(save_path_idxed)
                         # best_path points to the highest-score indexed file
                         reid_result["best_path"] = saved_paths[0] if saved_paths else None
-                        logger.info(f"[{file_basename}] ReID topK saved {len(selected)} crops.")
+                        matched_count = sum(1 for f in matched_flags if f)
+                        logger.info(f"[{file_basename}] ReID topK saved {len(selected)} crops ({matched_count} matched-person).")
                     except Exception as e:
                         logger.warning(f"[{file_basename}] Failed to save ReID crops: {e}")
 

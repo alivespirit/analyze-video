@@ -1,5 +1,6 @@
 import os
 import asyncio
+import glob
 import logging
 import time
 import shutil
@@ -78,39 +79,55 @@ def entry_yyyymmdd(entry: object, video_path: str | None = None) -> str | None:
         pass
     return None
 
-def compute_reid_paths_multi(video_path: str, file_basename: str, k: int = 3, gallery_path: str | None = None):
+def _resolve_reid_daily_dir(video_path: str) -> str | None:
+    """Resolve the daily crops directory (temp/YYYYMMDD) for a given video."""
+    try:
+        dt = parse_datetime_from_path(video_path)
+        yyyymmdd = dt.strftime("%Y%m%d") if dt else None
+        if not yyyymmdd:
+            parts = re.split(r"[\\/]", video_path)
+            parent_folder = parts[-2] if len(parts) >= 2 else ""
+            m = re.search(r"(\d{8})(\d{2})", parent_folder)
+            if m:
+                yyyymmdd = m.group(1)
+        if not yyyymmdd:
+            return None
+        return os.path.join(_TEMP_DIR, yyyymmdd)
+    except Exception:
+        return None
+
+
+def compute_reid_paths_multi(video_path: str, file_basename: str, k: int = 3, gallery_path: str | None = None, matched_only: bool = False):
     """Compute (src,dst) pairs for bestN crops to copy/remove.
 
-    Derives date/hour from the actual video path using `parse_datetime_from_path`,
-    supporting both legacy and new formats. Builds temp paths like:
-      temp/YYYYMMDD/<basename>_reid_best{idx}.jpg
+    Derives date from the actual video path using `parse_datetime_from_path`,
+    supporting both legacy and new formats. Looks up files via glob so both
+    matched-person crops (`_reid_best{idx}_m.jpg`) and unmarked crops
+    (`_reid_best{idx}.jpg`) are found.
 
     Supports both positive and negative galleries via `gallery_path`.
     If `gallery_path` is None, defaults to REID_GALLERY_PATH.
+
+    Args:
+        matched_only: If True, return only crops with the `_m` suffix (matched
+            person). Used by AUTO_CONFIRM to avoid showing crops of bystanders
+            when multiple people crossed the gate.
     """
     results = []
     try:
-        # Prefer parsing from basename timestamp; fallback to parent folder regex
-        dt = parse_datetime_from_path(video_path)
-        yyyymmdd = dt.strftime("%Y%m%d") if dt else None
-        hh = dt.strftime("%H") if dt else None
-        if not (yyyymmdd and hh):
-            try:
-                parts = re.split(r"[\\/]", video_path)
-                parent_folder = parts[-2] if len(parts) >= 2 else ""
-                m = re.search(r"(\d{8})(\d{2})", parent_folder)
-                if m:
-                    yyyymmdd, hh = m.group(1), m.group(2)
-            except Exception:
-                pass
-        if not (yyyymmdd and hh):
+        daily_dir = _resolve_reid_daily_dir(video_path)
+        if not daily_dir:
             return results
 
         base, _ = os.path.splitext(file_basename)
-
-        # Indexed files
-        for idx in range(1, max(1, int(k)) + 1):
-            src_file = os.path.join(_TEMP_DIR, yyyymmdd, f"{base}_reid_best{idx}.jpg")
+        pattern = os.path.join(daily_dir, f"{base}_reid_best*.jpg")
+        files = sorted(glob.glob(pattern))
+        if matched_only:
+            files = [f for f in files if f.lower().endswith("_m.jpg")]
+        # Limit to k entries (sorted alphabetically puts lower indices first,
+        # and matched crops — saved with lower indices — come before others).
+        files = files[: max(1, int(k))]
+        for src_file in files:
             dst_file = os.path.join(gallery_path or REID_GALLERY_PATH, os.path.basename(src_file))
             results.append((src_file, dst_file))
     except Exception:
@@ -657,9 +674,14 @@ async def button_callback(update, context):
             except Exception as e:
                 logger.warning(f"[{file_basename}] Failed to edit message on auto confirm: {e}")
 
-            # Send REID crops for review (standard 'Точняк?' prompt)
+            # Send REID crops for review (standard 'Точняк?' prompt).
+            # Prefer matched-person-only crops so bystanders aren't shown
+            # when multiple people crossed the gate. Fall back to all if
+            # no matched-marked crops are found (older videos / no match).
             try:
-                pairs = compute_reid_paths_multi(file_path, file_basename, k=3)
+                pairs = compute_reid_paths_multi(file_path, file_basename, k=3, matched_only=True)
+                if not pairs:
+                    pairs = compute_reid_paths_multi(file_path, file_basename, k=3)
                 media_group = []
                 for src, _dst in pairs:
                     try:
