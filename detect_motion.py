@@ -2525,8 +2525,17 @@ def detect_motion(input_video_path, output_dir, fast_processing: bool = False):
                     scored.sort(key=lambda x: x["score"], reverse=True)
 
                     ref_emb = best_crop["emb"] if (reid_result.get("matched") and best_crop is not None) else None
+                    ref_eid = best_crop.get("entity_id") if (reid_result.get("matched") and best_crop is not None) else None
 
                     if ref_emb is not None:
+                        # A crop belongs to the matched-person pool if EITHER:
+                        #   - its embedding is similar enough to the best match
+                        #     (≥ REID_SAME_PERSON_SIM), OR
+                        #   - it comes from the same tracker entity as the best
+                        #     match. The entity_id check catches pose drift
+                        #     within a single tracked body, where embeddings of
+                        #     awkward angles / occluded frames can dip below the
+                        #     same-person similarity threshold.
                         matched_pool = []
                         other_pool = []
                         for c in scored:
@@ -2534,7 +2543,8 @@ def detect_motion(input_video_path, output_dir, fast_processing: bool = False):
                                 sim = float(np.dot(c["emb"], ref_emb))
                             except Exception:
                                 sim = 0.0
-                            if sim >= REID_SAME_PERSON_SIM:
+                            same_entity = ref_eid is not None and c.get("entity_id") == ref_eid
+                            if sim >= REID_SAME_PERSON_SIM or same_entity:
                                 matched_pool.append(c)
                             else:
                                 other_pool.append(c)
