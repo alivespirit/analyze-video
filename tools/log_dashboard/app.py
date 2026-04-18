@@ -377,27 +377,33 @@ def collect_metrics(entries: List[Dict]) -> Dict:
         m = GATE_RE.search(content)
         if m:
             direction = m.group("dir")
-            # Count 'both' as one up and one down
-            if direction == "both":
-                gate_counts["up"] += 1
-                gate_counts["down"] += 1
-            else:
-                gate_counts[direction] += 1
-            # Track direction per video; upgrade to 'both' when needed
+            # detect_motion.py logs a single "Gate crossing detected!" summary
+            # per call (already aggregated across events). If the same video is
+            # processed twice — e.g. restart recovery re-queues a file — the
+            # log will contain two matching lines. Overwrite rather than sum,
+            # so the latest run's counts/direction win.
             if vid:
-                current = gate_direction_per_video.get(vid)
-                if direction == "both":
-                    gate_direction_per_video[vid] = "both"
-                elif current is None:
-                    gate_direction_per_video[vid] = direction
-                elif current != direction and current != "both":
-                    gate_direction_per_video[vid] = "both"
-
-                # Accumulate per-video person counts (video may have multiple events)
+                gate_direction_per_video[vid] = direction
                 up_s, down_s = m.group("up"), m.group("down")
                 if up_s is not None and down_s is not None:
-                    gate_persons_up_per_video[vid] = gate_persons_up_per_video.get(vid, 0) + int(up_s)
-                    gate_persons_down_per_video[vid] = gate_persons_down_per_video.get(vid, 0) + int(down_s)
+                    gate_persons_up_per_video[vid] = int(up_s)
+                    gate_persons_down_per_video[vid] = int(down_s)
+            else:
+                # No video tag on the line — count globally on the fly.
+                if direction == "both":
+                    gate_counts["up"] += 1
+                    gate_counts["down"] += 1
+                else:
+                    gate_counts[direction] += 1
+
+    # Aggregate global gate counts from deduped per-video directions so a
+    # re-processed video doesn't double-count at the daily-total level.
+    for direction in gate_direction_per_video.values():
+        if direction == "both":
+            gate_counts["up"] += 1
+            gate_counts["down"] += 1
+        elif direction in ("up", "down"):
+            gate_counts[direction] += 1
 
     # Count videos per status
     status_counts: Dict[str, int] = {}
@@ -1698,6 +1704,9 @@ def api_today_gate_crossings(day: Optional[str] = Query(default=None)):
                 stem = fname.split("_reid_best")[0]
                 crop_files.setdefault(stem, []).append(f"/api/image/{fname}")
 
+    away_videos = set(metrics.get("away_videos", []))
+    back_videos = set(metrics.get("back_videos", []))
+
     all_vids = set(spv.keys()) | set(fst.keys())
     gate_crossings = []
     for v in sorted(all_vids, key=lambda x: (fst.get(x) or datetime.min, x), reverse=True):
@@ -1706,6 +1715,11 @@ def api_today_gate_crossings(day: Optional[str] = Query(default=None)):
         if not crops:
             continue
         t = _hhmmss_from_video_path(v, fallback_ts=fst.get(v))
+        away_back = None
+        if v in away_videos:
+            away_back = "away"
+        elif v in back_videos:
+            away_back = "back"
         gate_crossings.append({
             "basename": v,
             "time": t,
@@ -1716,6 +1730,7 @@ def api_today_gate_crossings(day: Optional[str] = Query(default=None)):
             "reid_matched": rmpv.get(v),
             "reid_score": round(rspv[v], 3) if v in rspv else None,
             "reid_neg": round(rnpv[v], 3) if v in rnpv else None,
+            "away_back": away_back,
             "crops": crops,
         })
 
