@@ -260,6 +260,10 @@ def collect_metrics(entries: List[Dict]) -> Dict:
     reid_neg_score_per_video: Dict[str, float] = {}
     reid_delta_per_video: Dict[str, float] = {}
     reid_matched_per_video: Dict[str, bool] = {}
+    # Pipeline errors that occur *after* detect_motion produced a valid status
+    # (e.g., analyze_video or telegram send failures). Tracked separately so the
+    # real motion status is preserved while still surfacing the incident.
+    pipeline_error_per_video: Dict[str, bool] = {}
 
     for e in entries:
         content = e["content"]
@@ -268,7 +272,14 @@ def collect_metrics(entries: List[Dict]) -> Dict:
             # Prefer any explicit Status: ... update; fall back to MD-specific pattern
             m = STATUS_ANY_RE.search(content) or STATUS_RE.search(content)
             if m:
-                status_per_video[vid] = m.group("status")
+                new_status = m.group("status")
+                prev = status_per_video.get(vid)
+                # Don't overwrite a real motion status with "error" from a
+                # post-pipeline failure (telegram send errors log "Status: error").
+                if new_status == "error" and prev and prev != "error":
+                    pipeline_error_per_video[vid] = True
+                else:
+                    status_per_video[vid] = new_status
 
             m = FULL_TIME_RE.search(content)
             if m:
@@ -341,10 +352,15 @@ def collect_metrics(entries: List[Dict]) -> Dict:
                 if kmh > prev:
                     speedtrap_per_video[vid] = kmh
 
-            # If a later error-level line appears for this video, treat it as status=error
+            # Error-level lines: if detect_motion already produced a valid status,
+            # keep it and just flag pipeline_error. Otherwise fall back to "error".
             level = e.get("level")
             if level in ("ERROR", "CRITICAL"):
-                status_per_video[vid] = "error"
+                prev = status_per_video.get(vid)
+                if prev and prev != "error":
+                    pipeline_error_per_video[vid] = True
+                else:
+                    status_per_video[vid] = "error"
 
         # Motion detection time (prefer per video if available)
         m = MD_TIME_RE.search(content)
@@ -450,6 +466,7 @@ def collect_metrics(entries: List[Dict]) -> Dict:
         "reid_matched_per_video": reid_matched_per_video,
         "has_frames_per_video": has_frames_per_video,
         "speedtrap_per_video": speedtrap_per_video,
+        "pipeline_error_per_video": pipeline_error_per_video,
     }
 
 
@@ -1416,6 +1433,7 @@ _EMPTY_METRICS = {
     "reid_best_score_per_video": {}, "reid_neg_score_per_video": {},
     "reid_delta_per_video": {}, "reid_matched_per_video": {},
     "has_frames_per_video": {}, "speedtrap_per_video": {},
+    "pipeline_error_per_video": {},
     "away_videos": [], "back_videos": [], "away_back_events": [],
     "videos_total": 0, "full_processing_stats": None, "motion_detection_stats": None,
     "gate_counts": {"up": 0, "down": 0}, "raw_events_per_video": {},
@@ -1538,6 +1556,7 @@ def api_today_videos(day: Optional[str] = Query(default=None)):
     rmpv = metrics.get("reid_matched_per_video", {})
     hfpv = metrics.get("has_frames_per_video", {})
     stpv = metrics.get("speedtrap_per_video", {})
+    pepv = metrics.get("pipeline_error_per_video", {})
     away_videos = set(metrics.get("away_videos", []))
     back_videos = set(metrics.get("back_videos", []))
 
@@ -1565,6 +1584,7 @@ def api_today_videos(day: Optional[str] = Query(default=None)):
             "away_back": away_back,
             "has_frames": hfpv.get(v, False),
             "speed_kmh": stpv.get(v),
+            "pipeline_error": pepv.get(v, False),
         })
     return {"day": day, "videos": videos}
 

@@ -1555,6 +1555,10 @@ def detect_motion(input_video_path, output_dir, fast_processing: bool = False):
 
     # Prepare accumulator for ReID samples across all kept/processed events
     reid_candidate_crops = []
+    # Per-person crossing direction keyed by (clip_index, entity_id) → 'up'|'down'|'both'.
+    # Populated per kept event so we can later link a ReID match to the specific
+    # person's direction when multiple people cross in opposite directions.
+    entity_directions = {}
 
     # Process each event separately and include only those with person inside ROI for >= PERSON_MIN_FRAMES
     for clip_index, (start_frame, end_frame) in enumerate(significant_sub_clips):
@@ -2290,19 +2294,26 @@ def detect_motion(input_video_path, output_dir, fast_processing: bool = False):
         # - If final side == start side: count 1 up and 1 down only if both directions occurred
         event_up_final = 0
         event_down_final = 0
+        event_entity_dirs = {}
         for pid in event_prev_y.keys():
             start_side = event_first_side.get(pid)
             end_side = event_last_side.get(pid, start_side)
             dirs = event_cross_dirs.get(pid, set())
+            ent_dir = None
             if start_side and end_side and start_side != end_side:
                 if start_side == 'below' and end_side == 'above':
                     event_up_final += 1
+                    ent_dir = 'up'
                 elif start_side == 'above' and end_side == 'below':
                     event_down_final += 1
+                    ent_dir = 'down'
             else:
                 if 'up' in dirs and 'down' in dirs:
                     event_up_final += 1
                     event_down_final += 1
+                    ent_dir = 'both'
+            if ent_dir is not None:
+                event_entity_dirs[pid] = ent_dir
 
         event_persons_up = event_up_final
         event_persons_down = event_down_final
@@ -2345,6 +2356,8 @@ def detect_motion(input_video_path, output_dir, fast_processing: bool = False):
             unique_objects_detected['car'].update(event_unique_objects['car'])
             persons_up += event_persons_up
             persons_down += event_persons_down
+            for pid, ent_dir in event_entity_dirs.items():
+                entity_directions[(clip_index, pid)] = ent_dir
         else:
             logger.info(f"[{file_basename}] {clip_index + 1} - Event at {(start_frame / fps):.1f}s discarded: person in ROI only {person_frames_in_roi} frames (< {PERSON_MIN_FRAMES}).")
             # Save a representative middle frame for significant-but-no-person events
@@ -2469,6 +2482,17 @@ def detect_motion(input_video_path, output_dir, fast_processing: bool = False):
                 reid_result["neg_score"] = round(best_neg, 4)
                 reid_result["margin"] = REID_NEGATIVE_MARGIN
                 reid_result["best_gallery_path"] = best_gallery_path
+
+                # Link the match to the specific person's crossing direction so
+                # downstream code can emit the correct AUTO Reaction when multiple
+                # people cross in different directions within one video.
+                if reid_result["matched"]:
+                    best_crop = max(scored, key=lambda x: x["score"]) if scored else None
+                    best_eid = best_crop.get("entity_id") if best_crop else None
+                    matched_dir = entity_directions.get(best_eid) if best_eid is not None else None
+                    if matched_dir:
+                        reid_result["matched_direction"] = matched_dir
+                        logger.info(f"[{file_basename}] ReID matched person crossed direction: {matched_dir}.")
 
                 if best_gallery_path:
                     if best_score >= REID_THRESHOLD:

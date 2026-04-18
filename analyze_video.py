@@ -115,6 +115,14 @@ def analyze_video(motion_result, video_path):
                 logger.info(f"[{file_basename}] AUTO Reaction detected: object came back.")
         elif direction == 'both':
             direction_text = "\U0001F6B6\u200D\u27A1\uFE0F" * persons_down + " \U0001F6A7" + "\U0001F6B6\u200D\u27A1\uFE0F" * persons_up
+            if USERNAME in reid_text:
+                matched_dir = reid.get('matched_direction') if isinstance(reid, dict) else None
+                if matched_dir == 'up':
+                    reid_text += " - *Юху!*"
+                    logger.info(f"[{file_basename}] AUTO Reaction detected: object went away.")
+                elif matched_dir == 'down':
+                    reid_text += " - *Ех...*"
+                    logger.info(f"[{file_basename}] AUTO Reaction detected: object came back.")
 
         analysis_result = direction_text + reid_text
 
