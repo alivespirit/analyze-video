@@ -2619,6 +2619,41 @@ def detect_motion(input_video_path, output_dir, fast_processing: bool = False):
                                     selected.append(cand)
                                     matched_flags.append(False)
 
+                    # Phase C: if slots still remain after matched_budget and
+                    # the others pool, backfill with more pose-diverse matched
+                    # crops. This prevents the budget cap from leaving empty
+                    # slots when there aren't enough distinct other-person
+                    # candidates (typical single-person crossings).
+                    if ref_emb is not None and len(selected) < top_k:
+                        selected_ids = set(id(s) for s in selected)
+                        for cand in matched_pool:
+                            if len(selected) >= top_k:
+                                break
+                            if id(cand) in selected_ids:
+                                continue
+                            too_similar = False
+                            for s in selected:
+                                try:
+                                    sim = float(np.dot(cand["emb"], s["emb"]))
+                                except Exception:
+                                    sim = 1.0
+                                if (1.0 - sim) < REID_DIVERSITY_MIN_DIST:
+                                    too_similar = True
+                                    break
+                            if not too_similar:
+                                selected.append(cand)
+                                matched_flags.append(True)
+
+                    # Group matched crops first so "_m"-suffixed filenames
+                    # share contiguous lower indices (stable alphabetical sort
+                    # in the dashboard/UI keeps them together).
+                    if matched_flags and any(matched_flags) and not all(matched_flags):
+                        paired = list(zip(selected, matched_flags))
+                        matched_items = [s for s, f in paired if f]
+                        other_items = [s for s, f in paired if not f]
+                        selected = matched_items + other_items
+                        matched_flags = [True] * len(matched_items) + [False] * len(other_items)
+
                 # Save selected crops (indexed only, no legacy duplicate)
                 if SAVE_REID_BEST_CROP and selected:
                     try:
