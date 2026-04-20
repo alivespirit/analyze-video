@@ -2505,17 +2505,20 @@ def detect_motion(input_video_path, output_dir, fast_processing: bool = False):
                         reid_result["matched_direction"] = matched_dir
                         logger.info(f"[{file_basename}] ReID matched person crossed direction: {matched_dir}.")
 
+                # Log only the crop filename (not the absolute gallery path) so
+                # worker-side paths don't pollute master logs — the gallery is
+                # flat, so the basename is enough to identify the reference crop.
                 if best_gallery_path:
                     above = " above threshold" if best_score >= REID_THRESHOLD else ""
                     logger.info(
-                        f"[{file_basename}] ReID best gallery match{above}: score={best_score:.3f}, gallery_crop={best_gallery_path}"
+                        f"[{file_basename}] ReID best gallery match{above}: score={best_score:.3f}, gallery_crop={os.path.basename(best_gallery_path)}"
                     )
                 elif best_score > 0:
                     logger.info(f"[{file_basename}] ReID best gallery match path unavailable; score={best_score:.3f}")
 
                 if best_neg_gallery_path:
                     logger.info(
-                        f"[{file_basename}] ReID best negative gallery match: score={best_neg_score_global:.3f}, gallery_crop={best_neg_gallery_path}"
+                        f"[{file_basename}] ReID best negative gallery match: score={best_neg_score_global:.3f}, gallery_crop={os.path.basename(best_neg_gallery_path)}"
                     )
                 elif best_neg_score_global > 0:
                     logger.info(f"[{file_basename}] ReID best negative gallery match path unavailable; score={best_neg_score_global:.3f}")
