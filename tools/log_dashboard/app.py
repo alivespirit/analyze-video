@@ -2097,6 +2097,47 @@ def api_reid_copy(req: ReidCopyRequest):
     return {"status": "ok", "destination": dst}
 
 
+def _resolve_gallery_path(target: str, filename: str) -> str:
+    """Validate target + filename and return the absolute gallery file path.
+
+    Rejects path traversal and unexpected separators so only files directly
+    inside the configured gallery dirs can be addressed.
+    """
+    if target not in ("positive", "negative"):
+        raise HTTPException(status_code=400, detail="target must be 'positive' or 'negative'")
+    if not filename.lower().endswith((".jpg", ".jpeg", ".png")):
+        raise HTTPException(status_code=400, detail="Only image files allowed")
+    safe_name = os.path.basename(filename)
+    if safe_name != filename or ".." in safe_name or "/" in safe_name or "\\" in safe_name:
+        raise HTTPException(status_code=400, detail="Invalid filename")
+    gallery = REID_GALLERY_PATH if target == "positive" else REID_NEGATIVE_GALLERY_PATH
+    return os.path.join(gallery, safe_name)
+
+
+@app.get("/api/gallery/{target}/{filename}")
+def api_serve_gallery_image(target: str, filename: str):
+    """Serve a gallery reference crop by {target}/{filename}."""
+    path = _resolve_gallery_path(target, filename)
+    if not os.path.isfile(path):
+        raise HTTPException(status_code=404, detail="Gallery crop not found")
+    return FileResponse(path, media_type="image/jpeg")
+
+
+@app.delete("/api/gallery/{target}/{filename}")
+def api_delete_gallery_image(target: str, filename: str):
+    """Delete a gallery reference crop. The person_id gallery cache is keyed
+    by file signature (name+size+mtime), so the next ReID run auto-rebuilds
+    the embeddings — no explicit cache invalidation needed here."""
+    path = _resolve_gallery_path(target, filename)
+    if not os.path.isfile(path):
+        raise HTTPException(status_code=404, detail="Gallery crop not found")
+    try:
+        os.remove(path)
+    except OSError as e:
+        raise HTTPException(status_code=500, detail=f"Delete failed: {e}")
+    return {"status": "ok", "deleted": os.path.basename(path)}
+
+
 # Static files (CSS)
 static_dir = os.path.join(os.path.dirname(__file__), "static")
 if os.path.isdir(static_dir):
