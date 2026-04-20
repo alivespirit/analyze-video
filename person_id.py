@@ -30,6 +30,7 @@ class PersonReID:
         self.gallery_vectors: list[np.ndarray] = []
         self.gallery_paths: list[str] = []
         self.negative_vectors: list[np.ndarray] = []
+        self.negative_paths: list[str] = []
         self.file_basename = file_basename
         self.negative_margin = float(negative_margin or 0.0)
 
@@ -47,7 +48,7 @@ class PersonReID:
         # Load optional negative gallery
         if negative_gallery_path:
             try:
-                self.negative_vectors = self.load_gallery_vectors(negative_gallery_path)
+                self.negative_vectors, self.negative_paths = self.load_gallery_vectors(negative_gallery_path, with_paths=True)
                 logger.debug("%sReID: Loaded %d negative vector(s) from %s.", self._lp(), len(self.negative_vectors), negative_gallery_path)
             except Exception as e:
                 logger.debug("%sReID: Failed to load negative gallery %s: %s", self._lp(), negative_gallery_path, e)
