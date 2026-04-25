@@ -234,6 +234,49 @@ class NetworkErrorFilter(logging.Filter):
                 record.stack_info = None
         return True
 
+
+class SocketSendBurstFilter(logging.Filter):
+    """Collapse bursts of identical low-level socket warnings.
+
+    Keeps the first message, suppresses duplicates for a short cooldown,
+    then emits one summary line before allowing the next original message.
+    """
+
+    def __init__(self, cooldown_s: float = 5.0):
+        super().__init__()
+        self.cooldown_s = float(max(0.1, cooldown_s))
+        self._last_emit_ts = 0.0
+        self._suppressed = 0
+        self._lock = threading.Lock()
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        try:
+            msg = record.getMessage()
+        except Exception:
+            return True
+
+        # Target only this noisy warning pattern.
+        if msg != "socket.send() raised exception.":
+            return True
+
+        now = time.monotonic()
+        with self._lock:
+            if (now - self._last_emit_ts) < self.cooldown_s:
+                self._suppressed += 1
+                return False
+
+            # Cooldown elapsed: emit one summary about previously suppressed duplicates.
+            if self._suppressed > 0:
+                record.msg = (
+                    "socket.send() raised exception. "
+                    f"(suppressed {self._suppressed} duplicate warnings over ~{self.cooldown_s:.0f}s)"
+                )
+                record.args = ()
+                self._suppressed = 0
+
+            self._last_emit_ts = now
+            return True
+
 # --- Logging Setup ---
 log_formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s', datefmt='%Y-%m-%d %H:%M:%S')
 log_file = os.path.join(LOG_PATH, "video_processor.log")
@@ -250,8 +293,11 @@ console_handler.setLevel(logging.INFO)
 
 # --- FIX: Apply the filter directly to the handlers ---
 network_filter = NetworkErrorFilter()
+socket_burst_filter = SocketSendBurstFilter(cooldown_s=5.0)
 file_handler.addFilter(network_filter)
+file_handler.addFilter(socket_burst_filter)
 console_handler.addFilter(network_filter)
+console_handler.addFilter(socket_burst_filter)
 
 # Get the root logger and add handlers
 logger = logging.getLogger()

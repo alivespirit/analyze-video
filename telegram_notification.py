@@ -134,6 +134,45 @@ def compute_reid_paths_multi(video_path: str, file_basename: str, k: int = 3, ga
         return results
     return results
 
+
+def _parse_mode_payload(callback_raw: str, legacy_prefix: str, compact_prefix: str):
+    """Parse callback payload with optional mode prefix.
+
+    Supports both forms:
+    - legacy: <legacy_prefix><path>
+    - extended/compact: <legacy|compact><m|a>:<path>
+    """
+    if not isinstance(callback_raw, str):
+        return None, None
+
+    payload = None
+    if callback_raw.startswith(legacy_prefix):
+        payload = callback_raw[len(legacy_prefix):]
+    elif callback_raw.startswith(compact_prefix):
+        payload = callback_raw[len(compact_prefix):]
+    else:
+        return None, None
+
+    mode = "all"
+    rel = payload
+    if payload.startswith("m:"):
+        mode = "matched"
+        rel = payload[2:]
+    elif payload.startswith("a:"):
+        mode = "all"
+        rel = payload[2:]
+
+    if not rel:
+        return None, None
+    return mode, rel
+
+
+def _build_mode_callback(callback_file_rel: str, mode: str, compact_prefix: str) -> str:
+    """Build compact mode callback data for Telegram's 64-byte limit."""
+    tag = "m" if mode == "matched" else "a"
+    return f"{compact_prefix}{tag}:{callback_file_rel.replace(os.path.sep, '/')}"
+
+
 def load_message_map_from_disk():
     try:
         if os.path.exists(_MAP_FILE_PATH):
@@ -379,7 +418,7 @@ async def reaction_callback(update, context):
                                 callback_file = os.path.basename(video_path)
                             confirm_markup = InlineKeyboardMarkup(
                                 [[
-                                    InlineKeyboardButton("100%", callback_data=f"CONFIRM:{callback_file}"),
+                                    InlineKeyboardButton("100%", callback_data=_build_mode_callback(callback_file, "all", compact_prefix="C:")),
                                     InlineKeyboardButton("Та нє", callback_data=f"DECLINE:{callback_file}")
                                 ]]
                             )
@@ -575,13 +614,22 @@ async def button_callback(update, context):
     raw = query.data
 
     # Handle confirm action for REID crops
-    if isinstance(raw, str) and raw.startswith("CONFIRM:"):
+    confirm_mode, confirm_rel = _parse_mode_payload(raw, legacy_prefix="CONFIRM:", compact_prefix="C:")
+    if confirm_mode is not None and confirm_rel is not None:
         try:
-            callback_file_rel = raw[len("CONFIRM:"):].replace('/', os.path.sep)
+            callback_file_rel = confirm_rel.replace('/', os.path.sep)
             file_path = os.path.join(VIDEO_FOLDER, callback_file_rel)
             file_basename = os.path.basename(file_path)
-            logger.info(f"[{file_basename}] Confirm callback received.")
-            pairs = compute_reid_paths_multi(file_path, file_basename, k=3)
+            logger.info(f"[{file_basename}] Confirm callback received. mode={confirm_mode}")
+
+            if confirm_mode == "matched":
+                # Mirror AUTO_CONFIRM review behavior (matched-only; fallback to all).
+                pairs = compute_reid_paths_multi(file_path, file_basename, k=3, matched_only=True)
+                if not pairs:
+                    pairs = compute_reid_paths_multi(file_path, file_basename, k=3)
+            else:
+                pairs = compute_reid_paths_multi(file_path, file_basename, k=3)
+
             for src, dst in pairs:
                 try:
                     if os.path.exists(src):
@@ -602,14 +650,37 @@ async def button_callback(update, context):
         return
 
     # Handle confirm-to-negative action for REID crops
-    if isinstance(raw, str) and raw.startswith("CONFIRM_NEG:"):
+    neg_mode, neg_rel = _parse_mode_payload(raw, legacy_prefix="CONFIRM_NEG:", compact_prefix="N:")
+    if neg_mode is not None and neg_rel is not None:
         try:
-            callback_file_rel = raw[len("CONFIRM_NEG:"):].replace('/', os.path.sep)
+            callback_file_rel = neg_rel.replace('/', os.path.sep)
             file_path = os.path.join(VIDEO_FOLDER, callback_file_rel)
             file_basename = os.path.basename(file_path)
-            logger.info(f"[{file_basename}] Negative confirm callback received.")
+            logger.info(f"[{file_basename}] Negative confirm callback received. mode={neg_mode}")
             try:
-                neg_pairs = compute_reid_paths_multi(file_path, file_basename, k=3, gallery_path=REID_NEGATIVE_GALLERY_PATH)
+                if neg_mode == "matched":
+                    # Mirror AUTO_DECLINE review behavior (matched-only; fallback to all).
+                    neg_pairs = compute_reid_paths_multi(
+                        file_path,
+                        file_basename,
+                        k=3,
+                        gallery_path=REID_NEGATIVE_GALLERY_PATH,
+                        matched_only=True,
+                    )
+                    if not neg_pairs:
+                        neg_pairs = compute_reid_paths_multi(
+                            file_path,
+                            file_basename,
+                            k=3,
+                            gallery_path=REID_NEGATIVE_GALLERY_PATH,
+                        )
+                else:
+                    neg_pairs = compute_reid_paths_multi(
+                        file_path,
+                        file_basename,
+                        k=3,
+                        gallery_path=REID_NEGATIVE_GALLERY_PATH,
+                    )
                 for src, dst in neg_pairs:
                     try:
                         if os.path.exists(src):
@@ -714,9 +785,10 @@ async def button_callback(update, context):
 
                 # Build confirm prompt with standard positive confirm
                 try:
+                    confirm_mode = "matched" if compute_reid_paths_multi(file_path, file_basename, k=3, matched_only=True) else "all"
                     confirm_markup = InlineKeyboardMarkup(
                         [[
-                            InlineKeyboardButton("100%", callback_data=f"CONFIRM:{callback_file_rel.replace(os.path.sep, '/')}"),
+                            InlineKeyboardButton("100%", callback_data=_build_mode_callback(callback_file_rel, confirm_mode, compact_prefix="C:")),
                             InlineKeyboardButton("Та нє", callback_data=f"DECLINE:{callback_file_rel.replace(os.path.sep, '/')}" )
                         ]]
                     )
@@ -782,7 +854,9 @@ async def button_callback(update, context):
 
             # Send REID crops for review with negative confirmation prompt
             try:
-                pairs = compute_reid_paths_multi(file_path, file_basename, k=3)
+                pairs = compute_reid_paths_multi(file_path, file_basename, k=3, matched_only=True)
+                if not pairs:
+                    pairs = compute_reid_paths_multi(file_path, file_basename, k=3)
                 media_group = []
                 for src, _dst in pairs:
                     try:
@@ -815,9 +889,10 @@ async def button_callback(update, context):
 
                 # Build confirm prompt with negative confirm
                 try:
+                    neg_confirm_mode = "matched" if compute_reid_paths_multi(file_path, file_basename, k=3, matched_only=True) else "all"
                     confirm_markup = InlineKeyboardMarkup(
                         [[
-                            InlineKeyboardButton("100%", callback_data=f"CONFIRM_NEG:{callback_file_rel.replace(os.path.sep, '/')}"),
+                            InlineKeyboardButton("100%", callback_data=_build_mode_callback(callback_file_rel, neg_confirm_mode, compact_prefix="N:")),
                             InlineKeyboardButton("Та нє", callback_data=f"DECLINE:{callback_file_rel.replace(os.path.sep, '/')}" )
                         ]]
                     )

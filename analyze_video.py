@@ -209,7 +209,7 @@ def analyze_video(motion_result, video_path):
             "gemini-3-flash-preview": "3FP",
             "gemini-2.5-flash": "2.5F",
             "gemini-2.5-flash-lite": "2.5FL",
-            "gemini-2.5-pro": "2.5Pro",
+            "gemini-3.1-flash-lite-preview": "3.1FLP",
         }
 
         # Select main and fallback based on PRO presence and time window

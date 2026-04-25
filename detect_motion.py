@@ -151,6 +151,15 @@ REID_SAME_PERSON_SIM = 0.75  # cosine similarity above this = likely same physic
 REID_NEGATIVE_GALLERY_PATH = os.getenv("REID_NEGATIVE_GALLERY_PATH", os.path.join(SCRIPT_DIR, "person_of_interest_negative"))
 REID_NEGATIVE_MARGIN = 0.08  # match must exceed negatives by at least this cosine margin
 
+# --- Optional person pose estimation (post-tracking, crop-only) ---
+POSE_ENABLED = os.getenv("POSE_ENABLED", "false").lower() == "true"
+POSE_MODEL_PATH = os.getenv("POSE_MODEL_PATH", os.path.join(SCRIPT_DIR, "models", "yolo11s-pose.engine"))
+POSE_CONF_THRESHOLD = float(os.getenv("POSE_CONF_THRESHOLD", "0.25"))
+POSE_IMGSZ = int(os.getenv("POSE_IMGSZ", "640"))
+POSE_CROP_PADDING = int(os.getenv("POSE_CROP_PADDING", "10"))
+POSE_MAX_FRAMES_PER_PERSON = int(os.getenv("POSE_MAX_FRAMES_PER_PERSON", "400"))
+POSE_ABOVE_LINE_Y = int(os.getenv("POSE_ABOVE_LINE_Y", "2100"))
+
 # --- Approximate car speed configuration ---
 # The speed estimate is intentionally lightweight and heuristic-based.
 # It converts pixel motion to km/h using configurable meters-per-pixel,
@@ -194,6 +203,16 @@ def get_detection_model() -> YOLO:
         model_thread_local.model = YOLO(OBJECT_DETECTION_MODEL_PATH, task='detect')
         logger.info("Object detection model loaded in thread '%s'.", threading.current_thread().name)
     return model_thread_local.model
+
+
+pose_model_thread_local = threading.local()
+
+
+def get_pose_model() -> YOLO:
+    if not hasattr(pose_model_thread_local, 'model'):
+        pose_model_thread_local.model = YOLO(POSE_MODEL_PATH, task='pose')
+        logger.info("Pose model loaded in thread '%s'.", threading.current_thread().name)
+    return pose_model_thread_local.model
 
 # --- Resolution-aware overlay + ROI scaling configuration ---
 # These values are applied at runtime based on input frame resolution.
@@ -734,6 +753,88 @@ class CarSpeedEstimator:
         if st is None:
             return []
         return list(st.get('trail', []))
+
+
+def write_pose_video_from_crops(crops, output_path: str, fps: float, file_basename: str) -> int:
+    """Runs pose inference on person crops and writes an annotated clip.
+
+    Returns number of written frames.
+    """
+    if not crops:
+        return 0
+
+    try:
+        pose_model = get_pose_model()
+    except Exception as e:
+        logger.warning("[%s] Pose model init failed: %s", file_basename, e)
+        return 0
+
+    writer = None
+    writer_size = None
+    written = 0
+    try:
+        for crop in crops:
+            if crop is None or getattr(crop, "size", 0) == 0:
+                continue
+
+            try:
+                pose_results = pose_model.predict(
+                    crop,
+                    imgsz=POSE_IMGSZ,
+                    conf=POSE_CONF_THRESHOLD,
+                    verbose=False,
+                )
+                if pose_results:
+                    annotated = pose_results[0].plot(
+                        boxes=False,
+                        labels=False,
+                    )
+                else:
+                    annotated = crop
+            except Exception:
+                annotated = crop
+
+            h, w = int(annotated.shape[0]), int(annotated.shape[1])
+            if writer is None:
+                # libx264 requires even dimensions.
+                writer_w = w if (w % 2 == 0) else (w + 1)
+                writer_h = h if (h % 2 == 0) else (h + 1)
+                writer_size = (max(2, writer_w), max(2, writer_h))
+                writer = FFMPEG_VideoWriter(
+                    output_path,
+                    size=writer_size,
+                    fps=fps,
+                    codec='libx264',
+                    preset='faster',
+                    threads=0,
+                    ffmpeg_params=['-crf', '28', '-pix_fmt', 'yuv420p', '-movflags', '+faststart'],
+                )
+
+            # H.264 encoder requires a fixed frame size for the full stream.
+            # Preserve person proportions via letterboxing instead of stretching.
+            if writer_size is not None and (w, h) != writer_size:
+                target_w, target_h = int(writer_size[0]), int(writer_size[1])
+                src_w, src_h = int(w), int(h)
+                if src_w > 0 and src_h > 0 and target_w > 0 and target_h > 0:
+                    scale = min(float(target_w) / float(src_w), float(target_h) / float(src_h))
+                    new_w = max(1, int(round(src_w * scale)))
+                    new_h = max(1, int(round(src_h * scale)))
+                    interp = cv2.INTER_AREA if scale < 1.0 else cv2.INTER_LINEAR
+                    resized = cv2.resize(annotated, (new_w, new_h), interpolation=interp)
+                    canvas = np.zeros((target_h, target_w, 3), dtype=np.uint8)
+                    x_off = (target_w - new_w) // 2
+                    y_off = (target_h - new_h) // 2
+                    canvas[y_off:y_off + new_h, x_off:x_off + new_w] = resized
+                    annotated = canvas
+
+            rgb = cv2.cvtColor(annotated, cv2.COLOR_BGR2RGB)
+            writer.write_frame(rgb)
+            written += 1
+    finally:
+        if writer is not None:
+            writer.close()
+
+    return written
 
 
 def detect_motion(input_video_path, output_dir, fast_processing: bool = False):
@@ -1556,6 +1657,9 @@ def detect_motion(input_video_path, output_dir, fast_processing: bool = False):
 
     # Prepare accumulator for ReID samples across all kept/processed events
     reid_candidate_crops = []
+    # Optional pose jobs collected from kept events for persons that crossed the gate.
+    # Each job is rendered after tracking/reid to avoid affecting main decision logic.
+    pose_jobs = []
     # Per-person crossing direction keyed by (clip_index, entity_id) → 'up'|'down'|'both'.
     # Populated per kept event so we can later link a ReID match to the specific
     # person's direction when multiple people cross in opposite directions.
@@ -1583,6 +1687,11 @@ def detect_motion(input_video_path, output_dir, fast_processing: bool = False):
         else:
             tracker_stride = 2
             output_stride = 2
+
+        # Pose clips must stay at 1x temporal density even when highlight
+        # rendering/tracking is sped up for long events.
+        if POSE_ENABLED:
+            tracker_stride = 1
 
         if is_long_motion:
             logger.info(f"[{file_basename}] {clip_index + 1} - Long motion event ({duration_seconds:.2f}s). tracker_stride={tracker_stride}, output_stride={output_stride}.")
@@ -1636,6 +1745,36 @@ def detect_motion(input_video_path, output_dir, fast_processing: bool = False):
         car_speed_estimator = CarSpeedEstimator() if CAR_SPEED_ENABLED else None
         speedtrap_state = {}  # global_id -> {'last_x': float, 'line': int | None, 'frame': int | None}
         speedtrap_overlay_text = None
+        event_pose_crops = defaultdict(list) if POSE_ENABLED else None
+        frame_for_pose = None
+
+        def collect_pose_crop_for_entity(pbox, eid):
+            if not POSE_ENABLED or event_pose_crops is None:
+                return
+            if frame_for_pose is None or eid is None or int(eid) < 0:
+                return
+
+            try:
+                if len(event_pose_crops[eid]) >= POSE_MAX_FRAMES_PER_PERSON:
+                    return
+                # Exclude lower-frame partial bodies where pose quality is poor.
+                # Keep crops only while person bbox bottom stays above threshold.
+                if int(pbox[3]) > int(POSE_ABOVE_LINE_Y):
+                    return
+                x1 = max(0, int(pbox[0]) - POSE_CROP_PADDING)
+                y1 = max(0, int(pbox[1]) - POSE_CROP_PADDING)
+                x2 = min(orig_w, int(pbox[2]) + POSE_CROP_PADDING)
+                y2 = min(orig_h, int(pbox[3]) + POSE_CROP_PADDING)
+                if x2 <= x1 or y2 <= y1:
+                    return
+                crop = frame_for_pose[y1:y2, x1:x2]
+                if crop is None or crop.size == 0:
+                    return
+                # IMPORTANT: store an owned copy, not a NumPy view.
+                # A view would keep the whole 4K source frame alive per crop.
+                event_pose_crops[eid].append(crop.copy())
+            except Exception:
+                return
 
         # Seek once to the start of the event, then advance sequentially to avoid decoder seek artifacts
         if prof.enabled:
@@ -1679,6 +1818,7 @@ def detect_motion(input_video_path, output_dir, fast_processing: bool = False):
                 and (processed_offset % REID_SAMPLING_STRIDE == 0)
             )
             frame_for_reid = None
+            frame_for_pose = None
             if needs_reid:
                 # Keep a clean copy for ReID crops (avoid overlay artifacts)
                 if prof.enabled:
@@ -1687,6 +1827,13 @@ def detect_motion(input_video_path, output_dir, fast_processing: bool = False):
                     prof.add("track.frame_copy", time.perf_counter() - t0)
                 else:
                     frame_for_reid = frame.copy()
+            if POSE_ENABLED:
+                if prof.enabled:
+                    t0 = time.perf_counter()
+                    frame_for_pose = frame.copy()
+                    prof.add("track.frame_copy_pose", time.perf_counter() - t0)
+                else:
+                    frame_for_pose = frame.copy()
 
             # Apply tracker ROI crop if available
             if track_roi_bbox is not None:
@@ -2050,6 +2197,10 @@ def detect_motion(input_video_path, output_dir, fast_processing: bool = False):
                                 if local_id not in event_display_ids:
                                     event_display_ids[local_id] = disp_id
 
+                        # Collect person crops for optional pose processing during the whole
+                        # tracked presence (not only near the gate line).
+                        collect_pose_crop_for_entity(box, entity_id)
+
                         # Previous side seen for this tracker id (global)
                         prev_global_side = event_last_side_global.get(global_id)
                         if entity_id not in event_prev_y:
@@ -2277,7 +2428,8 @@ def detect_motion(input_video_path, output_dir, fast_processing: bool = False):
                                     # event_next_entity_id resets per event — otherwise
                                     # different persons in different events collide.
                                     composite_eid = (clip_index, _eid) if _eid is not None and _eid >= 0 else None
-                                    reid_candidate_crops.append((crop, composite_eid))
+                                    # Store a detached copy to avoid retaining full-frame buffers.
+                                    reid_candidate_crops.append((crop.copy(), composite_eid))
                 if prof.enabled:
                     prof.add("track.reid_sampling", time.perf_counter() - t0)
 
@@ -2359,6 +2511,18 @@ def detect_motion(input_video_path, output_dir, fast_processing: bool = False):
             persons_down += event_persons_down
             for pid, ent_dir in event_entity_dirs.items():
                 entity_directions[(clip_index, pid)] = ent_dir
+            if POSE_ENABLED and event_pose_crops is not None:
+                for pid, ent_dir in event_entity_dirs.items():
+                    crops = event_pose_crops.get(pid, [])
+                    if not crops:
+                        continue
+                    pose_jobs.append({
+                        'clip_index': clip_index,
+                        'entity_id': pid,
+                        'display_id': event_entity_display_ids.get(pid, pid),
+                        'direction': ent_dir,
+                        'crops': crops,
+                    })
         else:
             logger.info(f"[{file_basename}] {clip_index + 1} - Event at {(start_frame / fps):.1f}s discarded: person in ROI only {person_frames_in_roi} frames (< {PERSON_MIN_FRAMES}).")
             # Save a representative middle frame for significant-but-no-person events
@@ -2699,6 +2863,34 @@ def detect_motion(input_video_path, output_dir, fast_processing: bool = False):
     else:
         logger.debug("[%s] ReID is disabled (REID_ENABLED=False). Skipping identification.", file_basename)
 
+    pose_videos = []
+    if POSE_ENABLED:
+        if pose_jobs:
+            logger.info(f"[{file_basename}] Generating pose clips for {len(pose_jobs)} crossing person(s)...")
+            stem = os.path.splitext(file_basename)[0]
+            for idx, job in enumerate(pose_jobs, start=1):
+                try:
+                    disp = int(job.get('display_id', job.get('entity_id', idx)))
+                except Exception:
+                    disp = idx
+                direction = str(job.get('direction', 'unknown'))
+                event_num = int(job.get('clip_index', 0)) + 1
+                pose_filename = f"{stem}_pose_e{event_num}_p{disp}_{direction}.mp4"
+                pose_path = os.path.join(daily_clip_dir, pose_filename)
+                written = write_pose_video_from_crops(
+                    crops=job.get('crops', []),
+                    output_path=pose_path,
+                    fps=fps,
+                    file_basename=file_basename,
+                )
+                if written > 0:
+                    pose_videos.append(pose_path)
+                else:
+                    logger.warning("[%s] Pose clip skipped (no frames written): %s", file_basename, pose_path)
+            logger.info(f"[{file_basename}] Pose clips generated: {len(pose_videos)}")
+        else:
+            logger.info(f"[{file_basename}] Pose enabled, but no crossing persons with collected crops.")
+
     elapsed_time = time.time() - start_time
     logger.info(f"[{file_basename}] Full processing took {elapsed_time:.2f} seconds. Detected: {num_persons} persons, {num_cars} cars.")
 
@@ -2714,4 +2906,5 @@ def detect_motion(input_video_path, output_dir, fast_processing: bool = False):
         'persons_up': persons_up,
         'persons_down': persons_down,
         'reid': reid_result,
+        'pose_videos': pose_videos,
     }

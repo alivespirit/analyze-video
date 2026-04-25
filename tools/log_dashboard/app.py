@@ -1639,6 +1639,19 @@ def api_today_video_frames(basename: str):
     return {"basename": basename, "frames": frames}
 
 
+@app.get("/api/today/video/{basename}/pose")
+def api_today_video_pose(basename: str):
+    """Return pose clip URLs for a video."""
+    stem = os.path.splitext(basename)[0]
+    prefix = stem + "_pose_"
+    clips = []
+    for dirpath, files in _walk_daily_dirs(TEMP_DIR):
+        for fname in sorted(files):
+            if fname.startswith(prefix) and fname.lower().endswith(".mp4"):
+                clips.append(f"/api/highlight/{fname}")
+    return {"basename": basename, "clips": clips}
+
+
 _DAILY_DIR_RE = re.compile(r"^\d{8}$")
 
 
