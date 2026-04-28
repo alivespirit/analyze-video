@@ -1,0 +1,12 @@
+{
+  "version": 1,
+  "feature_version": "pose_signature_v1",
+  "identities": {
+    "known_person": {
+      "embedding": [],
+      "meta": {
+        "note": "Populate via tools/build_pose_signature_gallery.py"
+      }
+    }
+  }
+}

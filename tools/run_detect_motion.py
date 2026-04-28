@@ -43,6 +43,7 @@ def main():
 
     # Pretty print result summary
     reid = res.get("reid") or None
+    pose_signature = res.get("pose_signature") or None
     summary = {
         "status": res.get("status"),
         "clip_path": res.get("clip_path"),
@@ -63,6 +64,17 @@ def main():
                 "best_path": reid.get("best_path"),
             }
             if isinstance(reid, dict)
+            else None
+        ),
+        "pose_signature": (
+            {
+                "matched": pose_signature.get("matched"),
+                "score": pose_signature.get("score"),
+                "threshold": pose_signature.get("threshold"),
+                "identity": pose_signature.get("identity"),
+                "person_count": pose_signature.get("person_count"),
+            }
+            if isinstance(pose_signature, dict)
             else None
         ),
     }

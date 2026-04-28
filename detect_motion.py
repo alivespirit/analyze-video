@@ -13,6 +13,10 @@ from path_utils import parse_datetime_from_path
 
 from moviepy.video.io.ffmpeg_writer import FFMPEG_VideoWriter
 from person_id import PersonReID
+from pose_signature import (
+    PoseSignatureCollector,
+    load_pose_signature_gallery,
+)
 
 try:
     from ultralytics import YOLO
@@ -159,6 +163,82 @@ POSE_IMGSZ = int(os.getenv("POSE_IMGSZ", "640"))
 POSE_CROP_PADDING = int(os.getenv("POSE_CROP_PADDING", "10"))
 POSE_MAX_FRAMES_PER_PERSON = int(os.getenv("POSE_MAX_FRAMES_PER_PERSON", "400"))
 POSE_ABOVE_LINE_Y = int(os.getenv("POSE_ABOVE_LINE_Y", "2100"))
+
+# --- Optional pose-signature recognition (gait + posture; log-only stage) ---
+POSE_SIGNATURE_ENABLED = os.getenv("POSE_SIGNATURE_ENABLED", "false").lower() == "true"
+POSE_SIGNATURE_GALLERY_PATH = os.getenv(
+    "POSE_SIGNATURE_GALLERY_PATH",
+    os.path.join(SCRIPT_DIR, "config", "pose_signature_gallery.json"),
+)
+POSE_SIGNATURE_THRESHOLD = float(os.getenv("POSE_SIGNATURE_THRESHOLD", "0.78"))
+POSE_SIGNATURE_MARGIN = float(os.getenv("POSE_SIGNATURE_MARGIN", "0.03"))
+POSE_SIGNATURE_AWAY_SUFFIX = os.getenv("POSE_SIGNATURE_AWAY_SUFFIX", "_away")
+POSE_SIGNATURE_BACK_SUFFIX = os.getenv("POSE_SIGNATURE_BACK_SUFFIX", "_back")
+POSE_SIGNATURE_MIN_FRAMES = int(os.getenv("POSE_SIGNATURE_MIN_FRAMES", "24"))
+POSE_SIGNATURE_KEYPOINT_CONF = float(os.getenv("POSE_SIGNATURE_KEYPOINT_CONF", "0.25"))
+POSE_SIGNATURE_MIN_UPPER_KP = int(os.getenv("POSE_SIGNATURE_MIN_UPPER_KP", "3"))
+POSE_SIGNATURE_MIN_LOWER_KP = int(os.getenv("POSE_SIGNATURE_MIN_LOWER_KP", "4"))
+POSE_SIGNATURE_SMOOTH_ALPHA = float(os.getenv("POSE_SIGNATURE_SMOOTH_ALPHA", "0.65"))
+POSE_SIGNATURE_MAX_INTERP_GAP = int(os.getenv("POSE_SIGNATURE_MAX_INTERP_GAP", "2"))
+
+
+def _pose_signature_gallery_for_direction(gallery: dict, direction: str) -> tuple[dict, str]:
+    """Direction-aware gallery filtering by identity suffix.
+
+    Mapping used by gate events:
+      - up   -> away suffix
+      - down -> back suffix
+    """
+    if not isinstance(gallery, dict) or not gallery:
+        return {}, "empty"
+
+    d = str(direction or "").lower()
+    target_suffix = None
+    if d == "up":
+        target_suffix = str(POSE_SIGNATURE_AWAY_SUFFIX or "").lower()
+    elif d == "down":
+        target_suffix = str(POSE_SIGNATURE_BACK_SUFFIX or "").lower()
+
+    if not target_suffix:
+        return gallery, "all:no_suffix"
+
+    filtered = {k: v for k, v in gallery.items() if isinstance(k, str) and k.lower().endswith(target_suffix)}
+    if filtered:
+        return filtered, f"suffix:{target_suffix}"
+
+    return gallery, f"all:no_match_for_{target_suffix}"
+
+
+def _pose_signature_top2(embedding: np.ndarray, gallery: dict) -> tuple[Optional[str], float, float, float]:
+    """Return (best_identity, best_score, second_score, margin)."""
+    if embedding is None or not isinstance(gallery, dict) or len(gallery) == 0:
+        return None, 0.0, 0.0, 0.0
+    try:
+        emb = np.asarray(embedding, dtype=np.float32).reshape(-1)
+    except Exception:
+        return None, 0.0, 0.0, 0.0
+    if emb.size == 0:
+        return None, 0.0, 0.0, 0.0
+    n = float(np.linalg.norm(emb))
+    if n <= 1e-8:
+        return None, 0.0, 0.0, 0.0
+    emb = emb / n
+
+    scores = []
+    for identity, ref in gallery.items():
+        try:
+            score = float(np.dot(emb, ref))
+            scores.append((identity, score))
+        except Exception:
+            continue
+    if not scores:
+        return None, 0.0, 0.0, 0.0
+
+    scores.sort(key=lambda x: x[1], reverse=True)
+    best_identity, best_score = scores[0]
+    second_score = float(scores[1][1]) if len(scores) > 1 else 0.0
+    margin = float(best_score - second_score)
+    return str(best_identity), float(best_score), float(second_score), margin
 
 # --- Approximate car speed configuration ---
 # The speed estimate is intentionally lightweight and heuristic-based.
@@ -755,7 +835,7 @@ class CarSpeedEstimator:
         return list(st.get('trail', []))
 
 
-def write_pose_video_from_crops(crops, output_path: str, fps: float, file_basename: str) -> int:
+def write_pose_video_from_crops(crops, output_path: str, fps: float, file_basename: str, on_pose_result=None) -> int:
     """Runs pose inference on person crops and writes an annotated clip.
 
     Returns number of written frames.
@@ -773,7 +853,13 @@ def write_pose_video_from_crops(crops, output_path: str, fps: float, file_basena
     writer_size = None
     written = 0
     try:
-        for crop in crops:
+        for item in crops:
+            bbox = None
+            crop = item
+            if isinstance(item, dict):
+                crop = item.get("crop")
+                bbox = item.get("bbox")
+
             if crop is None or getattr(crop, "size", 0) == 0:
                 continue
 
@@ -785,7 +871,13 @@ def write_pose_video_from_crops(crops, output_path: str, fps: float, file_basena
                     verbose=False,
                 )
                 if pose_results:
-                    annotated = pose_results[0].plot(
+                    pose_result = pose_results[0]
+                    if callable(on_pose_result):
+                        try:
+                            on_pose_result(pose_result, bbox=bbox)
+                        except Exception:
+                            pass
+                    annotated = pose_result.plot(
                         boxes=False,
                         labels=False,
                     )
@@ -1116,10 +1208,49 @@ def detect_motion(input_video_path, output_dir, fast_processing: bool = False):
         except Exception:
             person_tracker_polygon_cv = None
 
+    # Optional: Load a dedicated pose-estimation ROI for pose-signature filtering.
+    # Prefer pose_estimation_roi, fallback to person_tracker_roi.
+    pose_estimation_roi_points = None
+    pose_estimation_roi_source = None
+    if isinstance(roi_config, dict):
+        pose_estimation_roi_points = as_np_points(roi_config.get('pose_estimation_roi'))
+
+    if pose_estimation_roi_points is not None and len(pose_estimation_roi_points) >= 3:
+        try:
+            if low_res_mode:
+                pose_estimation_roi_points = scale_roi_points_to_frame(
+                    pose_estimation_roi_points,
+                    orig_w,
+                    orig_h,
+                    file_basename,
+                    roi_name="pose_estimation_roi",
+                    log_level=logging.DEBUG,
+                )
+            elif res_key == "1080p":
+                pose_estimation_roi_points = scale_roi_points_if_needed(
+                    pose_estimation_roi_points,
+                    orig_w,
+                    orig_h,
+                    file_basename,
+                )
+            pose_estimation_roi_source = "pose_estimation_roi"
+        except Exception:
+            pose_estimation_roi_points = None
+            pose_estimation_roi_source = None
+
+    if (
+        pose_estimation_roi_points is None
+        and person_tracker_roi_points is not None
+        and len(person_tracker_roi_points) >= 3
+    ):
+        pose_estimation_roi_points = np.asarray(person_tracker_roi_points, dtype=np.int32).copy()
+        pose_estimation_roi_source = "person_tracker_roi"
+
     logger.info(
         f"[{file_basename}] Original frame: {orig_w}x{orig_h}. motion_detection_roi={crop_w}x{crop_h}, "
         f"tracker_roi={(f'{track_roi_bbox[2]-track_roi_bbox[0]}x{track_roi_bbox[3]-track_roi_bbox[1]}' if track_roi_bbox is not None else 'False')}, "
         f"person_tracker_roi={(f'{int(np.max(person_tracker_roi_points[:,0]) - np.min(person_tracker_roi_points[:,0]))}x{int(np.max(person_tracker_roi_points[:,1]) - np.min(person_tracker_roi_points[:,1]))}' if person_tracker_polygon_cv is not None else 'False')}, "
+        f"pose_estimation_roi={(f'{int(np.max(pose_estimation_roi_points[:,0]) - np.min(pose_estimation_roi_points[:,0]))}x{int(np.max(pose_estimation_roi_points[:,1]) - np.min(pose_estimation_roi_points[:,1]))}' if pose_estimation_roi_points is not None and len(pose_estimation_roi_points) >= 3 else 'False')}, "
         f"motion_stride={motion_stride}"
     )
 
@@ -1772,7 +1903,17 @@ def detect_motion(input_video_path, output_dir, fast_processing: bool = False):
                     return
                 # IMPORTANT: store an owned copy, not a NumPy view.
                 # A view would keep the whole 4K source frame alive per crop.
-                event_pose_crops[eid].append(crop.copy())
+                event_pose_crops[eid].append(
+                    {
+                        "crop": crop.copy(),
+                        "bbox": (
+                            int(pbox[0]),
+                            int(pbox[1]),
+                            int(pbox[2]),
+                            int(pbox[3]),
+                        ),
+                    }
+                )
             except Exception:
                 return
 
@@ -2863,7 +3004,41 @@ def detect_motion(input_video_path, output_dir, fast_processing: bool = False):
     else:
         logger.debug("[%s] ReID is disabled (REID_ENABLED=False). Skipping identification.", file_basename)
 
+    pose_signature_runtime = bool(POSE_ENABLED and POSE_SIGNATURE_ENABLED)
+    pose_signature_gallery = {}
+    pose_signature_zones = {"analyze": []}
+    if pose_signature_runtime:
+        pose_signature_gallery = load_pose_signature_gallery(POSE_SIGNATURE_GALLERY_PATH)
+        if pose_estimation_roi_points is not None and len(pose_estimation_roi_points) >= 3:
+            pose_signature_zones["analyze"] = [np.asarray(pose_estimation_roi_points, dtype=np.float32)]
+            logger.info(
+                "[%s] PoseSignature zone source: %s (key=%s).",
+                file_basename,
+                roi_path,
+                pose_estimation_roi_source if pose_estimation_roi_source else "unknown",
+            )
+        else:
+            logger.warning(
+                "[%s] PoseSignature zone missing in ROI config %s (expected key: pose_estimation_roi; fallback: person_tracker_roi). Zone filtering disabled.",
+                file_basename,
+                roi_path,
+            )
+        if pose_signature_gallery:
+            logger.info(
+                "[%s] PoseSignature enabled: loaded %d identity template(s).",
+                file_basename,
+                len(pose_signature_gallery),
+            )
+        else:
+            logger.warning(
+                "[%s] PoseSignature enabled but gallery is empty: %s",
+                file_basename,
+                POSE_SIGNATURE_GALLERY_PATH,
+            )
+
     pose_videos = []
+    pose_signature_result = None
+    pose_signature_candidates = []
     if POSE_ENABLED:
         if pose_jobs:
             logger.info(f"[{file_basename}] Generating pose clips for {len(pose_jobs)} crossing person(s)...")
@@ -2877,19 +3052,182 @@ def detect_motion(input_video_path, output_dir, fast_processing: bool = False):
                 event_num = int(job.get('clip_index', 0)) + 1
                 pose_filename = f"{stem}_pose_e{event_num}_p{disp}_{direction}.mp4"
                 pose_path = os.path.join(daily_clip_dir, pose_filename)
+                collector = None
+                if pose_signature_runtime:
+                    collector = PoseSignatureCollector(
+                        zones=pose_signature_zones,
+                        keypoint_conf_thr=POSE_SIGNATURE_KEYPOINT_CONF,
+                        min_upper_kp=POSE_SIGNATURE_MIN_UPPER_KP,
+                        min_lower_kp=POSE_SIGNATURE_MIN_LOWER_KP,
+                        min_frames=POSE_SIGNATURE_MIN_FRAMES,
+                        smooth_alpha=POSE_SIGNATURE_SMOOTH_ALPHA,
+                        max_interp_gap_frames=POSE_SIGNATURE_MAX_INTERP_GAP,
+                    )
                 written = write_pose_video_from_crops(
                     crops=job.get('crops', []),
                     output_path=pose_path,
                     fps=fps,
                     file_basename=file_basename,
+                    on_pose_result=(collector.consume if collector is not None else None),
                 )
                 if written > 0:
                     pose_videos.append(pose_path)
                 else:
                     logger.warning("[%s] Pose clip skipped (no frames written): %s", file_basename, pose_path)
+
+                if collector is not None:
+                    seq = collector.finalize()
+                    embedding = seq.pop("embedding", None)
+                    best_identity = None
+                    best_score = 0.0
+                    second_score = 0.0
+                    score_margin = 0.0
+                    gallery_mode = "none"
+                    gallery_size = 0
+                    matched = False
+                    if embedding is not None and pose_signature_gallery:
+                        gallery_for_dir, gallery_mode = _pose_signature_gallery_for_direction(
+                            pose_signature_gallery,
+                            direction,
+                        )
+                        gallery_size = len(gallery_for_dir)
+                        best_identity, best_score, second_score, score_margin = _pose_signature_top2(
+                            embedding,
+                            gallery_for_dir,
+                        )
+                        margin_applicable = bool(gallery_size >= 2)
+                        matched = bool(
+                            best_identity
+                            and best_score >= float(POSE_SIGNATURE_THRESHOLD)
+                            and (not margin_applicable or score_margin >= float(POSE_SIGNATURE_MARGIN))
+                        )
+                    else:
+                        margin_applicable = False
+
+                    candidate = {
+                        "clip_index": int(event_num),
+                        "display_id": int(disp),
+                        "direction": direction,
+                        "identity": best_identity,
+                        "score": float(best_score),
+                        "second_score": float(second_score),
+                        "score_margin": float(score_margin),
+                        "margin_applicable": bool(margin_applicable),
+                        "matched": bool(matched),
+                        "gallery_mode": gallery_mode,
+                        "gallery_size": int(gallery_size),
+                        "frames_seen": int(seq.get("frames_seen", 0)),
+                        "frames_used": int(seq.get("frames_used", 0)),
+                        "frames_dropped_zone": int(seq.get("frames_dropped_zone", 0)),
+                        "frames_dropped_quality": int(seq.get("frames_dropped_quality", 0)),
+                        "sequence_quality": float(seq.get("sequence_quality", 0.0)),
+                    }
+                    pose_signature_candidates.append(candidate)
+                    if margin_applicable:
+                        logger.info(
+                            "[%s] PoseSignature person e%d_p%d_%s: matched=%s, score=%.3f, score2=%.3f, margin=%.3f, thr=%.3f, margin_thr=%.3f, identity=%s, gallery=%s(%d), frames=%d/%d, zone_drop=%d, quality_drop=%d.",
+                            file_basename,
+                            int(event_num),
+                            int(disp),
+                            direction,
+                            bool(matched),
+                            float(best_score),
+                            float(second_score),
+                            float(score_margin),
+                            float(POSE_SIGNATURE_THRESHOLD),
+                            float(POSE_SIGNATURE_MARGIN),
+                            best_identity if best_identity else "none",
+                            gallery_mode,
+                            int(gallery_size),
+                            int(candidate["frames_used"]),
+                            int(candidate["frames_seen"]),
+                            int(candidate["frames_dropped_zone"]),
+                            int(candidate["frames_dropped_quality"]),
+                        )
+                    else:
+                        logger.info(
+                            "[%s] PoseSignature person e%d_p%d_%s: matched=%s, score=%.3f, thr=%.3f, identity=%s, gallery=%s(%d), frames=%d/%d, zone_drop=%d, quality_drop=%d.",
+                            file_basename,
+                            int(event_num),
+                            int(disp),
+                            direction,
+                            bool(matched),
+                            float(best_score),
+                            float(POSE_SIGNATURE_THRESHOLD),
+                            best_identity if best_identity else "none",
+                            gallery_mode,
+                            int(gallery_size),
+                            int(candidate["frames_used"]),
+                            int(candidate["frames_seen"]),
+                            int(candidate["frames_dropped_zone"]),
+                            int(candidate["frames_dropped_quality"]),
+                        )
             logger.info(f"[{file_basename}] Pose clips generated: {len(pose_videos)}")
         else:
             logger.info(f"[{file_basename}] Pose enabled, but no crossing persons with collected crops.")
+
+    if pose_signature_runtime:
+        if pose_signature_candidates:
+            best = max(pose_signature_candidates, key=lambda x: float(x.get("score", 0.0)))
+            best_score = float(best.get("score", 0.0))
+            second_score = float(best.get("second_score", 0.0))
+            score_margin = float(best.get("score_margin", 0.0))
+            margin_applicable = bool(best.get("margin_applicable", False))
+            best_identity = best.get("identity")
+            matched = bool(
+                best_identity
+                and best_score >= float(POSE_SIGNATURE_THRESHOLD)
+                and (not margin_applicable or score_margin >= float(POSE_SIGNATURE_MARGIN))
+            )
+            pose_signature_result = {
+                "matched": matched,
+                "score": round(best_score, 4),
+                "second_score": round(second_score, 4),
+                "score_margin": round(score_margin, 4),
+                "threshold": float(POSE_SIGNATURE_THRESHOLD),
+                "margin_threshold": float(POSE_SIGNATURE_MARGIN),
+                "margin_applicable": bool(margin_applicable),
+                "identity": best_identity,
+                "person_count": len(pose_signature_candidates),
+                "best": best,
+            }
+            if margin_applicable:
+                logger.info(
+                    "[%s] PoseSignature result: matched=%s, score=%.3f, score2=%.3f, margin=%.3f, thr=%.3f, margin_thr=%.3f, identity=%s, people=%d.",
+                    file_basename,
+                    matched,
+                    best_score,
+                    second_score,
+                    score_margin,
+                    float(POSE_SIGNATURE_THRESHOLD),
+                    float(POSE_SIGNATURE_MARGIN),
+                    best_identity if best_identity else "none",
+                    len(pose_signature_candidates),
+                )
+            else:
+                logger.info(
+                    "[%s] PoseSignature result: matched=%s, score=%.3f, thr=%.3f, identity=%s, people=%d.",
+                    file_basename,
+                    matched,
+                    best_score,
+                    float(POSE_SIGNATURE_THRESHOLD),
+                    best_identity if best_identity else "none",
+                    len(pose_signature_candidates),
+                )
+        else:
+            pose_signature_result = {
+                "matched": False,
+                "score": 0.0,
+                "second_score": 0.0,
+                "score_margin": 0.0,
+                "threshold": float(POSE_SIGNATURE_THRESHOLD),
+                "margin_threshold": float(POSE_SIGNATURE_MARGIN),
+                "margin_applicable": False,
+                "identity": None,
+                "person_count": 0,
+                "best": None,
+            }
+            logger.info("[%s] PoseSignature skipped: no usable pose-signature sequences.", file_basename)
 
     elapsed_time = time.time() - start_time
     logger.info(f"[{file_basename}] Full processing took {elapsed_time:.2f} seconds. Detected: {num_persons} persons, {num_cars} cars.")
@@ -2907,4 +3245,5 @@ def detect_motion(input_video_path, output_dir, fast_processing: bool = False):
         'persons_down': persons_down,
         'reid': reid_result,
         'pose_videos': pose_videos,
+        'pose_signature': pose_signature_result,
     }
