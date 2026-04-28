@@ -192,6 +192,8 @@ CAR_SPEEDTRAP_DISTANCE_M = float(os.getenv("CAR_SPEEDTRAP_DISTANCE_M", "5.0"))
 CAR_SPEEDTRAP_MAX_VALID_KMH = float(os.getenv("CAR_SPEEDTRAP_MAX_VALID_KMH", "100"))
 CAR_SPEEDTRAP_OVERLAY_EXTRA_GAP = 16
 
+VIDEO_WRITER_PRESET = (os.getenv("VIDEO_WRITER_PRESET", "faster").strip() or "faster")
+
 # --- Thread-local Object Detection Model ---
 # Each worker thread gets its own YOLO instance so tracker state (persist=True)
 # is never shared between concurrent detect_motion() calls.
@@ -805,7 +807,7 @@ def write_pose_video_from_crops(crops, output_path: str, fps: float, file_basena
                     size=writer_size,
                     fps=fps,
                     codec='libx264',
-                    preset='faster',
+                    preset=VIDEO_WRITER_PRESET,
                     threads=0,
                     ffmpeg_params=['-crf', '28', '-pix_fmt', 'yuv420p', '-movflags', '+faststart'],
                 )
@@ -1582,14 +1584,14 @@ def detect_motion(input_video_path, output_dir, fast_processing: bool = False):
 
                     if writer is None:
                         logger.info(
-                            f"[{file_basename}] Initializing CRF-based H.264 writer (libx264, preset=faster, crf=28) at {output_size[0]}x{output_size[1]}..."
+                            f"[{file_basename}] Initializing CRF-based H.264 writer (libx264, preset={VIDEO_WRITER_PRESET}, crf=28) at {output_size[0]}x{output_size[1]}..."
                         )
                         writer = FFMPEG_VideoWriter(
                             output_filename,
                             size=output_size,
                             fps=fps,
                             codec='libx264',
-                            preset='faster',
+                            preset=VIDEO_WRITER_PRESET,
                             threads=0,
                             ffmpeg_params=['-crf', '28', '-pix_fmt', 'yuv420p', '-movflags', '+faststart'],
                         )
@@ -2476,13 +2478,13 @@ def detect_motion(input_video_path, output_dir, fast_processing: bool = False):
             logger.info(f"[{file_basename}] {clip_index + 1} - Event at {(start_frame / fps):.1f}s kept: person present in ROI for {person_frames_in_roi} frames (>= {PERSON_MIN_FRAMES}).")
             # Initialize CRF-based H.264 writer lazily on first accepted event
             if writer is None:
-                logger.info(f"[{file_basename}] Initializing CRF-based H.264 writer (libx264, preset=faster, crf=28) at {output_size[0]}x{output_size[1]}...")
+                logger.info(f"[{file_basename}] Initializing CRF-based H.264 writer (libx264, preset={VIDEO_WRITER_PRESET}, crf=28) at {output_size[0]}x{output_size[1]}...")
                 writer = FFMPEG_VideoWriter(
                     output_filename,
                     size=output_size,
                     fps=fps,
                     codec='libx264',
-                    preset='faster',
+                    preset=VIDEO_WRITER_PRESET,
                     threads=0,
                     ffmpeg_params=['-crf', '28', '-pix_fmt', 'yuv420p', '-movflags', '+faststart']
                 )
