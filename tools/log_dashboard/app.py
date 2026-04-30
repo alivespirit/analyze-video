@@ -578,21 +578,9 @@ def build_away_intervals(entries: List[Dict]) -> List[Dict[str, Optional[str]]]:
         if not (is_away or is_back or is_removed):
             continue
         ts = e.get("ts")
-        # Prefer parsing from full path via disk scan to derive hour from legacy folders
+        # Parse from basename only (fast). For legacy names without hour info,
+        # _hhmm_from_video_path falls back to the log timestamp hour.
         hhmm = None
-        try:
-            vp = find_video_path(vid)
-            if vp:
-                # Import parser lazily to avoid global import issues
-                root_dir = os.path.dirname(os.path.dirname(os.path.dirname(__file__)))
-                if root_dir not in sys.path:
-                    sys.path.insert(0, root_dir)
-                from path_utils import parse_datetime_from_path
-                dt = parse_datetime_from_path(vp)
-                if dt:
-                    hhmm = dt.strftime("%H:%M")
-        except Exception:
-            hhmm = None
         if not hhmm:
             hhmm = _hhmm_from_video_path(vid, fallback_ts=ts)
         if not hhmm and ts:
@@ -1429,6 +1417,10 @@ _WORKER_HEALTH_CACHE_TTL = 30.0
 # Cleared as soon as the worker reports healthy again.
 _worker_offline_since: Optional[float] = None
 
+# TEMP_DIR media index cache (avoids repeated directory scans per request)
+_TEMP_MEDIA_INDEX_TTL = float(os.getenv("TEMP_MEDIA_INDEX_TTL", "15"))
+_temp_media_index_cache: Dict[str, object] = {"data": None, "ts": 0.0}
+
 
 _EMPTY_METRICS = {
     "status_counts": {}, "status_per_video": {}, "processing_time_per_video": {},
@@ -1618,12 +1610,9 @@ def api_today_video_logs(basename: str, severity: Optional[str] = Query(default=
 @app.get("/api/today/video/{basename}/reid-crops")
 def api_today_video_reid_crops(basename: str):
     stem = os.path.splitext(basename)[0]
-    prefix = stem + "_reid_best"
-    crops = []
-    for dirpath, files in _walk_daily_dirs(TEMP_DIR):
-        for fname in sorted(files):
-            if fname.startswith(prefix) and fname.lower().endswith(".jpg"):
-                crops.append(f"/api/image/{fname}")
+    idx = _get_temp_media_index()
+    names = idx.get("reid_by_stem", {}).get(stem, [])
+    crops = [f"/api/image/{fname}" for fname in names]
     return {"basename": basename, "crops": crops}
 
 
@@ -1631,11 +1620,9 @@ def api_today_video_reid_crops(basename: str):
 def api_today_video_frames(basename: str):
     """Return insignificant/no_person frame image URLs for a video."""
     stem = os.path.splitext(basename)[0]
-    frames = []
-    for dirpath, files in _walk_daily_dirs(TEMP_DIR):
-        for fname in sorted(files):
-            if stem in fname and fname.lower().endswith(".jpg") and "_reid_best" not in fname:
-                frames.append(f"/api/image/{fname}")
+    idx = _get_temp_media_index()
+    names = idx.get("frames_by_stem", {}).get(stem, [])
+    frames = [f"/api/image/{fname}" for fname in names]
     return {"basename": basename, "frames": frames}
 
 
@@ -1643,12 +1630,9 @@ def api_today_video_frames(basename: str):
 def api_today_video_pose(basename: str):
     """Return pose clip URLs for a video."""
     stem = os.path.splitext(basename)[0]
-    prefix = stem + "_pose_"
-    clips = []
-    for dirpath, files in _walk_daily_dirs(TEMP_DIR):
-        for fname in sorted(files):
-            if fname.startswith(prefix) and fname.lower().endswith(".mp4"):
-                clips.append(f"/api/highlight/{fname}")
+    idx = _get_temp_media_index()
+    names = idx.get("pose_by_stem", {}).get(stem, [])
+    clips = [f"/api/highlight/{fname}" for fname in names]
     return {"basename": basename, "clips": clips}
 
 
@@ -1669,15 +1653,92 @@ def _walk_daily_dirs(base_dir: str):
         return
 
 
+_FRAME_NAME_RE = re.compile(r"^\d{2}H(?P<stem>.+)_(?:insignificant|no_person)_\d+\.(?:jpg|jpeg|png)$", re.IGNORECASE)
+
+
+def _extract_frame_stem(fname: str) -> Optional[str]:
+    m = _FRAME_NAME_RE.match(fname)
+    if not m:
+        return None
+    return m.group("stem")
+
+
+def _build_temp_media_index() -> Dict[str, object]:
+    data: Dict[str, object] = {
+        "image_paths": {},          # basename -> abs path (TEMP_DIR daily dirs)
+        "video_paths": {},          # basename -> abs path (TEMP_DIR daily dirs)
+        "reid_by_stem": {},         # video stem -> [image basenames]
+        "frames_by_stem": {},       # video stem -> [image basenames]
+        "pose_by_stem": {},         # video stem -> [pose clip basenames]
+        "highlight_names": set(),   # set[highlight clip basename]
+    }
+
+    try:
+        daily_dirs = []
+        for entry in os.scandir(TEMP_DIR):
+            if entry.is_dir() and _DAILY_DIR_RE.match(entry.name):
+                daily_dirs.append(entry.path)
+        # Prefer newest daily folders on basename collisions.
+        daily_dirs.sort(reverse=True)
+    except OSError:
+        daily_dirs = []
+
+    for dpath in daily_dirs:
+        try:
+            files = os.listdir(dpath)
+        except OSError:
+            continue
+
+        for fname in files:
+            lower = fname.lower()
+            fpath = os.path.join(dpath, fname)
+
+            if lower.endswith((".jpg", ".jpeg", ".png")):
+                data["image_paths"].setdefault(fname, fpath)
+                if "_reid_best" in fname:
+                    stem = fname.split("_reid_best", 1)[0]
+                    data["reid_by_stem"].setdefault(stem, []).append(fname)
+                else:
+                    stem = _extract_frame_stem(fname)
+                    if stem:
+                        data["frames_by_stem"].setdefault(stem, []).append(fname)
+                continue
+
+            if lower.endswith(".mp4"):
+                data["video_paths"].setdefault(fname, fpath)
+                if "_pose_" in fname:
+                    stem = fname.split("_pose_", 1)[0]
+                    data["pose_by_stem"].setdefault(stem, []).append(fname)
+                else:
+                    data["highlight_names"].add(fname)
+
+    for key in ("reid_by_stem", "frames_by_stem", "pose_by_stem"):
+        for stem, names in data[key].items():
+            names.sort()
+
+    return data
+
+
+def _get_temp_media_index() -> Dict[str, object]:
+    now = time.time()
+    cached = _temp_media_index_cache.get("data")
+    if cached is not None and (now - float(_temp_media_index_cache.get("ts", 0.0))) < _TEMP_MEDIA_INDEX_TTL:
+        return cached
+    data = _build_temp_media_index()
+    _temp_media_index_cache["data"] = data
+    _temp_media_index_cache["ts"] = now
+    return data
+
+
 @app.get("/api/today/video/{basename}/highlight")
 def api_today_video_highlight(basename: str):
     """Check if a highlight clip exists for this video and return its URL."""
     name = os.path.basename(basename)
     if not name.lower().endswith(".mp4"):
         return {"basename": basename, "highlight_url": None}
-    for dirpath, files in _walk_daily_dirs(TEMP_DIR):
-        if name in files:
-            return {"basename": basename, "highlight_url": f"/api/highlight/{name}"}
+    idx = _get_temp_media_index()
+    if name in idx.get("highlight_names", set()):
+        return {"basename": basename, "highlight_url": f"/api/highlight/{name}"}
     return {"basename": basename, "highlight_url": None}
 
 
@@ -1689,9 +1750,10 @@ def api_serve_highlight(basename: str):
         raise HTTPException(status_code=400, detail="Only mp4 files allowed")
     if ".." in name or "/" in name or "\\" in name:
         raise HTTPException(status_code=400, detail="Invalid filename")
-    for dirpath, files in _walk_daily_dirs(TEMP_DIR):
-        if name in files:
-            return FileResponse(os.path.join(dirpath, name), media_type="video/mp4")
+    idx = _get_temp_media_index()
+    path = idx.get("video_paths", {}).get(name)
+    if path and os.path.isfile(path):
+        return FileResponse(path, media_type="video/mp4")
     raise HTTPException(status_code=404, detail="Highlight not found")
 
 
@@ -1708,14 +1770,8 @@ def api_today_gate_crossings(day: Optional[str] = Query(default=None)):
     rmpv = metrics.get("reid_matched_per_video", {})
     rnpv = metrics.get("reid_neg_score_per_video", {})
 
-    # Pre-scan all daily dirs for reid crop files
-    crop_files: Dict[str, List[str]] = {}  # video_stem -> [crop_urls]
-    for dirpath, files in _walk_daily_dirs(TEMP_DIR):
-        for fname in sorted(files):
-            if "_reid_best" in fname and fname.lower().endswith(".jpg"):
-                # Extract video stem: everything before _reid_best
-                stem = fname.split("_reid_best")[0]
-                crop_files.setdefault(stem, []).append(f"/api/image/{fname}")
+    idx = _get_temp_media_index()
+    reid_by_stem = idx.get("reid_by_stem", {})
 
     away_videos = set(metrics.get("away_videos", []))
     back_videos = set(metrics.get("back_videos", []))
@@ -1724,7 +1780,7 @@ def api_today_gate_crossings(day: Optional[str] = Query(default=None)):
     gate_crossings = []
     for v in sorted(all_vids, key=lambda x: (fst.get(x) or datetime.min, x), reverse=True):
         stem = os.path.splitext(v)[0]
-        crops = crop_files.get(stem, [])
+        crops = [f"/api/image/{fname}" for fname in reid_by_stem.get(stem, [])]
         if not crops:
             continue
         t = _hhmmss_from_video_path(v, fallback_ts=fst.get(v))
@@ -2051,16 +2107,19 @@ def api_serve_image(basename: str):
         raise HTTPException(status_code=400, detail="Only image files allowed")
     if ".." in name or "/" in name or "\\" in name:
         raise HTTPException(status_code=400, detail="Invalid filename")
-    # Search in TEMP_DIR first (where crops are saved), then VIDEO_FOLDER
-    for search_dir in [TEMP_DIR, VIDEO_FOLDER]:
-        if not search_dir:
-            continue
+    idx = _get_temp_media_index()
+    temp_path = idx.get("image_paths", {}).get(name)
+    if temp_path and os.path.isfile(temp_path):
+        return FileResponse(temp_path, media_type="image/jpeg")
+
+    # Fallback path for uncommon cases where images are under VIDEO_FOLDER.
+    if VIDEO_FOLDER:
         try:
-            for root, _dirs, files in os.walk(search_dir):
+            for root, _dirs, files in os.walk(VIDEO_FOLDER):
                 if name in files:
                     return FileResponse(os.path.join(root, name), media_type="image/jpeg")
         except OSError:
-            continue
+            pass
     raise HTTPException(status_code=404, detail="Image not found")
 
 
@@ -2083,19 +2142,16 @@ def api_reid_copy(req: ReidCopyRequest):
     if ".." in src_name or "/" in src_name or "\\" in src_name:
         raise HTTPException(status_code=400, detail="Invalid filename")
 
-    src_path = None
-    for search_dir in [TEMP_DIR, VIDEO_FOLDER]:
-        if not search_dir:
-            continue
+    idx = _get_temp_media_index()
+    src_path = idx.get("image_paths", {}).get(src_name)
+    if (not src_path) and VIDEO_FOLDER:
         try:
-            for root, _dirs, files in os.walk(search_dir):
+            for root, _dirs, files in os.walk(VIDEO_FOLDER):
                 if src_name in files:
                     src_path = os.path.join(root, src_name)
                     break
         except OSError:
-            continue
-        if src_path:
-            break
+            src_path = None
     if not src_path:
         raise HTTPException(status_code=404, detail="Source image not found")
 
