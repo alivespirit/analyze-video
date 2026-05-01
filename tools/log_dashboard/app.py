@@ -1742,6 +1742,18 @@ def api_today_video_highlight(basename: str):
     return {"basename": basename, "highlight_url": None}
 
 
+@app.get("/api/today/video/{basename}/full")
+def api_today_video_full(basename: str):
+    """Return full-video URL only when the source file currently exists."""
+    name = os.path.basename(basename)
+    if not name.lower().endswith(".mp4"):
+        return {"basename": basename, "video_url": None}
+    path = find_video_path(name)
+    if path and os.path.isfile(path):
+        return {"basename": basename, "video_url": f"/video/{name}"}
+    return {"basename": basename, "video_url": None}
+
+
 @app.get("/api/highlight/{basename}")
 def api_serve_highlight(basename: str):
     """Serve a highlight clip by basename from TEMP_DIR daily subdirectories."""
