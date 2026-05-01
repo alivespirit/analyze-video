@@ -546,18 +546,31 @@ class FileHandler(FileSystemEventHandler):
         queue_depth = None
         try:
             current_loop = asyncio.get_running_loop()
+            battery_for_fast_decision = psutil.sensors_battery()
+            master_on_battery = bool(battery_for_fast_decision is not None and not battery_for_fast_decision.power_plugged)
+            use_worker = WORKER_ENABLED and worker_available()
+
             queue_depth, fast_processing = motion_queue_inc_and_decide_fast()
+            fast_forced_worker_offline_battery = False
+            if WORKER_ENABLED and (not use_worker) and master_on_battery and (not fast_processing):
+                fast_processing = True
+                fast_forced_worker_offline_battery = True
+
             update_processing_ledger(
                 file_path,
                 "started",
-                {"start_ts": time.time(), "fast_processing": fast_processing, "motion_queue_depth": queue_depth},
+                {
+                    "start_ts": time.time(),
+                    "fast_processing": fast_processing,
+                    "motion_queue_depth": queue_depth,
+                    "fast_forced_worker_offline_battery": fast_forced_worker_offline_battery,
+                },
             )
             
             # --- Run motion detection: async remote (worker) or sync local (executor) ---
             self.logger.info(
                 f"[{file_basename}] Queuing motion detection... (motion_queue_depth={queue_depth}, fast_processing={fast_processing})"
             )
-            use_worker = WORKER_ENABLED and worker_available()
             if WORKER_ENABLED and not use_worker:
                 self.logger.warning(f"[{file_basename}] Worker unavailable, processing locally.")
             if use_worker:
@@ -570,6 +583,11 @@ class FileHandler(FileSystemEventHandler):
                     invalidate_worker_health()
                     # Re-acquire queue slot for local processing
                     queue_depth, fast_processing = motion_queue_inc_and_decide_fast()
+                    if master_on_battery and not fast_processing:
+                        fast_processing = True
+                        self.logger.info(
+                            f"[{file_basename}] Enabling fast processing for local fallback: worker offline + master on battery."
+                        )
                     try:
                         motion_future = current_loop.run_in_executor(
                             motion_executor, detect_motion_local, file_path, TEMP_DIR, fast_processing
@@ -614,7 +632,7 @@ class FileHandler(FileSystemEventHandler):
         battery = psutil.sensors_battery()
         worker_bat = get_worker_battery() if WORKER_ENABLED else None
         worker_bat_text = f" / W {int(worker_bat)}%" if worker_bat is not None else ""
-        if not battery.power_plugged:
+        if battery is not None and not battery.power_plugged:
             battery_time_left = time.strftime("%H:%M", time.gmtime(battery.secsleft))
             if battery.percent <= 50:
                 video_response += f"\n\U0001FAAB *{battery.percent}% ~{battery_time_left}{worker_bat_text}*"
