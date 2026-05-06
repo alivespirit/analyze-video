@@ -113,21 +113,24 @@ def collect_away_back_points(entries: List[Dict]) -> List[Dict[str, object]]:
     Uses filename-derived HH:MM:SS when possible, falls back to log timestamp.
     Returned items: {type: 'away'|'back', video: str, ts: datetime, hhmmss: str, minute: int}
     """
-    removed_videos: set[str] = set()
-    for e in entries:
+    # Keep only events that happened after the latest "Reaction removed" for each video.
+    # This allows corrected/manual reactions after auto-decline to remain visible.
+    last_remove_index_by_video: Dict[str, int] = {}
+    for idx, e in enumerate(entries):
         vid = e.get("video")
         if not vid:
             continue
         content = e.get("content", "")
         if REACTION_REMOVED_RE.search(content):
-            removed_videos.add(vid)
+            last_remove_index_by_video[vid] = idx
 
     points: List[Dict[str, object]] = []
-    for e in entries:
+    for idx, e in enumerate(entries):
         vid = e.get("video")
         if not vid:
             continue
-        if vid in removed_videos:
+        # Skip events that are at/before the latest removal marker for this video.
+        if idx <= last_remove_index_by_video.get(vid, -1):
             continue
         content = e.get("content", "")
         is_away = AWAY_RE.search(content)
@@ -564,10 +567,11 @@ def build_away_intervals(entries: List[Dict]) -> List[Dict[str, Optional[str]]]:
     start, end, dur (duration string like '1h14m'). Missing start/end produce 'dur' as None and
     indicate open intervals only when a counterpart does not exist earlier/later in the day's events.
     """
-    # Collect events with derived HH:MM and sortable minute index
-    # Store minute index, original timestamp, type, hhmm, and video for stable ordering and cancellations
-    collected: List[Tuple[int, datetime, str, str, str]] = []  # (minutes, ts, type, hhmm, video)
-    for e in entries:
+    # Collect events with derived HH:MM and sortable minute index.
+    # Include log sequence index so "Reaction removed" only cancels strictly older
+    # events, even when remove/reaction happen in the same minute.
+    collected: List[Tuple[int, datetime, int, str, str, str]] = []  # (minutes, ts, seq, type, hhmm, video)
+    for seq, e in enumerate(entries):
         vid = e.get("video")
         if not vid:
             continue
@@ -597,33 +601,26 @@ def build_away_intervals(entries: List[Dict]) -> List[Dict[str, Optional[str]]]:
             typ = "remove"
         else:
             typ = "away" if is_away else "back"
-        collected.append((minutes, ts or datetime.min, typ, hhmm, vid))
+        collected.append((minutes, ts or datetime.min, seq, typ, hhmm, vid))
 
     # Sort by derived minute index to ensure chronological pairing
-    collected.sort(key=lambda t: (t[0], t[1]))
+    collected.sort(key=lambda t: (t[0], t[1], t[2]))
 
-    # Minimal per-video last-removal filtering:
-    # - If a video's LAST reaction is 'remove' → drop all events for that video
-    # - Else, drop events at or before that video's LAST 'remove'
-    last_remove_minute: Dict[str, int] = {}
-    last_reaction_type: Dict[str, str] = {}
-    for minutes, _ts, typ, _hhmm, vid in collected:
+    # Per-video latest removal marker by sequence index.
+    last_remove_seq: Dict[str, int] = {}
+    for _minutes, _ts, seq, typ, _hhmm, vid in collected:
         if typ == "remove":
-            last_remove_minute[vid] = minutes
-        last_reaction_type[vid] = typ
+            last_remove_seq[vid] = seq
 
-    filtered: List[Tuple[int, datetime, str, str, str]] = []
-    for minutes, ts, typ, hhmm, vid in collected:
-        if last_reaction_type.get(vid) == "remove":
+    filtered: List[Tuple[int, datetime, int, str, str, str]] = []
+    for minutes, ts, seq, typ, hhmm, vid in collected:
+        if seq <= last_remove_seq.get(vid, -1):
             continue
-        lr_min = last_remove_minute.get(vid)
-        if lr_min is not None and minutes <= lr_min:
-            continue
-        filtered.append((minutes, ts, typ, hhmm, vid))
+        filtered.append((minutes, ts, seq, typ, hhmm, vid))
 
     # Collapse consecutive duplicate reaction types per video (keep only the latest in each run)
     events_by_video: Dict[str, List[Tuple[int, datetime, str, str]]] = {}
-    for minutes, ts, typ, hhmm, vid in filtered:
+    for minutes, ts, _seq, typ, hhmm, vid in filtered:
         events_by_video.setdefault(vid, []).append((minutes, ts, typ, hhmm))
 
     condensed: List[Tuple[int, datetime, str, str, str]] = []
