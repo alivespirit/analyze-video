@@ -77,19 +77,23 @@ Requirements:
 The dashboard also serves JSON endpoints consumed by the Android dashboard app:
 
 - `GET /api/days` — available log days
-- `GET /api/today/videos?day=` — per-video summary (status, ReID, frames indicator, processing time, speed_kmh)
+- `GET /api/today/videos?day=` — per-video summary (status, ReID, frames indicator, processing time, speed_kmh, pipeline_error)
 - `GET /api/today/video/{basename}/logs?day=` — log entries for a specific video
 - `GET /api/today/video/{basename}/reid-crops` — ReID crop image URLs
 - `GET /api/today/video/{basename}/frames` — insignificant/no_person frame URLs
 - `GET /api/today/video/{basename}/highlight` — highlight clip URL (if available)
-- `GET /api/today/gate-crossings?day=` — videos with ReID crops: basename, time, direction, scores, crop URLs
+- `GET /api/today/video/{basename}/pose` — pose clip URLs (when POSE_ENABLED)
+- `GET /api/today/video/{basename}/full` — full source video URL (only if the source file currently exists on disk)
+- `GET /api/today/gate-crossings?day=` — videos with ReID crops: basename, time, direction, persons_up/down, away_back, scores, crop URLs
 - `GET /api/today/stats?day=` — aggregated stats for a day
 - `GET /api/stats/overall` — overall stats with heatmaps
 - `GET /api/monitoring` — system monitoring (master CPU/RAM/battery, worker health proxy with load/RAM/CPU temp, Tesla SoC, recent ledger)
-- `GET /api/events/latest?since=` — away/back events with current home/away status
+- `GET /api/events/latest?since=` — away/back events with current home/away status (computed from the latest event by real-world event time, not log/processing order)
 - `POST /api/reid/copy` — copy a ReID crop to positive or negative gallery
+- `GET /api/gallery/{target}/{filename}` — serve a gallery reference crop (`target` is `positive` or `negative`)
+- `DELETE /api/gallery/{target}/{filename}` — delete a gallery reference crop; the ReID embedding cache rebuilds automatically on the next run
 - `GET /api/image/{basename}` — serve images (crops, frames) from TEMP_DIR
-- `GET /api/highlight/{basename}` — serve highlight clips from TEMP_DIR daily dirs
+- `GET /api/highlight/{basename}` — serve highlight and pose clips from TEMP_DIR daily dirs
 
 The `?day=YYYY-MM-DD` parameter is optional; when omitted, defaults to today (or the latest available day).
 
@@ -151,4 +155,6 @@ When `ENABLE_LOG_DASHBOARD` is true, `main.py` starts the dashboard in a backgro
 - Chart bars link to the first log entry of the related video and highlight the target entry.
 - JSON API responses are cached per-day (30s TTL, max 7 days) for efficiency.
 - The `/api/monitoring` endpoint proxies worker health (30s cache, includes load avg, RAM, CPU temp, battery with plugged status and time left), reads master `psutil` stats without blocking the event loop, fetches Tesla SoC (from logs or cache file), and returns the 10 most recent processing ledger entries.
-- ReID crops, insignificant frames, and highlight clips are served from `TEMP_DIR` daily subdirectories (`YYYYMMDD/`).
+- ReID crops, insignificant frames, highlight clips, and pose clips are served from `TEMP_DIR` daily subdirectories (`YYYYMMDD/`). A media index over those folders is cached for `TEMP_MEDIA_INDEX_TTL` seconds (default 15) to avoid repeated directory scans on each request.
+- `pipeline_error` flag in the per-video summary preserves the real motion status (e.g. `gate_crossing`) when a *post*-detection failure (telegram send, etc.) logs `Status: error` — the underlying status is kept and `pipeline_error: true` is surfaced separately.
+- Away/back interval pairing uses log sequence index for "Reaction removed" markers, so corrected/manual reactions logged in the same minute as an auto-decline are no longer dropped.

@@ -17,7 +17,7 @@ This project is a Python-based application that monitors a folder for new video 
     - **Probation/trust mechanism**: New person entities start in probation and are drawn for visibility, but do not count toward ROI, crossing, or unique person stats until trusted. Trust is granted if the entity moves enough or accumulates sufficient confidence over time. This prevents static false positives from affecting event logic.
     - All suppression parameters are configurable in `detect_motion.py` (see "Customization" below).
   - **Smart Event Filtering**: Differentiates between significant, insignificant, and noisy motion events based on duration.
-  - **Highlight Clips**: Generates clips for significant motions with tracked objects and bounding boxes. Uses a CRF-based H.264 writer (libx264, preset=faster, CRF=28, yuv420p, faststart). For 1080p/4K sources, highlight output is written at 1080p. Clips are saved to daily subdirectories (`TEMP_DIR/YYYYMMDD/`) and optionally kept after Telegram send (`KEEP_HIGHLIGHTS_CLIPS=true`, default) for viewing in the Android dashboard.
+  - **Highlight Clips**: Generates clips for significant motions with tracked objects and bounding boxes. Uses a CRF-based H.264 writer (libx264, CRF=28, yuv420p, faststart) with the encoder preset configurable via `VIDEO_WRITER_PRESET` (default `faster`). For 1080p/4K sources, highlight output is written at 1080p. Clips are saved to daily subdirectories (`TEMP_DIR/YYYYMMDD/`) and optionally kept after Telegram send (`KEEP_HIGHLIGHTS_CLIPS=true`, default) for viewing in the Android dashboard.
   - **Long-Event Speed-Up**: Long events are rendered faster by writing fewer frames (frame skipping) while keeping the output FPS unchanged.
   - **Insignificant Motion Snapshots**: Can extract a representative frame for brief motion events; sending snapshots to Telegram is optional.
   - **Approximate Car Speed Estimation**:
@@ -45,7 +45,13 @@ This project is a Python-based application that monitors a folder for new video 
   - **Who Crossed?** On gate crossings, the system optionally runs person re-identification using Intel's `person-reidentification-retail-0288` (OpenVINO) against a gallery in `person_of_interest/`.
   - **Line-Centered Sampling**: Samples person crops near the gate line tolerance every N frames and compares normalized embeddings via cosine similarity.
   - **Disk Cache**: Embeddings are cached to `temp/` so separate worker processes reuse precomputed vectors.
-  - **Readable Output**: ReID score is appended to the Telegram message, and USERNAME is mentioned when a match exceeds the threshold. Optionally saves the best matching crop to the daily folder for manual review.
+  - **Readable Output**: ReID score is appended to the Telegram message, and USERNAME is mentioned when a match exceeds the threshold. Optionally saves the best matching crops to the daily folder for manual review.
+  - **Matched-Person Crop Targeting**: When multiple people cross the gate, crops belonging to the matched person are tagged with an `_m` filename suffix and reserved up to `REID_MATCHED_CROPS_MAX` slots in the saved top-K. Same-person crops are deduped via cosine similarity (`REID_SAME_PERSON_SIM`). AUTO_CONFIRM / AUTO_DECLINE flows and the manual confirm callbacks prefer matched-only crops, falling back to all crops when no `_m`-marked files are present.
+  - **Per-Person Direction**: Each tracked entity's gate crossing direction (`up` / `down` / `both`) is recorded; the matched person's direction is used to drive the AUTO Reaction (Юху/Ех) even when other people cross in the opposite direction in the same video.
+- **Optional Pose Estimation (POSE_ENABLED)**:
+  - Post-tracking stage that runs a YOLO pose model on per-person crops collected during the event and writes one annotated clip per crossing person to `TEMP_DIR/YYYYMMDD/`.
+  - Output filenames: `{video_stem}_pose_e{event}_p{display_id}_{direction}.mp4`. Clips are letterboxed to fixed even dimensions for libx264 compatibility.
+  - Knobs: `POSE_MODEL_PATH`, `POSE_CONF_THRESHOLD`, `POSE_IMGSZ`, `POSE_CROP_PADDING`, `POSE_MAX_FRAMES_PER_PERSON`, `POSE_ABOVE_LINE_Y` (suppress crops whose bbox bottom falls below this Y, where pose quality degrades).
 - **Performance & Stability**:
   - **Dual-Executor Design**: Uses separate, single-worker thread pools for CPU-bound (video analysis) and I/O-bound (API calls) tasks to prevent system overload.
   - **Graceful Shutdown & Auto-Restart**: Automatically restarts the script if any of the Python files is modified, with robust shutdown logic.
@@ -161,7 +167,7 @@ pip install -r requirements.txt
       - If `MODEL_PRO` is set and the current hour is between 09 and 13, `MODEL_PRO` is used as the main model and `MODEL_MAIN` becomes the fallback.
       - If `MODEL_PRO` is empty or outside 09–13, `MODEL_MAIN` is used as main and `MODEL_FALLBACK` as fallback.
       - If `MODEL_FINAL_FALLBACK` is set, it will be used as a last resort.
-      - Known codenames are displayed with responses: `gemini-3-flash-preview → 3FP`, `gemini-2.5-flash → 2.5F`, `gemini-2.5-flash-lite → 2.5FL`, `gemini-2.5-pro → 2.5P` (unknown models display `FF` for final fallback).
+      - Known codenames are displayed with responses: `gemini-3-flash-preview → 3FP`, `gemini-2.5-flash → 2.5F`, `gemini-2.5-flash-lite → 2.5FL`, `gemini-3.1-flash-lite-preview → 3.1FLP` (unknown models display `FF` for final fallback).
 
 ---
 
@@ -274,6 +280,7 @@ pip install -r requirements.txt
     - `CAR_SPEEDTRAP_OVERLAY_EXTRA_GAP`: extra spacing between SpeedTrap and event overlay lines
   - `COLOR_PERSON`, `COLOR_CAR`, `COLOR_DEFAULT`, `COLOR_HIGHLIGHT`, `COLOR_LINE`: overlay colors (BGR tuples; defaults in code)
   - `OVERLAY_FONT_SCALE`, `OVERLAY_TEXT_THICKNESS`, `OVERLAY_BOX_THICKNESS`, `OVERLAY_LINE_THICKNESS`, `OVERLAY_LABEL_BG_HEIGHT`, `OVERLAY_PAD_X`, `OVERLAY_PAD_Y`: overlay appearance (resolution-dependent defaults)
+  - `VIDEO_WRITER_PRESET`: libx264 encoder preset for highlight and pose clips (default: `faster`)
   - `TESLA_EMAIL`, `TESLA_REFRESH_TOKEN`: Tesla API credentials (master only; `detect_motion.py` only reads the cache)
   - `TESLA_SOC_FILE`: path to Tesla SoC cache file (default: `temp/tesla_soc.txt`)
   - `TESLA_SOC_DISPLAY_ENABLED`: show SoC overlay on highlight clips (default: `true`)
@@ -288,10 +295,20 @@ pip install -r requirements.txt
   - `REID_MAX_SAMPLES`: cap on crops per video to keep inference snappy (default: 128)
   - `SAVE_REID_BEST_CROP`: save the best matching crop when matched (default: True)
   - `REID_TOP_K`: number of best, diverse crops to save per event (default: 3)
+  - `REID_MATCHED_CROPS_MAX`: when ReID matches, reserve up to this many slots for diverse poses of the matched person (default: 2)
   - `REID_DIVERSITY_MIN_DIST`: min cosine distance between selected embeddings (default: 0.2)
+  - `REID_SAME_PERSON_SIM`: cosine similarity above which two crops are treated as the same physical person for dedup across fragmented tracker IDs (default: 0.75)
   - `REID_NEGATIVE_GALLERY_PATH`: folder with negative reference images (default: person_of_interest_negative/)
   - `REID_NEGATIVE_MARGIN`: match must exceed negatives by at least this cosine margin (default: 0.08)
   - `REID_CACHE_DIR`: directory for precomputed embedding `.npz` cache files (default: `temp/`); point to a shared NAS path to reuse the master's cache on the worker
+- **Pose Estimation Parameters (detect_motion.py):**
+  - `POSE_ENABLED`: enable optional post-tracking pose stage (default: `false`)
+  - `POSE_MODEL_PATH`: YOLO pose model path (default: `models/yolo11s-pose.engine`)
+  - `POSE_CONF_THRESHOLD`: pose detection confidence (default: 0.25)
+  - `POSE_IMGSZ`: pose inference image size (default: 640)
+  - `POSE_CROP_PADDING`: extra pixels around person bbox for pose crops (default: 10)
+  - `POSE_MAX_FRAMES_PER_PERSON`: cap on pose frames stored per tracked person (default: 400)
+  - `POSE_ABOVE_LINE_Y`: skip pose crops whose bbox bottom is below this Y (avoids partial-body crops; default: 2100)
 - **ReID Model Location:** By default, the Intel model XML is expected at `models/reid/intel/person-reidentification-retail-0288/FP16/person-reidentification-retail-0288.xml`. Adjust if your model path differs.
 - **ROI:** Modify `config/roi-4k.json` / `config/roi-1080p.json` (or legacy `config/roi.json`) to change the monitored area.
 - **Object Detection Model:** Choose pre-trained model between `models/*_openvino_model` or place your own exported YOLOv12 OpenVINO model there and adjust `OBJECT_DETECTION_MODEL_PATH`.
@@ -366,17 +383,20 @@ A lightweight web dashboard that reads existing log files and provides per-day i
    - `/stats` shows aggregated stats across all log days
 - JSON API routes (for Android app):
    - `/api/days` — list of available log days
-   - `/api/today/videos?day=` — per-video summary with status, ReID, frames indicator
+   - `/api/today/videos?day=` — per-video summary with status, ReID, frames indicator, speed, pipeline-error flag
    - `/api/today/video/{basename}/logs?day=` — log entries per video
    - `/api/today/video/{basename}/reid-crops` — ReID crop image URLs
    - `/api/today/video/{basename}/frames` — insignificant/no_person frame URLs
    - `/api/today/video/{basename}/highlight` — highlight clip URL
-   - `/api/today/gate-crossings?day=` — videos with ReID crops: basename, time, direction, scores, crop URLs
+   - `/api/today/video/{basename}/pose` — pose clip URLs (when POSE_ENABLED)
+   - `/api/today/video/{basename}/full` — full source video URL (only when the file currently exists)
+   - `/api/today/gate-crossings?day=` — videos with ReID crops: basename, time, direction, persons up/down, away/back, scores, crop URLs
    - `/api/today/stats?day=` — aggregated stats for a day
    - `/api/stats/overall` — overall stats with heatmaps
    - `/api/monitoring` — system monitoring (CPU, RAM, battery, worker health)
    - `/api/events/latest?since=` — away/back events for notifications
    - `/api/reid/copy` (POST) — copy ReID crop to gallery
+   - `/api/gallery/{positive|negative}/{filename}` — GET serves gallery reference crops; DELETE removes them (cache rebuilds automatically on next ReID run)
    - `/api/image/{basename}`, `/api/highlight/{basename}` — serve images/clips
 - Per-day views: timestamp, severity, video basename, message
 - Filters:
