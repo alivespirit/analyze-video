@@ -53,6 +53,13 @@ SAVED_FRAME_RE = re.compile(r"Saved \w+ frame to ")
 AWAY_RE = re.compile(r"Reaction detected: object went away")
 BACK_RE = re.compile(r"Reaction detected: object came back")
 REACTION_REMOVED_RE = re.compile(r"Reaction removed\.")
+# ReID-accuracy classification: distinguish AUTO vs manual reactions.
+# Manual "Reaction detected:" lines come in several flavors; only the
+# "object went away/came back" ones represent a positive crossing claim.
+AUTO_REACTION_DETECTED_RE = re.compile(r"^AUTO Reaction detected: object (went away|came back)")
+AUTO_REACTION_REMOVED_RE = re.compile(r"^AUTO Reaction removed")
+MANUAL_REACTION_DETECTED_RE = re.compile(r"^Reaction detected: object (went away|came back)")
+MANUAL_REACTION_REMOVED_RE = re.compile(r"^Reaction removed\.")
 # ReID result patterns (old and new)
 # Old:  "ReID result: matched=True/False, best_score=0.xxx, threshold=..."
 # New:  "ReID result: matched=True/False, pos=0.xxx, neg=0.xxx, delta=0.xxx, thr=0.xxx, margin=0.xxx."
@@ -155,6 +162,102 @@ def collect_away_back_points(entries: List[Dict]) -> List[Dict[str, object]]:
             }
         )
     return points
+
+
+def classify_reid_outcomes(entries: List[Dict]) -> Dict[str, float]:
+    """Classify ReID accuracy outcomes for a day's log entries.
+
+    Returns aggregate {tp, fp, fn, videos, score_sum, score_count}.
+    Score is the latest ReID positive (pos) score per video, averaged across
+    videos where the person of interest actually crossed the gate
+    (truth=crossed: TP, FP+FN combined, and FN-only cases).
+    Videos with no relevant reaction events are ignored.
+    """
+    auto_detected: Dict[str, bool] = {}
+    auto_removed: Dict[str, bool] = {}
+    manual_active: Dict[str, bool] = {}
+    # Latest ReID positive score per video (uses 'pos' from the new log format,
+    # 'best_score' from the old one). Captured here so it's available alongside
+    # the classification outcome without a second pass.
+    reid_pos_per_video: Dict[str, float] = {}
+
+    for e in entries:
+        vid = e.get("video")
+        if not vid:
+            continue
+        content = e.get("content", "")
+        if AUTO_REACTION_DETECTED_RE.search(content):
+            auto_detected[vid] = True
+            auto_removed[vid] = False
+            continue
+        if AUTO_REACTION_REMOVED_RE.search(content):
+            if auto_detected.get(vid):
+                auto_removed[vid] = True
+            continue
+        if MANUAL_REACTION_DETECTED_RE.search(content):
+            manual_active[vid] = True
+            continue
+        if MANUAL_REACTION_REMOVED_RE.search(content):
+            if manual_active.get(vid):
+                manual_active[vid] = False
+            elif auto_detected.get(vid) and not auto_removed.get(vid):
+                auto_removed[vid] = True
+            continue
+        m = REID_RESULT_RE_NEW.search(content)
+        if m:
+            try:
+                reid_pos_per_video[vid] = float(m.group("pos"))
+            except Exception:
+                pass
+            continue
+        m = REID_RESULT_RE_OLD.search(content)
+        if m:
+            try:
+                reid_pos_per_video[vid] = float(m.group("score"))
+            except Exception:
+                pass
+
+    tp = fp = fn = 0
+    videos = 0
+    score_sum = 0.0
+    score_count = 0
+    relevant = set(auto_detected.keys()) | set(manual_active.keys())
+    for vid in relevant:
+        ad = auto_detected.get(vid, False)
+        ar = auto_removed.get(vid, False)
+        ma = manual_active.get(vid, False)
+        counted = False
+        truth_crossed = False
+        if ad and not ar:
+            tp += 1
+            counted = True
+            truth_crossed = True
+        elif ad and ar:
+            fp += 1
+            counted = True
+            if ma:
+                fn += 1
+                truth_crossed = True
+        elif not ad and ma:
+            fn += 1
+            counted = True
+            truth_crossed = True
+        if counted:
+            videos += 1
+        if truth_crossed:
+            score = reid_pos_per_video.get(vid)
+            if score is not None:
+                score_sum += score
+                score_count += 1
+
+    return {
+        "tp": tp,
+        "fp": fp,
+        "fn": fn,
+        "videos": videos,
+        "score_sum": score_sum,
+        "score_count": score_count,
+    }
 
 
 def list_log_files() -> Dict[str, str]:
@@ -1394,6 +1497,9 @@ REID_NEGATIVE_GALLERY_PATH = os.getenv("REID_NEGATIVE_GALLERY_PATH", os.path.joi
 # Processing ledger path (same default as main.py)
 TEMP_DIR = os.getenv("TEMP_DIR", os.path.join(_SCRIPT_DIR, "temp"))
 PROCESSING_LEDGER_PATH = os.path.join(TEMP_DIR, "processing_ledger.json")
+REID_METRICS_CACHE_FILE = os.path.join(TEMP_DIR, "reid_metrics_cache.json")
+# v2: added score_sum/score_count per day for ReID match-score MA.
+REID_METRICS_CACHE_VERSION = 2
 
 # Worker URL for proxying health checks
 WORKER_URL = os.getenv("WORKER_URL", "")
@@ -1944,6 +2050,10 @@ def api_stats_overall():
 
     away_wd: Dict[tuple, set] = {}
     back_wd: Dict[tuple, set] = {}
+    # Per-cell occurrence lists (all events, not deduped by day) so the UI can
+    # show the actual dates+times that landed in a selected weekday-hour bin.
+    away_wd_events: Dict[tuple, List[Dict[str, str]]] = {}
+    back_wd_events: Dict[tuple, List[Dict[str, str]]] = {}
     for p in events_all:
         try:
             minute = int(p.get("minute"))
@@ -1958,13 +2068,31 @@ def api_stats_overall():
         wd = day_to_weekday[d]
         idx = max(0, min(wd_bins - 1, (minute - start_offset) // wd_bin_minutes))
         key = (wd, idx)
+        hhmmss = p.get("hhmmss") or ""
+        occ = {"date": d, "hhmmss": str(hhmmss)}
         if typ == "away":
             away_wd.setdefault(key, set()).add(d)
+            away_wd_events.setdefault(key, []).append(occ)
         else:
             back_wd.setdefault(key, set()).add(d)
+            back_wd_events.setdefault(key, []).append(occ)
 
     away_counts = [[len(away_wd.get((wd, idx), set())) for idx in range(wd_bins)] for wd in range(7)]
     back_counts = [[len(back_wd.get((wd, idx), set())) for idx in range(wd_bins)] for wd in range(7)]
+
+    def _sorted_occurrences(bag: Dict[tuple, List[Dict[str, str]]]) -> List[List[List[Dict[str, str]]]]:
+        # Most recent first (date desc, then time desc).
+        return [
+            [
+                sorted(
+                    bag.get((wd, idx), []),
+                    key=lambda o: (o.get("date", ""), o.get("hhmmss", "")),
+                    reverse=True,
+                )
+                for idx in range(wd_bins)
+            ]
+            for wd in range(7)
+        ]
 
     weekday_heatmap = {
         "start_offset": start_offset,
@@ -1974,12 +2102,146 @@ def api_stats_overall():
         "weekday_day_counts": weekday_day_counts,
         "away_counts": away_counts,
         "back_counts": back_counts,
+        "away_occurrences": _sorted_occurrences(away_wd_events),
+        "back_occurrences": _sorted_occurrences(back_wd_events),
     }
 
     return {
         "per_day": per_day,
         "events_heatmap": events_heatmap,
         "weekday_heatmap": weekday_heatmap,
+    }
+
+
+def load_reid_metrics_cache() -> dict:
+    """Load the ReID accuracy cache. Returns {"version": N, "days": {date: {tp,fp,fn,videos}}}."""
+    try:
+        with open(REID_METRICS_CACHE_FILE, "r") as f:
+            data = json.load(f)
+        if not isinstance(data, dict) or data.get("version") != REID_METRICS_CACHE_VERSION:
+            return {"version": REID_METRICS_CACHE_VERSION, "days": {}}
+        days = data.get("days")
+        if not isinstance(days, dict):
+            return {"version": REID_METRICS_CACHE_VERSION, "days": {}}
+        return data
+    except (OSError, json.JSONDecodeError, ValueError):
+        return {"version": REID_METRICS_CACHE_VERSION, "days": {}}
+
+
+def save_reid_metrics_cache(cache: dict) -> None:
+    tmp_path = REID_METRICS_CACHE_FILE + ".tmp"
+    try:
+        os.makedirs(os.path.dirname(REID_METRICS_CACHE_FILE), exist_ok=True)
+        with open(tmp_path, "w") as f:
+            json.dump(cache, f)
+        os.replace(tmp_path, REID_METRICS_CACHE_FILE)
+    except OSError:
+        pass
+
+
+def _reid_metrics_from_counts(tp: int, fp: int, fn: int) -> Dict[str, Optional[float]]:
+    precision = (tp / (tp + fp)) if (tp + fp) > 0 else None
+    recall = (tp / (tp + fn)) if (tp + fn) > 0 else None
+    if precision is not None and recall is not None and (precision + recall) > 0:
+        f1 = 2 * precision * recall / (precision + recall)
+    else:
+        f1 = None
+    return {"precision": precision, "recall": recall, "f1": f1}
+
+
+@app.get("/api/stats/reid")
+def api_stats_reid():
+    """ReID auto-detection accuracy metrics per day with totals and 7-day MA.
+
+    Classification rules: see classify_reid_outcomes(). Closed days are cached
+    on disk under TEMP_DIR; today is always recomputed live so late corrections
+    are reflected immediately.
+    """
+    days = list_log_files()
+    ordered_days = sorted(days.keys())
+    today = date.today().isoformat()
+
+    cache = load_reid_metrics_cache()
+    cached_days = cache["days"]
+    dirty = False
+
+    per_day: List[Dict] = []
+    # Parallel list of raw count dicts so the MA below can aggregate score_sum/
+    # score_count correctly (averaging averages would skew it).
+    per_day_raw: List[Dict] = []
+    for d in ordered_days:
+        if d != today and d in cached_days:
+            c = cached_days[d]
+            counts = {
+                "tp": int(c.get("tp", 0)),
+                "fp": int(c.get("fp", 0)),
+                "fn": int(c.get("fn", 0)),
+                "videos": int(c.get("videos", 0)),
+                "score_sum": float(c.get("score_sum", 0.0)),
+                "score_count": int(c.get("score_count", 0)),
+            }
+        else:
+            entries = parse_log_lines(days[d], d)
+            counts = classify_reid_outcomes(entries)
+            if d != today:
+                cached_days[d] = counts
+                dirty = True
+
+        metrics = _reid_metrics_from_counts(counts["tp"], counts["fp"], counts["fn"])
+        score_avg = (counts["score_sum"] / counts["score_count"]) if counts["score_count"] > 0 else None
+        per_day.append({
+            "date": d,
+            "tp": counts["tp"],
+            "fp": counts["fp"],
+            "fn": counts["fn"],
+            "videos": counts["videos"],
+            "score_avg": score_avg,
+            **metrics,
+        })
+        per_day_raw.append(counts)
+
+    if dirty:
+        save_reid_metrics_cache(cache)
+
+    # Totals across the whole period
+    total_tp = sum(p["tp"] for p in per_day)
+    total_fp = sum(p["fp"] for p in per_day)
+    total_fn = sum(p["fn"] for p in per_day)
+    total_videos = sum(p["videos"] for p in per_day)
+    total_score_sum = sum(r["score_sum"] for r in per_day_raw)
+    total_score_count = sum(r["score_count"] for r in per_day_raw)
+    totals = {
+        "tp": total_tp,
+        "fp": total_fp,
+        "fn": total_fn,
+        "videos": total_videos,
+        "score_avg": (total_score_sum / total_score_count) if total_score_count > 0 else None,
+        **_reid_metrics_from_counts(total_tp, total_fp, total_fn),
+    }
+
+    # 7-day moving average over raw counts (not over ratios — that doesn't
+    # average correctly when sample sizes vary). Same principle for the score
+    # MA: aggregate score_sum / score_count over the window.
+    moving_avg: List[Dict] = []
+    window = 7
+    for i, p in enumerate(per_day):
+        lo = max(0, i - window + 1)
+        win_raw = per_day_raw[lo:i + 1]
+        wtp = sum(w["tp"] for w in win_raw)
+        wfp = sum(w["fp"] for w in win_raw)
+        wfn = sum(w["fn"] for w in win_raw)
+        wss = sum(w["score_sum"] for w in win_raw)
+        wsc = sum(w["score_count"] for w in win_raw)
+        moving_avg.append({
+            "date": p["date"],
+            "score_avg": (wss / wsc) if wsc > 0 else None,
+            **_reid_metrics_from_counts(wtp, wfp, wfn),
+        })
+
+    return {
+        "totals": totals,
+        "per_day": per_day,
+        "moving_avg_7d": moving_avg,
     }
 
 
