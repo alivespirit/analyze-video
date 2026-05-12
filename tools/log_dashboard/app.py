@@ -164,27 +164,32 @@ def collect_away_back_points(entries: List[Dict]) -> List[Dict[str, object]]:
     return points
 
 
-def classify_reid_outcomes(entries: List[Dict]) -> Dict[str, float]:
+def classify_reid_outcomes(entries: List[Dict]) -> Dict:
     """Classify ReID accuracy outcomes for a day's log entries.
 
-    Returns aggregate {tp, fp, fn, videos, score_sum, score_count}.
-    Score is the latest ReID positive (pos) score per video, averaged across
-    videos where the person of interest actually crossed the gate
-    (truth=crossed: TP, FP+FN combined, and FN-only cases).
-    Videos with no relevant reaction events are ignored.
+    Returns {tp, fp, fn, videos, score_sum, score_count, events}.
+    `events` is a per-video list ordered by hhmmss with shape
+    {video, hhmmss, kind, score} where kind ∈ {TP, FP, FN, FPFN}.
+    Score is the latest ReID positive (pos) score per video. The aggregate
+    score sums are over truth=crossed videos only (TP + FPFN + FN).
+    Videos with no relevant reaction events are ignored entirely.
     """
     auto_detected: Dict[str, bool] = {}
     auto_removed: Dict[str, bool] = {}
     manual_active: Dict[str, bool] = {}
-    # Latest ReID positive score per video (uses 'pos' from the new log format,
-    # 'best_score' from the old one). Captured here so it's available alongside
-    # the classification outcome without a second pass.
     reid_pos_per_video: Dict[str, float] = {}
+    # Capture first-seen ts per video so _hhmmss_from_video_path has a
+    # fallback when the filename has no embedded timestamp.
+    first_ts_per_video: Dict[str, datetime] = {}
 
     for e in entries:
         vid = e.get("video")
         if not vid:
             continue
+        if vid not in first_ts_per_video:
+            ts = e.get("ts")
+            if ts is not None:
+                first_ts_per_video[vid] = ts
         content = e.get("content", "")
         if AUTO_REACTION_DETECTED_RE.search(content):
             auto_detected[vid] = True
@@ -221,34 +226,46 @@ def classify_reid_outcomes(entries: List[Dict]) -> Dict[str, float]:
     videos = 0
     score_sum = 0.0
     score_count = 0
+    events: List[Dict] = []
     relevant = set(auto_detected.keys()) | set(manual_active.keys())
     for vid in relevant:
         ad = auto_detected.get(vid, False)
         ar = auto_removed.get(vid, False)
         ma = manual_active.get(vid, False)
-        counted = False
+        kind = None
         truth_crossed = False
         if ad and not ar:
             tp += 1
-            counted = True
+            kind = "TP"
             truth_crossed = True
         elif ad and ar:
             fp += 1
-            counted = True
             if ma:
                 fn += 1
+                kind = "FPFN"  # auto fired wrongly AND user added manual mark
                 truth_crossed = True
+            else:
+                kind = "FP"
         elif not ad and ma:
             fn += 1
-            counted = True
+            kind = "FN"
             truth_crossed = True
-        if counted:
-            videos += 1
-        if truth_crossed:
-            score = reid_pos_per_video.get(vid)
-            if score is not None:
-                score_sum += score
-                score_count += 1
+        if kind is None:
+            continue
+        videos += 1
+        score = reid_pos_per_video.get(vid)
+        if truth_crossed and score is not None:
+            score_sum += score
+            score_count += 1
+        hhmmss = _hhmmss_from_video_path(vid, fallback_ts=first_ts_per_video.get(vid)) or ""
+        events.append({
+            "video": vid,
+            "hhmmss": hhmmss,
+            "kind": kind,
+            "score": score,
+        })
+
+    events.sort(key=lambda ev: (ev.get("hhmmss") or "", ev.get("video") or ""))
 
     return {
         "tp": tp,
@@ -257,6 +274,7 @@ def classify_reid_outcomes(entries: List[Dict]) -> Dict[str, float]:
         "videos": videos,
         "score_sum": score_sum,
         "score_count": score_count,
+        "events": events,
     }
 
 
@@ -1499,7 +1517,8 @@ TEMP_DIR = os.getenv("TEMP_DIR", os.path.join(_SCRIPT_DIR, "temp"))
 PROCESSING_LEDGER_PATH = os.path.join(TEMP_DIR, "processing_ledger.json")
 REID_METRICS_CACHE_FILE = os.path.join(TEMP_DIR, "reid_metrics_cache.json")
 # v2: added score_sum/score_count per day for ReID match-score MA.
-REID_METRICS_CACHE_VERSION = 2
+# v3: cache per-day events list (video, hhmmss, kind, score) for the event-strip view.
+REID_METRICS_CACHE_VERSION = 3
 
 # Worker URL for proxying health checks
 WORKER_URL = os.getenv("WORKER_URL", "")
@@ -2179,6 +2198,7 @@ def api_stats_reid():
                 "videos": int(c.get("videos", 0)),
                 "score_sum": float(c.get("score_sum", 0.0)),
                 "score_count": int(c.get("score_count", 0)),
+                "events": list(c.get("events", [])),
             }
         else:
             entries = parse_log_lines(days[d], d)
@@ -2189,6 +2209,18 @@ def api_stats_reid():
 
         metrics = _reid_metrics_from_counts(counts["tp"], counts["fp"], counts["fn"])
         score_avg = (counts["score_sum"] / counts["score_count"]) if counts["score_count"] > 0 else None
+        # Attach a crop URL to each event at response time (not cached) so the
+        # URL reflects the current state of TEMP_DIR media — if a crop has been
+        # cleaned up, the field is just null.
+        media_idx = _get_temp_media_index()
+        reid_by_stem = media_idx.get("reid_by_stem", {}) or {}
+        decorated_events: List[Dict] = []
+        for ev in counts.get("events", []):
+            stem = os.path.splitext(ev.get("video", ""))[0]
+            crops = reid_by_stem.get(stem, [])
+            crop_url = f"/api/image/{crops[0]}" if crops else None
+            decorated_events.append({**ev, "crop_url": crop_url})
+
         per_day.append({
             "date": d,
             "tp": counts["tp"],
@@ -2196,6 +2228,7 @@ def api_stats_reid():
             "fn": counts["fn"],
             "videos": counts["videos"],
             "score_avg": score_avg,
+            "events": decorated_events,
             **metrics,
         })
         per_day_raw.append(counts)
