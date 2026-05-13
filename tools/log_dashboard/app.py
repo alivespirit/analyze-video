@@ -2431,6 +2431,9 @@ _PRED_CONFIDENCE_THRESHOLD = 0.30
 _PRED_MIN_WEEKDAY_SAMPLES = 4
 _PRED_BACK_MIN_AFTER_AWAY_MIN = 20
 _PRED_MINUTE_ROUNDING = 10
+# Hide predictions further than this in the future. Without it, after midnight
+# the notification would always carry tomorrow-morning's predicted leave time.
+_PRED_HORIZON_MINUTES = 3 * 60
 
 
 def _aggregate_weekday_events(stats_cache: dict, target_weekday: int, exclude_day: str):
@@ -2493,12 +2496,16 @@ def _build_prediction_result(
     basis_total: int,
     now_minute: int,
     imminent: bool = False,
-) -> Dict:
+) -> Optional[Dict]:
     rounded = _round_minute_to_nearest(predicted_minute, _PRED_MINUTE_ROUNDING)
     # If a non-imminent prediction would still land in the past, push it to
     # the next round-multiple of the rounding step.
     if not imminent and rounded < now_minute:
         rounded = _round_minute_to_nearest(now_minute + _PRED_MINUTE_ROUNDING, _PRED_MINUTE_ROUNDING)
+    # Drop predictions too far in the future. "Imminent" is always within
+    # the horizon by definition.
+    if not imminent and (rounded - now_minute) > _PRED_HORIZON_MINUTES:
+        return None
     return {
         "kind": kind,                                          # "away" | "back"
         "predicted_hhmm": _format_predicted_hhmm(rounded),
@@ -2563,7 +2570,7 @@ def compute_next_prediction(
         if not _passes_back_gap(mean_minute):
             continue
         imminent = bin_idx == current_bin and mean_minute < now_minute
-        return _build_prediction_result(
+        result = _build_prediction_result(
             kind=kind,
             predicted_minute=mean_minute,
             confidence=confidence,
@@ -2572,6 +2579,11 @@ def compute_next_prediction(
             now_minute=now_minute,
             imminent=imminent,
         )
+        if result is not None:
+            return result
+        # Result was None → past the horizon. Later bins are even further out,
+        # but pass 2 may still find a closer rolling window, so fall through.
+        break
 
     # Pass 2: 2-bin rolling window. Union unique days across the pair so we
     # don't overcount a day that has events in both bins.
@@ -2591,7 +2603,7 @@ def compute_next_prediction(
         if not _passes_back_gap(mean_minute):
             continue
         imminent = bin_idx == current_bin and mean_minute < now_minute
-        return _build_prediction_result(
+        result = _build_prediction_result(
             kind=kind,
             predicted_minute=mean_minute,
             confidence=confidence,
@@ -2600,6 +2612,10 @@ def compute_next_prediction(
             now_minute=now_minute,
             imminent=imminent,
         )
+        if result is not None:
+            return result
+        # Later windows are further in the future — no point continuing.
+        break
 
     return None
 
