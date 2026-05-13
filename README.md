@@ -391,10 +391,11 @@ A lightweight web dashboard that reads existing log files and provides per-day i
    - `/api/today/video/{basename}/pose` — pose clip URLs (when POSE_ENABLED)
    - `/api/today/video/{basename}/full` — full source video URL (only when the file currently exists)
    - `/api/today/gate-crossings?day=` — videos with ReID crops: basename, time, direction, persons up/down, away/back, scores, crop URLs
-   - `/api/today/stats?day=` — aggregated stats for a day
-   - `/api/stats/overall` — overall stats with heatmaps
+   - `/api/today/stats?day=` — aggregated stats for a day; today's open away intervals carry elapsed `dur` and an `ongoing` flag
+   - `/api/stats/overall` — overall stats with heatmaps; weekday and time-of-day heatmaps include cached history beyond log retention; weekday cells include per-bin occurrence lists
+   - `/api/stats/reid` — ReID accuracy metrics per day (TP/FP/FN, precision/recall/F1, match score) + 7-day MA + per-day events with crop URLs; persisted in `temp/reid_metrics_cache.json` and not pruned
    - `/api/monitoring` — system monitoring (CPU, RAM, battery, worker health)
-   - `/api/events/latest?since=` — away/back events for notifications
+   - `/api/events/latest?since=` — away/back events for notifications, with optional `next_prediction` (same-weekday pattern, ≥30% confidence, within 3 h horizon)
    - `/api/reid/copy` (POST) — copy ReID crop to gallery
    - `/api/gallery/{positive|negative}/{filename}` — GET serves gallery reference crops; DELETE removes them (cache rebuilds automatically on next ReID run)
    - `/api/image/{basename}`, `/api/highlight/{basename}` — serve images/clips

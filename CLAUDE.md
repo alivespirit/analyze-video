@@ -159,10 +159,11 @@ Enable via `ENABLE_LOG_DASHBOARD=true`. Default port: `8192`.
 | `GET /api/today/video/{basename}/frames` | Insignificant/no_person frame URLs (from TEMP_DIR daily dirs) |
 | `GET /api/today/video/{basename}/highlight` | Highlight clip URL if available (from TEMP_DIR daily dirs) |
 | `GET /api/today/gate-crossings?day=` | Videos with ReID crops: basename, time, direction, status, scores, crop URLs |
-| `GET /api/today/stats?day=` | Aggregated stats (status counts, gate counts, processing times, away/back intervals) |
-| `GET /api/stats/overall` | Overall stats with per-day data, events heatmap, weekday heatmap |
+| `GET /api/today/stats?day=` | Aggregated stats (status counts, gate counts, processing times, away/back intervals). For today, open away intervals get `dur` filled with elapsed time and an `ongoing: true` flag |
+| `GET /api/stats/overall` | Overall stats with per-day data, events heatmap, weekday heatmap. Heatmaps use the union of (log-file days, cached days) excluding today so the pattern window survives log retention; weekday cells include per-bin `away_occurrences` / `back_occurrences` |
+| `GET /api/stats/reid` | ReID auto-detection accuracy per day: TP/FP/FN, precision/recall/F1, average match score, 7-day MA. Each per-day entry also returns `events: [{video, hhmmss, kind: TP\|FP\|FN\|FPFN, score, crop_url}]` for the recognition-wall view. Persisted in `temp/reid_metrics_cache.json` (v3) and never pruned |
 | `GET /api/monitoring` | Master CPU/RAM/battery + worker health proxy + recent processing ledger |
-| `GET /api/events/latest?since=` | Away/back events with current home/away status (for notifications) |
+| `GET /api/events/latest?since=` | Away/back events with current home/away status (for notifications). May include `next_prediction: {kind: "away"\|"back", predicted_hhmm, confidence, basis_count, basis_total, imminent}` when the same-weekday pattern has ≥4 samples, ≥30% confidence, and the predicted time is within a 3-hour horizon (back predictions also require ≥20 min after the away start) |
 | `POST /api/reid/copy` | Copy ReID crop to positive or negative gallery |
 | `GET /api/image/{basename}` | Serve images (crops, frames) from TEMP_DIR or VIDEO_FOLDER |
 | `GET /api/highlight/{basename}` | Serve highlight clips from TEMP_DIR daily dirs |
