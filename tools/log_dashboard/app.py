@@ -1940,10 +1940,38 @@ def api_today_gate_crossings(day: Optional[str] = Query(default=None)):
     return {"day": day_str, "gate_crossings": gate_crossings}
 
 
+def _fill_ongoing_dur(intervals: List[Dict], day_iso: str) -> List[Dict]:
+    """For today's open away intervals (start known, end missing), compute the
+    elapsed duration as `now - start` and write it into `dur` so the UI can
+    show e.g. "1h 24m" alongside the start time.
+    """
+    if day_iso != date.today().isoformat():
+        return intervals
+    now = datetime.now()
+    now_minute = now.hour * 60 + now.minute
+    out: List[Dict] = []
+    for it in intervals:
+        if it.get("start") and not it.get("end") and not it.get("dur"):
+            try:
+                sh, sm = [int(x) for x in it["start"].split(":", 1)]
+                start_minute = sh * 60 + sm
+                delta = now_minute - start_minute
+                if delta > 0:
+                    dh = delta // 60
+                    dm = delta % 60
+                    dur = (f"{dh}h" if dh else "") + (f"{dm}m" if dm or not dh else "")
+                    out.append({**it, "dur": dur, "ongoing": True})
+                    continue
+            except Exception:
+                pass
+        out.append(it)
+    return out
+
+
 @app.get("/api/today/stats")
 def api_today_stats(day: Optional[str] = Query(default=None)):
     day, entries, metrics = _get_day_parsed(day)
-    away_intervals = build_away_intervals(entries)
+    away_intervals = _fill_ongoing_dur(build_away_intervals(entries), day)
 
     fst = metrics.get("first_seen_ts_per_video", {})
     ptpv = metrics.get("processing_time_per_video", {})
@@ -2017,15 +2045,28 @@ def api_stats_overall():
             cache[d] = {"per_day": day_entry, "events": events}
             dirty = True
 
+    # Extend events_all with events from cached days outside the log-retention
+    # window so weekday-pattern stats (heatmaps) match the prediction history.
+    # Per-day video counts above stay log-only as the user prefers.
+    for cd, cd_data in cache.items():
+        if cd == today or cd in days:
+            continue
+        for p in cd_data.get("events", []):
+            p2 = dict(p)
+            p2["day"] = cd
+            events_all.append(p2)
+
     if dirty:
         save_stats_cache(cache)
 
-    # Build heatmaps (same logic as stats_view but return JSON)
+    # Build heatmaps (same logic as stats_view but return JSON).
+    # Pattern denominator = past days (today excluded since it's only partial).
+    pattern_days = sorted({d for d in ordered_days if d != today} | {d for d in cache.keys() if d != today})
     start_offset = 6 * 60
     total_minutes = 18 * 60
     bin_minutes = 15
     bins = total_minutes // bin_minutes
-    days_count = len(ordered_days)
+    days_count = len(pattern_days)
 
     away_bin_days: Dict[int, set] = {}
     back_bin_days: Dict[int, set] = {}
@@ -2035,6 +2076,8 @@ def api_stats_overall():
             d = p.get("day")
             typ = p.get("type")
         except Exception:
+            continue
+        if d == today:
             continue
         if d is None or minute < start_offset or minute >= (start_offset + total_minutes):
             continue
@@ -2053,13 +2096,14 @@ def api_stats_overall():
         "back_days": [len(back_bin_days.get(i, set())) for i in range(bins)],
     }
 
-    # Weekday heatmap
+    # Weekday heatmap — also over the pattern (cache-extended, today excluded)
+    # window so the percentages match what the prediction code computes.
     wd_bin_minutes = 60
     wd_bins = total_minutes // wd_bin_minutes
     weekday_labels = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
     day_to_weekday: Dict[str, int] = {}
     weekday_day_counts = [0] * 7
-    for d in ordered_days:
+    for d in pattern_days:
         try:
             wd = date.fromisoformat(d).weekday()
             day_to_weekday[d] = wd
@@ -2371,6 +2415,195 @@ def api_monitoring():
     return {"master": master, "worker": worker, "tesla": tesla, "ledger_recent": ledger_recent}
 
 
+# ---------------------------------------------------------------------------
+# Next-event prediction
+# ---------------------------------------------------------------------------
+# Uses the same hourly bin structure as the weekday heatmap (06:00–24:00 in
+# 60-minute bins). For the current weekday, walks remaining bins forward from
+# "now" and picks the first whose historical hit rate clears a threshold; if
+# none does, tries 2-bin rolling windows; otherwise no prediction.
+
+_PRED_BIN_MINUTES = 60
+_PRED_START_OFFSET = 6 * 60
+_PRED_TOTAL_MINUTES = 18 * 60
+_PRED_BINS = _PRED_TOTAL_MINUTES // _PRED_BIN_MINUTES
+_PRED_CONFIDENCE_THRESHOLD = 0.30
+_PRED_MIN_WEEKDAY_SAMPLES = 4
+_PRED_BACK_MIN_AFTER_AWAY_MIN = 20
+_PRED_MINUTE_ROUNDING = 10
+
+
+def _aggregate_weekday_events(stats_cache: dict, target_weekday: int, exclude_day: str):
+    """Walk the overall-stats cache and aggregate per-bin events for a weekday.
+
+    Returns a dict with `weekday_days_total` and two bin-keyed dicts of
+    {days: set[str], minutes: list[int]} for away and back.
+    """
+    away_bins: Dict[int, Dict] = {}
+    back_bins: Dict[int, Dict] = {}
+    weekday_days: set = set()
+
+    for d, day_data in stats_cache.items():
+        if d == exclude_day:
+            continue
+        try:
+            wd = date.fromisoformat(d).weekday()
+        except Exception:
+            continue
+        if wd != target_weekday:
+            continue
+        weekday_days.add(d)
+        for ev in day_data.get("events", []):
+            try:
+                minute = int(ev.get("minute"))
+                typ = ev.get("type")
+            except Exception:
+                continue
+            if minute < _PRED_START_OFFSET or minute >= _PRED_START_OFFSET + _PRED_TOTAL_MINUTES:
+                continue
+            bin_idx = (minute - _PRED_START_OFFSET) // _PRED_BIN_MINUTES
+            target = away_bins if typ == "away" else (back_bins if typ == "back" else None)
+            if target is None:
+                continue
+            slot = target.setdefault(bin_idx, {"days": set(), "minutes": []})
+            slot["days"].add(d)
+            slot["minutes"].append(minute)
+
+    return {
+        "weekday_days_total": len(weekday_days),
+        "away_bins": away_bins,
+        "back_bins": back_bins,
+    }
+
+
+def _round_minute_to_nearest(minute: int, step: int) -> int:
+    return int(round(minute / step) * step)
+
+
+def _format_predicted_hhmm(minute: int) -> str:
+    minute = max(0, min(24 * 60 - 1, minute))
+    return f"{minute // 60:02d}:{minute % 60:02d}"
+
+
+def _build_prediction_result(
+    kind: str,
+    predicted_minute: int,
+    confidence: float,
+    basis_count: int,
+    basis_total: int,
+    now_minute: int,
+    imminent: bool = False,
+) -> Dict:
+    rounded = _round_minute_to_nearest(predicted_minute, _PRED_MINUTE_ROUNDING)
+    # If a non-imminent prediction would still land in the past, push it to
+    # the next round-multiple of the rounding step.
+    if not imminent and rounded < now_minute:
+        rounded = _round_minute_to_nearest(now_minute + _PRED_MINUTE_ROUNDING, _PRED_MINUTE_ROUNDING)
+    return {
+        "kind": kind,                                          # "away" | "back"
+        "predicted_hhmm": _format_predicted_hhmm(rounded),
+        "confidence": round(confidence, 3),
+        "basis_count": basis_count,
+        "basis_total": basis_total,
+        "imminent": imminent,
+    }
+
+
+def compute_next_prediction(
+    now: datetime,
+    state: str,
+    away_start_minute: Optional[int],
+    stats_cache: dict,
+) -> Optional[Dict]:
+    """Return a prediction dict or None.
+
+    state: "home" → predict next "away"; "away" → predict next "back".
+    For back predictions, candidate times within `_PRED_BACK_MIN_AFTER_AWAY_MIN`
+    of the away start are skipped (people don't usually return that fast).
+    """
+    if state not in ("home", "away"):
+        return None
+
+    weekday = now.weekday()
+    today_iso = now.date().isoformat()
+    now_minute = now.hour * 60 + now.minute
+
+    agg = _aggregate_weekday_events(stats_cache, weekday, exclude_day=today_iso)
+    weekday_total = agg["weekday_days_total"]
+    if weekday_total < _PRED_MIN_WEEKDAY_SAMPLES:
+        return None
+
+    bins = agg["away_bins"] if state == "home" else agg["back_bins"]
+    kind = "away" if state == "home" else "back"
+
+    current_bin = max(0, (now_minute - _PRED_START_OFFSET) // _PRED_BIN_MINUTES)
+    current_bin = min(current_bin, _PRED_BINS - 1)
+
+    def _bin_mean(bin_data: Dict) -> int:
+        ms = bin_data.get("minutes") or []
+        return sum(ms) // len(ms) if ms else 0
+
+    def _passes_back_gap(minute: int) -> bool:
+        if state != "away" or away_start_minute is None:
+            return True
+        return minute >= away_start_minute + _PRED_BACK_MIN_AFTER_AWAY_MIN
+
+    # Pass 1: single-bin, threshold = 30%.
+    for bin_idx in range(current_bin, _PRED_BINS):
+        bin_data = bins.get(bin_idx)
+        if not bin_data:
+            continue
+        unique_days = len(bin_data.get("days") or set())
+        if unique_days == 0:
+            continue
+        confidence = unique_days / weekday_total
+        if confidence < _PRED_CONFIDENCE_THRESHOLD:
+            continue
+        mean_minute = _bin_mean(bin_data)
+        if not _passes_back_gap(mean_minute):
+            continue
+        imminent = bin_idx == current_bin and mean_minute < now_minute
+        return _build_prediction_result(
+            kind=kind,
+            predicted_minute=mean_minute,
+            confidence=confidence,
+            basis_count=unique_days,
+            basis_total=weekday_total,
+            now_minute=now_minute,
+            imminent=imminent,
+        )
+
+    # Pass 2: 2-bin rolling window. Union unique days across the pair so we
+    # don't overcount a day that has events in both bins.
+    for bin_idx in range(current_bin, _PRED_BINS - 1):
+        a = bins.get(bin_idx) or {"days": set(), "minutes": []}
+        b = bins.get(bin_idx + 1) or {"days": set(), "minutes": []}
+        union_days = (a.get("days") or set()) | (b.get("days") or set())
+        if not union_days:
+            continue
+        confidence = len(union_days) / weekday_total
+        if confidence < _PRED_CONFIDENCE_THRESHOLD:
+            continue
+        all_minutes = (a.get("minutes") or []) + (b.get("minutes") or [])
+        if not all_minutes:
+            continue
+        mean_minute = sum(all_minutes) // len(all_minutes)
+        if not _passes_back_gap(mean_minute):
+            continue
+        imminent = bin_idx == current_bin and mean_minute < now_minute
+        return _build_prediction_result(
+            kind=kind,
+            predicted_minute=mean_minute,
+            confidence=confidence,
+            basis_count=len(union_days),
+            basis_total=weekday_total,
+            now_minute=now_minute,
+            imminent=imminent,
+        )
+
+    return None
+
+
 @app.get("/api/events/latest")
 def api_events_latest(since: Optional[str] = Query(default=None, description="ISO timestamp or HH:MM:SS")):
     day, entries, _metrics = _get_day_parsed()
@@ -2404,15 +2637,35 @@ def api_events_latest(since: Optional[str] = Query(default=None, description="IS
     # (not log/processing time — videos can be processed out of order when there's a backlog).
     current_status = None
     current_status_since = None
+    away_start_minute: Optional[int] = None
     if points:
         latest = max(points, key=lambda p: (p.get("minute") or -1, p.get("ts") or datetime.min))
         current_status = "home" if latest["type"] == "back" else "away"
         current_status_since = latest["hhmmss"]
+        if current_status == "away":
+            try:
+                away_start_minute = int(latest.get("minute"))
+            except Exception:
+                away_start_minute = None
+
+    # Predict next away/back from same-weekday history. Effective state defaults
+    # to "home" when there are no events today yet — predicts the first leave.
+    effective_state = current_status or "home"
+    try:
+        prediction = compute_next_prediction(
+            now=datetime.now(),
+            state=effective_state,
+            away_start_minute=away_start_minute,
+            stats_cache=load_stats_cache(),
+        )
+    except Exception:
+        prediction = None
 
     return {
         "events": events,
         "current_status": current_status,
         "current_status_since": current_status_since,
+        "next_prediction": prediction,
         "server_ts": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
     }
 
