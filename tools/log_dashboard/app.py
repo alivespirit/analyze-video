@@ -2177,19 +2177,30 @@ def api_stats_reid():
     are reflected immediately.
     """
     days = list_log_files()
-    ordered_days = sorted(days.keys())
     today = date.today().isoformat()
 
     cache = load_reid_metrics_cache()
     cached_days = cache["days"]
     dirty = False
 
+    # Surface the union of (cached days, days with log files) so the chart
+    # retains history past the log-retention window. The cache is the source
+    # of truth for closed days; logs only matter for today and for first-time
+    # population of newly-closed days.
+    all_days = sorted(set(cached_days.keys()) | set(days.keys()))
+
     per_day: List[Dict] = []
     # Parallel list of raw count dicts so the MA below can aggregate score_sum/
     # score_count correctly (averaging averages would skew it).
     per_day_raw: List[Dict] = []
-    for d in ordered_days:
-        if d != today and d in cached_days:
+    for d in all_days:
+        if d == today:
+            # Today is always live. If today has no log file yet, skip it.
+            if d not in days:
+                continue
+            entries = parse_log_lines(days[d], d)
+            counts = classify_reid_outcomes(entries)
+        elif d in cached_days:
             c = cached_days[d]
             counts = {
                 "tp": int(c.get("tp", 0)),
@@ -2200,12 +2211,15 @@ def api_stats_reid():
                 "score_count": int(c.get("score_count", 0)),
                 "events": list(c.get("events", [])),
             }
-        else:
+        elif d in days:
+            # Closed day not yet cached — parse the log and store it.
             entries = parse_log_lines(days[d], d)
             counts = classify_reid_outcomes(entries)
-            if d != today:
-                cached_days[d] = counts
-                dirty = True
+            cached_days[d] = counts
+            dirty = True
+        else:
+            # Can't happen — d came from the union of both sets.
+            continue
 
         metrics = _reid_metrics_from_counts(counts["tp"], counts["fp"], counts["fn"])
         score_avg = (counts["score_sum"] / counts["score_count"]) if counts["score_count"] > 0 else None

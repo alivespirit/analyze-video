@@ -208,8 +208,7 @@ def analyze_video(motion_result, video_path):
         MODEL_CODENAMES = {
             "gemini-3-flash-preview": "3FP",
             "gemini-2.5-flash": "2.5F",
-            "gemini-2.5-flash-lite": "2.5FL",
-            "gemini-3.1-flash-lite-preview": "3.1FLP",
+            "gemini-3.1-flash-lite": "3.1FL",
         }
 
         # Select main and fallback based on PRO presence and time window
