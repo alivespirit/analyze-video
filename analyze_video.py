@@ -206,6 +206,7 @@ def analyze_video(motion_result, video_path):
 
         # Codename mapping for known models
         MODEL_CODENAMES = {
+            "gemini-3.5-flash": "3.5F",
             "gemini-3-flash-preview": "3FP",
             "gemini-2.5-flash": "2.5F",
             "gemini-3.1-flash-lite": "3.1FL",
