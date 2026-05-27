@@ -2486,7 +2486,8 @@ def detect_motion(input_video_path, output_dir, fast_processing: bool = False):
                     codec='libx264',
                     preset=VIDEO_WRITER_PRESET,
                     threads=0,
-                    ffmpeg_params=['-crf', '28', '-pix_fmt', 'yuv420p', '-movflags', '+faststart']
+                    ffmpeg_params=['-crf', '28', '-maxrate', '4000k', '-bufsize', '8000k',
+                                   '-pix_fmt', 'yuv420p', '-movflags', '+faststart']
                 )
             if prof.enabled:
                 t0 = time.perf_counter()
