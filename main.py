@@ -641,15 +641,15 @@ class FileHandler(FileSystemEventHandler):
             )
 
             video_response = analysis_result['response']
-            insignificant_frames = analysis_result['insignificant_frames']
             clip_path = analysis_result.get('clip_path')
+            photo_frame = analysis_result.get('photo_frame')
             self.logger.info(f"[{file_basename}] Analysis complete.")
             update_processing_ledger(file_path, "completed", {"end_ts": time.time()})
         except Exception as e:
             self.logger.error(f"[{file_basename}] Error during video processing pipeline: {e}", exc_info=True)
             video_response = f"_{timestamp_text}:_ \u274C Відео не вдалося проаналізувати: " + str(e)[:512] + "..."
-            insignificant_frames = []
             clip_path = None
+            photo_frame = None
             update_processing_ledger(file_path, "failed", {"end_ts": time.time(), "error": str(e)[:256]})
 
         battery = psutil.sensors_battery()
@@ -669,7 +669,7 @@ class FileHandler(FileSystemEventHandler):
             video_response += " \u26A1\uFE0F"
 
         try:
-            await send_notifications(self.app, video_response, insignificant_frames, clip_path, file_path, file_basename, timestamp_text, preserve_media_on_failure=True, allow_plain_fallback=False)
+            await send_notifications(self.app, video_response, clip_path, file_path, file_basename, timestamp_text, preserve_media_on_failure=True, allow_plain_fallback=False, photo_frame=photo_frame)
             update_processing_ledger(file_path, "completed", {"telegram_status": "sent"})
         except Exception as e_send:
             logger.error(f"[{file_basename}] Telegram send failed, scheduling retries: {e_send}")
@@ -677,12 +677,12 @@ class FileHandler(FileSystemEventHandler):
             schedule_notification_retries(
                 self.app,
                 video_response,
-                insignificant_frames,
                 clip_path,
                 file_path,
                 file_basename,
                 timestamp_text,
-                delays=(300, 600, 900)
+                delays=(300, 600, 900),
+                photo_frame=photo_frame
             )
             # Do not raise; allow pipeline to finish without blocking future videos
 
@@ -1026,17 +1026,17 @@ def update_processing_ledger(file_path: str, status: str, extra: dict | None = N
 
 def schedule_notification_retries(app,
                                   video_response: str,
-                                  insignificant_frames: list,
                                   clip_path: str | None,
                                   file_path: str,
                                   file_basename: str,
                                   timestamp_text: str,
-                                  delays: tuple[int, ...] = (300, 600, 900)):
+                                  delays: tuple[int, ...] = (300, 600, 900),
+                                  photo_frame: str | None = None):
     async def retry_sender():
         for delay in delays:
             try:
                 await asyncio.sleep(delay)
-                await send_notifications(app, video_response, insignificant_frames, clip_path, file_path, file_basename, timestamp_text, preserve_media_on_failure=True, allow_plain_fallback=False)
+                await send_notifications(app, video_response, clip_path, file_path, file_basename, timestamp_text, preserve_media_on_failure=True, allow_plain_fallback=False, photo_frame=photo_frame)
                 logger.info(f"[{file_basename}] Telegram retry succeeded after {delay} seconds.")
                 update_processing_ledger(file_path, "completed", {"telegram_status": "sent_retry", "retry_delay": delay, "end_ts": time.time()})
                 return
@@ -1047,7 +1047,7 @@ def schedule_notification_retries(app,
         logger.warning(f"[{file_basename}] Telegram retries exhausted; attempting plain message.")
         try:
             # Final attempt: allow plain fallback
-            await send_notifications(app, video_response, insignificant_frames, clip_path, file_path, file_basename, timestamp_text, preserve_media_on_failure=True, allow_plain_fallback=True)
+            await send_notifications(app, video_response, clip_path, file_path, file_basename, timestamp_text, preserve_media_on_failure=True, allow_plain_fallback=True, photo_frame=photo_frame)
             update_processing_ledger(file_path, "completed", {"telegram_status": "sent_plain_after_retries", "end_ts": time.time()})
         except Exception as e_final:
             logger.error(f"[{file_basename}] Final plain message attempt failed: {e_final}")

@@ -51,7 +51,7 @@ def main():
         "crossing_direction": res.get("crossing_direction"),
         "persons_up": res.get("persons_up"),
         "persons_down": res.get("persons_down"),
-        "insignificant_frames_saved": len(res.get("insignificant_frames", [])),
+        "event_frames_saved": len(res.get("event_frames", [])),
         "reid": (
             {
                 "matched": reid.get("matched"),

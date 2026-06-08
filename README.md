@@ -41,9 +41,10 @@ This project is a Python-based application that monitors a folder for new video 
   - **Saved event frames**: Analyzes the representative frames `detect_motion` already saves for each low-motion event (single- or multi-frame in one call).
   - **Graceful fallback**: If Ollama is unreachable, the pipeline falls back to the original placeholder messages — nothing breaks.
 - **Robust Telegram Integration**:
-  - **Grouped Notifications**: Combines multiple insignificant/no-motion events into a single, editable Telegram message to reduce clutter.
+  - **Grouped Notifications**: Combines no-motion events into a single, editable Telegram message to reduce clutter.
+  - **Event-Frame Photos**: `no_person` / `no_significant_motion` events are sent as a single photo (the most detailed event frame) with the local-LLM description as the caption and a "Глянути" full-video button — one self-contained message. The frame is downscaled before upload to cut bandwidth; toggle with `SEND_INSIGNIFICANT_FRAMES` (off → the description is delivered as a grouped text message instead).
   - **Interactive Callbacks**: Allows users to request the full original video via inline buttons.
-  - **Media Handling**: Sends highlight clips as animations; can also send photos for insignificant motion if enabled.
+  - **Media Handling**: Sends highlight clips as animations and event frames as photos with captions + buttons.
 - **Tesla Integration (Optional)**:
   - **State of Charge (SoC) Display**: If a car is detected in a predefined location, the bot fetches the Tesla's SoC and displays it directly on the video highlight clip.
   - **Efficient Caching**: Caches the SoC in `tesla_soc.txt` and only queries the API periodically or when the cache is stale to avoid waking the vehicle unnecessarily.
@@ -225,8 +226,9 @@ pip install -r requirements.txt
    - A `telegram_lock` ensures that messages are sent or edited one at a time.
    - **Gate Crossing:** A special, high-priority message is sent immediately.
    - **Significant Motion:** A message is sent with the generated highlight clip and the AI description.
-   - **Insignificant/No Motion:** Events are grouped into a single, editable message to avoid spam.
-   - **Resilient Sending:** Animation delivery is retried non-blockingly at 5/10/15 minutes. If all retries fail (e.g., corrupted or oversized media), a final plain message with a “Глянути” button is sent so you still receive a notification. Highlight clips are preserved during retries and cleaned up after a successful send or after the final fallback.
+   - **Low Motion (`no_person` / `no_significant_motion`):** Sent as a single photo — the most detailed event frame — with the local-LLM description as the caption and a "Глянути" button (one self-contained, individually-actionable message). The frame is downscaled before upload (`TELEGRAM_FRAME_MAX_DIM`, default 1920px); the caption is clamped to Telegram's 1024-char limit. Disable with `SEND_INSIGNIFICANT_FRAMES=false`, which routes the description into the grouped text message instead.
+   - **No Motion:** Events are grouped into a single, editable message to avoid spam.
+   - **Resilient Sending:** Animation delivery is retried non-blockingly at 5/10/15 minutes. If all retries fail (e.g., corrupted or oversized media), a final plain message with a “Глянути” button is sent so you still receive a notification. The frame-photo path likewise falls back to a plain text message with the button if the photo can't be sent. Highlight clips are preserved during retries and cleaned up after a successful send or after the final fallback.
 
 4. **Callback Handling:**
    - When a button is clicked, the bot retrieves the corresponding full video file and sends it as a reply.
@@ -266,8 +268,7 @@ pip install -r requirements.txt
   - `CROP_PADDING`: extra pixels around ROI for cropped analysis (default: 30 for 1080p, 60 for 4K)
   - `TRACK_ROI_ENABLED`: enable tracker ROI crop (default: True)
   - `TRACK_ROI_PADDING`: extra padding for tracker ROI crop (default: 10 for 1080p, 20 for 4K)
-  - `SAVE_INSIGNIFICANT_FRAMES`: whether to save insignificant motion frames (default: True)
-  - `SEND_INSIGNIFICANT_FRAMES`: whether to send insignificant motion frames to Telegram (default: False)
+  - `SAVE_INSIGNIFICANT_FRAMES` (detect_motion.py): whether to save event frames to disk — needed for local LLM analysis, the Telegram photo, and the dashboard (default: True)
   - `STATIC_PERSON_MAX_MOVE_PX`: max allowed center drift (pixels) for a person to be considered static (default: 10)
   - `STATIC_PERSON_MIN_UPDATES`: minimum number of updates before a static person can be suppressed (default: 20)
   - `STATIC_PERSON_MAX_MEAN_CONF`: max mean confidence for a static person to be suppressed (default: 0.80)
@@ -455,6 +456,18 @@ The refine prompt is `config/prompt_frame_refine_uk.txt` (uses a `{descriptions}
 | `OLLAMA_REPEAT_PENALTY` | `1.3` | Breaks repetition loops |
 | `OLLAMA_MAX_CHARS` | `300` | A longer response is treated as a rambling loop and retried; raise it for longer-form output |
 | `OLLAMA_THINK` | unset | Set `true` for reasoning models (use with `OLLAMA_NUM_PREDICT=-1`); better grounding at a large latency cost |
+
+### Telegram delivery
+
+The description is delivered as a single photo (the most detailed event frame) with the description as caption and a "Глянути" full-video button. The frame is downscaled before upload (Telegram re-compresses photos anyway), and the caption is clamped to Telegram's 1024-char hard limit — keep the prompt's output under ~900 chars to leave room for the appended object counts / battery suffix.
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `SEND_INSIGNIFICANT_FRAMES` | `true` | Send the event-frame photo. `false` → the description is delivered as a grouped text message instead (no image) |
+| `TELEGRAM_FRAME_MAX_DIM` | `1920` | Downscale the frame's longest side before upload (`0` disables); `1280` roughly halves the size again |
+| `TELEGRAM_FRAME_JPEG_QUALITY` | `88` | JPEG quality for the downscaled frame |
+
+The on-disk frame is left full-resolution for the dashboard; only the uploaded copy is downscaled.
 
 ### Prompt files
 

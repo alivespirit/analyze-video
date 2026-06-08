@@ -18,6 +18,21 @@ GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 USERNAME = os.getenv("TELEGRAM_NOTIFY_USERNAME")
 LOCAL_FRAME_ANALYSIS_ENABLED = os.getenv("LOCAL_FRAME_ANALYSIS_ENABLED", "true").lower() == "true"
 
+
+def _pick_best_frame(frame_paths):
+    """Pick a single representative frame to send with the description.
+
+    No per-frame quality score exists, so we use the largest JPEG as a cheap proxy — more bytes
+    usually means more detail/motion (a busier scene), which is the one worth showing.
+    """
+    existing = [p for p in (frame_paths or []) if p and os.path.exists(p)]
+    if not existing:
+        return None
+    try:
+        return max(existing, key=os.path.getsize)
+    except OSError:
+        return existing[0]
+
 NO_ACTION_RESPONSES = [
     "Нема шо дивитись",
     "Ніц цікавого",
@@ -71,7 +86,7 @@ def analyze_video(motion_result, video_path):
 
     if motion_result is None or not isinstance(motion_result, dict):
         logger.warning(f"[{file_basename}] Motion detection returned an unexpected value: {motion_result}. Analyzing full video.")
-        motion_result = {'status': 'error', 'clip_path': None, 'insignificant_frames': []}
+        motion_result = {'status': 'error', 'clip_path': None}
 
     # Append ReID result if available and positive
     reid = motion_result.get('reid')
@@ -93,7 +108,6 @@ def analyze_video(motion_result, video_path):
         low_res_prefix = "\U0001F52C" if motion_result.get('low_res_clip') else ""
         return {
             'response': timestamp + f"\u2714\uFE0F{low_res_prefix} " + random.choice(NO_ACTION_RESPONSES),
-            'insignificant_frames': [],
             'clip_path': None
         }
 
@@ -130,7 +144,6 @@ def analyze_video(motion_result, video_path):
 
         return {
             'response': timestamp + analysis_result,
-            'insignificant_frames': motion_result.get('insignificant_frames', []),
             'clip_path': motion_result.get('clip_path')
         }
     # -----------------------------------------
@@ -156,22 +169,24 @@ def analyze_video(motion_result, video_path):
             emoji = "❎" if detected_motion_status == "no_person" else "❇️"
             return {
                 'response': timestamp + f"{emoji}{low_res_prefix} \U0001F916 " + description + counts + reid_text,
-                'insignificant_frames': motion_result.get('insignificant_frames', []),
-                'clip_path': motion_result.get('clip_path')
+                'clip_path': motion_result.get('clip_path'),
+                # Best event frame to send as a photo alongside the description (used by Telegram
+                # only when there is no highlight clip). Falls back to grouped text if None.
+                'photo_frame': _pick_best_frame(event_frames),
             }
         # Fallback: local model unavailable/failed — keep the original placeholder messages.
         logger.info(f"[{file_basename}] Local frame analysis unavailable; using placeholder.")
         if detected_motion_status == "no_significant_motion":
-            return {'response': timestamp + "\U0001F518 Шось там цейво...", 'insignificant_frames': motion_result.get('insignificant_frames', []), 'clip_path': None}
+            return {'response': timestamp + "\U0001F518 Шось там цейво...", 'clip_path': None}
         else:  # no_person
-            return {'response': timestamp + "\U0001F532 Шось нікого...", 'insignificant_frames': motion_result.get('insignificant_frames', []), 'clip_path': motion_result.get('clip_path')}
+            return {'response': timestamp + "\U0001F532 Шось нікого...", 'clip_path': motion_result.get('clip_path')}
     # -----------------------------------------
 
     # --- Skip Gemini analysis during off-peak hours to keep under rate limits (disabled if local frame analysis is enabled) ---
     if not LOCAL_FRAME_ANALYSIS_ENABLED and (now.hour < 9 or now.hour > 19):
         logger.info(f"[{file_basename}] Skipping Gemini analysis (off-peak hours).")
         if detected_motion_status == "error":
-            return {'response': timestamp + "\U0001F4A2 Шось неясно", 'insignificant_frames': motion_result['insignificant_frames'], 'clip_path': None}
+            return {'response': timestamp + "\U0001F4A2 Шось неясно", 'clip_path': None}
         elif detected_motion_status == "significant_motion":
             # --- MODIFIED: Append detected object counts to the off-peak message ---
             persons = motion_result.get('persons_detected', 0)
@@ -184,16 +199,16 @@ def analyze_video(motion_result, video_path):
 
             low_res_prefix = "\U0001F52C" if motion_result.get('low_res_clip') else ""
             if details:
-                return {'response': timestamp + f"\u2611\uFE0F{low_res_prefix} Шось там {', '.join(details)}" + reid_text, 'insignificant_frames': motion_result['insignificant_frames'], 'clip_path': motion_result.get('clip_path')}
+                return {'response': timestamp + f"\u2611\uFE0F{low_res_prefix} Шось там {', '.join(details)}" + reid_text, 'clip_path': motion_result.get('clip_path')}
             else:
-                return {'response': timestamp + f"\u2611\uFE0F{low_res_prefix} Виявлено капець рух." + reid_text, 'insignificant_frames': motion_result['insignificant_frames'], 'clip_path': motion_result.get('clip_path')}
+                return {'response': timestamp + f"\u2611\uFE0F{low_res_prefix} Виявлено капець рух." + reid_text, 'clip_path': motion_result.get('clip_path')}
 
     video_to_process = video_path
     video_bytes_obj = None
 
     if not video_to_process:
         logger.info(f"[{file_basename}] No video to analyze, but insignificant frames may exist.")
-        return {'response': timestamp + "\U0001F4A2 Нема значного руху.", 'insignificant_frames': motion_result['insignificant_frames'], 'clip_path': None}
+        return {'response': timestamp + "\U0001F4A2 Нема значного руху.", 'clip_path': None}
 
     try:
         if use_files_api:
@@ -204,7 +219,7 @@ def analyze_video(motion_result, video_path):
             while video_bytes_obj.state == "PROCESSING":
                 if waited >= max_wait_seconds:
                     logger.error(f"[{file_basename}] Video processing timed out after {max_wait_seconds} seconds.")
-                    return {'response': timestamp + "\u274C Відео не вдалося обробити (timeout).", 'insignificant_frames': motion_result['insignificant_frames'], 'clip_path': motion_result.get('clip_path')}
+                    return {'response': timestamp + "\u274C Відео не вдалося обробити (timeout).", 'clip_path': motion_result.get('clip_path')}
                 logger.info(f"[{file_basename}] Waiting for video to be processed ({waited}/{max_wait_seconds}s).")
                 time.sleep(wait_interval)
                 waited += wait_interval
@@ -212,14 +227,14 @@ def analyze_video(motion_result, video_path):
 
             if video_bytes_obj.state == "FAILED":
                 logger.error(f"[{file_basename}] Video processing failed: {video_bytes_obj.error_message}")
-                return {'response': timestamp + "\u274C Відео не вдалося обробити.", 'insignificant_frames': motion_result['insignificant_frames'], 'clip_path': motion_result.get('clip_path')}
+                return {'response': timestamp + "\u274C Відео не вдалося обробити.", 'clip_path': motion_result.get('clip_path')}
         else:
             try:
                 with open(video_to_process, 'rb') as f:
                     video_data = f.read()
             except Exception as e:
                 logger.error(f"[{file_basename}] Error reading video file: {e}")
-                return {'response': timestamp + "\u274C Відео не вдалося прочитати.", 'insignificant_frames': motion_result['insignificant_frames'], 'clip_path': motion_result.get('clip_path')}
+                return {'response': timestamp + "\u274C Відео не вдалося прочитати.", 'clip_path': motion_result.get('clip_path')}
 
         # --- Load model names from gemini_models.env on each call ---
         models_env_path = os.path.join(SCRIPT_DIR, "config", "gemini_models.env")
@@ -266,10 +281,10 @@ def analyze_video(motion_result, video_path):
             logger.debug("[%s] Prompt loaded successfully from %s.", file_basename, prompt_file_path)
         except FileNotFoundError:
             logger.error(f"[{file_basename}] Prompt file not found: {prompt_file_path}")
-            return {'response': timestamp + "Prompt file not found.", 'insignificant_frames': motion_result['insignificant_frames'], 'clip_path': motion_result.get('clip_path')}
+            return {'response': timestamp + "Prompt file not found.", 'clip_path': motion_result.get('clip_path')}
         except Exception as e:
             logger.error(f"[{file_basename}] Error reading prompt file: {e}", exc_info=True)
-            return {'response': timestamp + "Error reading prompt file.", 'insignificant_frames': motion_result['insignificant_frames'], 'clip_path': motion_result.get('clip_path')}
+            return {'response': timestamp + "Error reading prompt file.", 'clip_path': motion_result.get('clip_path')}
 
         if use_files_api:
             contents = [video_bytes_obj, prompt]
@@ -370,14 +385,14 @@ def analyze_video(motion_result, video_path):
         else:
             timestamp += f"\u2747\uFE0F{low_res_prefix} "
 
-        return {'response': timestamp + analysis_result, 'insignificant_frames': motion_result['insignificant_frames'], 'clip_path': motion_result.get('clip_path')}
+        return {'response': timestamp + analysis_result, 'clip_path': motion_result.get('clip_path')}
 
     except Exception as e_analysis:
         logger.error(f"[{file_basename}] Video analysis failed: {e_analysis}", exc_info=False)
         if '429' in str(e_analysis):
-            return {'response': timestamp + "\u26A0\uFE0F Ти забагато питав...", 'insignificant_frames': motion_result['insignificant_frames'], 'clip_path': motion_result.get('clip_path')}
+            return {'response': timestamp + "\u26A0\uFE0F Ти забагато питав...", 'clip_path': motion_result.get('clip_path')}
         else:
-            return {'response': timestamp + "\u274C Відео не вдалося проаналізувати: " + str(e_analysis)[:512] + '...', 'insignificant_frames': motion_result['insignificant_frames'], 'clip_path': motion_result.get('clip_path')}
+            return {'response': timestamp + "\u274C Відео не вдалося проаналізувати: " + str(e_analysis)[:512] + '...', 'clip_path': motion_result.get('clip_path')}
     finally:
         if use_files_api and 'video_bytes_obj' in locals() and hasattr(video_bytes_obj, 'name'):
             try:

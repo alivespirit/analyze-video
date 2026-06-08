@@ -105,9 +105,6 @@ def translate_result_paths(result: dict, local_output_dir: str, cifs_output_dir:
     if result.get("clip_path"):
         result["clip_path"] = rewrite(result["clip_path"])
 
-    if result.get("insignificant_frames"):
-        result["insignificant_frames"] = [rewrite(p) for p in result["insignificant_frames"]]
-
     if result.get("event_frames"):
         result["event_frames"] = [rewrite(p) for p in result["event_frames"]]
 
@@ -315,7 +312,7 @@ async def detect_motion_endpoint(req: DetectMotionRequest):
         return {"result": result, "logs": logs}
     except Exception as e:
         logger.error("[%s] Processing failed: %s", video_basename, e, exc_info=True)
-        return {"result": {"status": "error", "clip_path": None, "insignificant_frames": []}, "logs": [str(e)]}
+        return {"result": {"status": "error", "clip_path": None}, "logs": [str(e)]}
     finally:
         async with _task_lock:
             _active_tasks -= 1

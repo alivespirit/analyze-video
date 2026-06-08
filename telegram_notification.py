@@ -19,6 +19,54 @@ CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 
 KEEP_HIGHLIGHTS_CLIPS = os.getenv("KEEP_HIGHLIGHTS_CLIPS", "true").strip().lower() in ("true", "1", "yes")
 
+# A single event frame (no_person / no_significant_motion) is sent as a photo with the LLM
+# description as its caption. Telegram re-compresses photos for display anyway, so we downscale
+# the ~2.5 MB 4K frame to a sane size before sending (the on-disk frame is left full-res for the
+# dashboard). Telegram's hard caption limit is 1024 chars; we clamp to it as a safety net.
+TELEGRAM_FRAME_MAX_DIM = int(os.getenv("TELEGRAM_FRAME_MAX_DIM", "1920"))  # longest side; 0 disables
+TELEGRAM_FRAME_JPEG_QUALITY = int(os.getenv("TELEGRAM_FRAME_JPEG_QUALITY", "88"))
+TELEGRAM_CAPTION_MAX_CHARS = 1024
+
+# Send the representative event frame as a photo (with the description as caption). When false, the
+# description is delivered as a grouped text message instead — no image.
+SEND_INSIGNIFICANT_FRAMES = os.getenv("SEND_INSIGNIFICANT_FRAMES", "true").strip().lower() in ("true", "1", "yes")
+
+
+def _downscaled_jpeg_bytes(path: str) -> bytes:
+    """Return JPEG bytes of the frame, downscaled to TELEGRAM_FRAME_MAX_DIM on the longest side.
+
+    Telegram downscales/recompresses photos for display regardless, so shrinking a 4K frame here
+    cuts the upload from ~2.5 MB to a few hundred KB with no visible loss. Falls back to the raw
+    file bytes on any error (or when downscaling is disabled / the frame is already small enough).
+    """
+    try:
+        if TELEGRAM_FRAME_MAX_DIM > 0:
+            import cv2
+            img = cv2.imread(path)
+            if img is not None:
+                h, w = img.shape[:2]
+                scale = TELEGRAM_FRAME_MAX_DIM / max(h, w)
+                if scale < 1.0:
+                    img = cv2.resize(img, (int(w * scale), int(h * scale)), interpolation=cv2.INTER_AREA)
+                ok, buf = cv2.imencode(".jpg", img, [cv2.IMWRITE_JPEG_QUALITY, TELEGRAM_FRAME_JPEG_QUALITY])
+                if ok:
+                    return buf.tobytes()
+    except Exception as e:
+        logger.warning(f"Frame downscale failed for {path}: {e}; sending original.")
+    with open(path, "rb") as f:
+        return f.read()
+
+
+def _truncate_caption(text: str, limit: int = TELEGRAM_CAPTION_MAX_CHARS) -> str:
+    """Clamp a caption to Telegram's limit, cutting at a word boundary with an ellipsis."""
+    if not text or len(text) <= limit:
+        return text
+    cut = text[: limit - 1]
+    sp = cut.rfind(" ")
+    if sp > limit * 0.6:  # only break on a space if it isn't too far back
+        cut = cut[:sp]
+    return cut.rstrip() + "…"
+
 # --- State for Grouping "No Motion" Messages ---
 # These are safe to use as module-level globals because the executor has max_workers=1,
 # ensuring sequential processing and preventing race conditions.
@@ -1026,24 +1074,26 @@ async def button_callback(update, context):
         pass
 
 
-async def send_notifications(app, video_response, insignificant_frames, clip_path, file_path, file_basename, timestamp_text, preserve_media_on_failure: bool = False, allow_plain_fallback: bool = True):
+async def send_notifications(app, video_response, clip_path, file_path, file_basename, timestamp_text, preserve_media_on_failure: bool = False, allow_plain_fallback: bool = True, photo_frame: str | None = None):
     """
     Sends Telegram notifications based on analysis results, including:
     - Animation or message with button for significant motion.
-    - Grouped messages for insignificant/no motion events.
-    - Media group of insignificant motion frames.
+    - A single event-frame photo with description + button for no_person / no_significant_motion.
+    - Grouped messages for no-motion events (and frame-bearing events when SEND_INSIGNIFICANT_FRAMES is off).
     - Cleanup of temporary media files.
 
     Args:
         app (telegram.ext.Application): The configured Telegram application instance.
         video_response (str): The caption/message to send.
-        insignificant_frames (list[str]): Paths to insignificant frames to send as photos.
         clip_path (str|None): Path to the generated highlight clip, if any.
         file_path (str): Original video file path.
         file_basename (str): Basename of the original video file.
         timestamp_text (str): Short timestamp text used for buttons/captions.
         preserve_media_on_failure (bool): Preserve highlight media when send fails (for external retries).
         allow_plain_fallback (bool): If True, allow plain-message fallback with button when animation send fails. Typically False during initial/retry sends, then True after all retries are exhausted for a final notification attempt.
+        photo_frame (str|None): Path to a single representative event frame (no_person / no_significant_motion).
+            When set (and there is no highlight clip), the frame is sent as a standalone photo with
+            video_response as its caption and a "Глянути" button, instead of joining the grouped message.
     """
     global no_motion_group_message_id, no_motion_grouped_videos
 
@@ -1174,7 +1224,67 @@ async def send_notifications(app, video_response, insignificant_frames, clip_pat
                 except Exception as e_clean:
                     logger.warning(f"[{file_basename}] Cleanup step encountered an error: {e_clean}")
 
-        else: # --- This block now handles ALL non-significant videos ---
+        elif SEND_INSIGNIFICANT_FRAMES and photo_frame and os.path.exists(photo_frame):
+            # --- Single event frame (no_person / no_significant_motion) as a photo + caption + button ---
+            # A standalone photo (unlike a media group) can carry an inline keyboard, so the
+            # description and the "Глянути" full-video button live on one self-contained message.
+            keyboard = [[InlineKeyboardButton("Глянути", callback_data=callback_file)]]
+            reply_markup = InlineKeyboardMarkup(keyboard)
+            caption = _truncate_caption(video_response)
+            send_success = False
+            try:
+                sent_message = await app.bot.send_photo(
+                    chat_id=CHAT_ID,
+                    photo=_downscaled_jpeg_bytes(photo_frame),
+                    caption=caption,
+                    reply_markup=reply_markup,
+                    parse_mode='Markdown'
+                )
+                send_success = True
+            except telegram.error.BadRequest as bad_request_error:
+                logger.warning(f"[{file_basename}] BadRequest on frame photo: {bad_request_error}. Retrying with escaped Markdown.")
+                try:
+                    sent_message = await app.bot.send_photo(
+                        chat_id=CHAT_ID,
+                        photo=_downscaled_jpeg_bytes(photo_frame),
+                        caption=_truncate_caption(escape_markdown(caption, version=1)),
+                        reply_markup=reply_markup,
+                        parse_mode='Markdown'
+                    )
+                    send_success = True
+                except Exception as retry_error:
+                    logger.error(f"[{file_basename}] Failed to send frame photo after escaping Markdown: {retry_error}.", exc_info=True)
+            except Exception as e_send:
+                logger.error(f"[{file_basename}] Failed to send frame photo: {e_send}.", exc_info=True)
+
+            if not send_success:
+                # Photo couldn't be sent. Fall back to a plain text message with the description and
+                # button (only when allowed); otherwise raise so the caller can schedule retries.
+                if not allow_plain_fallback:
+                    raise telegram.error.TelegramError(f"[{file_basename}] Frame photo send failed; deferring for retry.")
+                logger.info(f"[{file_basename}] Falling back to plain text message with button for frame event.")
+                try:
+                    sent_message = await app.bot.send_message(
+                        chat_id=CHAT_ID, text=caption, reply_markup=reply_markup, parse_mode='Markdown'
+                    )
+                    send_success = True
+                except telegram.error.BadRequest:
+                    sent_message = await app.bot.send_message(
+                        chat_id=CHAT_ID, text=escape_markdown(caption, version=1),
+                        reply_markup=reply_markup, parse_mode='Markdown'
+                    )
+                    send_success = True
+
+            if send_success and sent_message:
+                logger.info(f"[{file_basename}] Sent event frame photo with description and button.")
+                try:
+                    async with message_map_lock:
+                        video_message_map[f"{CHAT_ID}:{sent_message.message_id}"] = {"path": file_path, "caption": caption, "mode": "Markdown", "sent_yyyymmdd": today_yyyymmdd()}
+                        save_message_map_to_disk()
+                except Exception as map_e:
+                    logger.warning(f"[{file_basename}] Failed to persist frame photo mapping: {map_e}")
+
+        else: # --- This block now handles ALL non-significant videos without a photo frame ---
             video_info = {'text': video_response, 'callback': callback_file, 'timestamp': timestamp_text}
 
             if no_motion_group_message_id and len(no_motion_grouped_videos) < 4:
@@ -1301,52 +1411,6 @@ async def send_notifications(app, video_response, insignificant_frames, clip_pat
                         logger.warning(f"[{file_basename}] Failed to persist group state after clearing: {e4}")
                     # Re-raise to allow caller to schedule retries
                     raise
-
-        if insignificant_frames:
-            logger.info(f"[{file_basename}] Found {len(insignificant_frames)} insignificant motion frames to send.")
-            media_group = []
-            frame_data = []
-            for frame_path in insignificant_frames:
-                try:
-                    with open(frame_path, 'rb') as photo_file:
-                        frame_data.append(photo_file.read())
-                except Exception as e:
-                    logger.error(f"[{file_basename}] Failed to read frame file {frame_path}: {e}")
-
-            for data in frame_data:
-                media_group.append(InputMediaPhoto(media=data))
-
-            if media_group:
-                try:
-                    reply_to_id = None
-                    if sent_message:
-                        reply_to_id = sent_message.message_id
-                    elif no_motion_group_message_id:
-                        reply_to_id = no_motion_group_message_id
-
-                    if reply_to_id:
-                        await app.bot.send_media_group(
-                            chat_id=CHAT_ID,
-                            media=media_group,
-                            reply_to_message_id=reply_to_id,
-                            caption=f"_{timestamp_text}_ \U0001F4F8",
-                            parse_mode='Markdown'
-                        )
-                        logger.info(f"[{file_basename}] Sent media group of {len(media_group)} insignificant frames as a reply.")
-                    else:
-                        logger.warning(f"[{file_basename}] No message ID to reply to. Sending media group without reply.")
-                        await app.bot.send_media_group(chat_id=CHAT_ID, media=media_group, caption=f"_{timestamp_text}_ \U0001F4F8", parse_mode='Markdown')
-
-                except Exception as e:
-                    logger.error(f"[{file_basename}] Failed to send media group: {e}", exc_info=True)
-
-            for frame_path in insignificant_frames:
-                if os.path.exists(frame_path):
-                    try:
-                        os.remove(frame_path)
-                        logger.info(f"[{file_basename}] Deleted temporary frame: {frame_path}")
-                    except Exception as e:
-                        logger.error(f"[{file_basename}] Failed to delete temporary frame {frame_path}: {e}")
 
         logger.info(f"[{file_basename}] Telegram interaction finished.")
 
