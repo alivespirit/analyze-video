@@ -141,7 +141,7 @@ def worker_available() -> bool:
     if was_ok and not _last_health_ok:
         logger.warning("Worker became unavailable.")
     elif not was_ok and _last_health_ok:
-        logger.info("Worker is back online.")
+        logger.info("Worker is online.")
     return _last_health_ok
 
 

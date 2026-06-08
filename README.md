@@ -34,6 +34,12 @@ This project is a Python-based application that monitors a folder for new video 
   - **Time-Based Model Selection**: Automatically switches between different Gemini models (e.g., Pro vs. Flash) based on the time of day for cost optimization.
   - **Fallback Models**: Includes logic to fall back to secondary and final models if the primary one fails.
   - **Custom Prompts**: Uses a `config/prompt.txt` file for tailored analysis.
+- **Local LLM Frame Analysis (Ollama, Optional)**:
+  - **Offloads low-motion clips from Gemini**: `no_person` and `no_significant_motion` videos (typically wind, shadows, sun) are described by a local vision model running on the worker GPU instead of consuming the limited Gemini daily quota — which is then reserved for `significant_motion` clips.
+  - **Runs at all hours**: No quota, so these clips get a real description even off-peak (where Gemini was previously skipped with a placeholder).
+  - **Two operating modes**: a single vision model, or a two-stage pipeline (a fast vision model grounds the scene, then a dedicated language model rewrites it in clean, idiomatic Ukrainian).
+  - **Saved event frames**: Analyzes the representative frames `detect_motion` already saves for each low-motion event (single- or multi-frame in one call).
+  - **Graceful fallback**: If Ollama is unreachable, the pipeline falls back to the original placeholder messages — nothing breaks.
 - **Robust Telegram Integration**:
   - **Grouped Notifications**: Combines multiple insignificant/no-motion events into a single, editable Telegram message to reduce clutter.
   - **Interactive Callbacks**: Allows users to request the full original video via inline buttons.
@@ -53,7 +59,7 @@ This project is a Python-based application that monitors a folder for new video 
   - Output filenames: `{video_stem}_pose_e{event}_p{display_id}_{direction}.mp4`. Clips are letterboxed to fixed even dimensions for libx264 compatibility.
   - Knobs: `POSE_MODEL_PATH`, `POSE_CONF_THRESHOLD`, `POSE_IMGSZ`, `POSE_CROP_PADDING`, `POSE_MAX_FRAMES_PER_PERSON`, `POSE_ABOVE_LINE_Y` (suppress crops whose bbox bottom falls below this Y, where pose quality degrades).
 - **Performance & Stability**:
-  - **Dual-Executor Design**: Uses separate, single-worker thread pools for CPU-bound (video analysis) and I/O-bound (API calls) tasks to prevent system overload.
+  - **Status-Routed Executor Lanes**: A single-worker pool handles CPU-bound motion detection, while the analysis stage is split across three independent pools routed by event status, so a slow lane never head-of-line blocks an instant one: `fast` (instant formatting — `no_motion`, `gate_crossing`), `llm` (local Ollama analysis — `no_person`, `no_significant_motion`), and `gemini` (Gemini API — `significant_motion`). Net effect: a gate crossing returns instantly while local-LLM clips are still processing, and Gemini runs in parallel with the local LLM rather than behind it. Pool sizes are set via `FAST_ANALYSIS_WORKERS` (default 2), `LOCAL_LLM_MAX_WORKERS` (default 1), and `GEMINI_MAX_WORKERS` (default 1).
   - **Graceful Shutdown & Auto-Restart**: Automatically restarts the script if any of the Python files is modified, with robust shutdown logic.
   - **Battery Monitoring**: Appends battery status to notifications if the device is on battery power (requires `psutil`).
   - **Low Hardware Requirements**: Optimized to be efficient without losing accuracy, tested on Intel Core m5 CPU with 8Gb of RAM.
@@ -210,9 +216,10 @@ pip install -r requirements.txt
        - After a gate crossing is confirmed, these crops are compared against gallery embeddings using Intel's `person-reidentification-retail-0288` model.
        - Gallery embeddings are cached on disk at `temp/` per gallery path (configurable via `REID_CACHE_DIR`) to avoid recomputation across worker processes.
        - If a positive match is found, the gate message includes `XX%` and (optionally) the best crop is saved to the daily output folder.
-   - **AI Analysis (I/O-Bound Task):** The result is passed to the `io_executor`.
-     - For gate crossings or off-peak hours, Gemini is skipped.
-     - For significant motion during peak hours, the highlight clip is sent to Gemini for a text description.
+   - **AI Analysis (I/O-Bound Task):** The result is routed to one of three status-based executor lanes (see "Status-Routed Executor Lanes" above).
+     - Gate crossings and no-motion events return instantly (pure formatting, no external call).
+     - `no_person` / `no_significant_motion` clips go to the local Ollama model for a description (at all hours; see "Local LLM Frame Analysis" below). If Ollama is unavailable, a placeholder is used.
+     - `significant_motion` clips are sent to Gemini, with time-based model selection.
 
 3. **Telegram Notification:**
    - A `telegram_lock` ensures that messages are sent or edited one at a time.
@@ -369,6 +376,103 @@ EOF
 ```
 
 See [worker/README.md](worker/README.md) for full setup instructions.
+
+---
+
+## Local LLM Frame Analysis (Optional)
+
+`no_person` and `no_significant_motion` clips (wind, shadows, sun) are described by a local [Ollama](https://ollama.com) vision model instead of Gemini, reserving the limited Gemini quota for `significant_motion`. The model analyzes the event frames `detect_motion` saves to the daily directory. If Ollama is unreachable, the pipeline falls back to the original placeholder messages.
+
+### Worker setup
+
+Run Ollama on the worker (the machine with the GPU) and pull a vision model:
+
+```bash
+# Listen on the LAN (not just localhost) and keep the model resident
+OLLAMA_HOST=0.0.0.0:11434 ollama serve
+ollama pull qwen3-vl:2b-instruct
+```
+
+The client sends `keep_alive` per request (from `OLLAMA_KEEP_ALIVE`), so the model stays loaded between calls.
+
+### Enable in the master's `.env`
+
+```env
+LOCAL_FRAME_ANALYSIS_ENABLED=true          # default true
+OLLAMA_URL=http://10.0.0.2:11434           # worker's Ollama endpoint
+OLLAMA_MODEL=qwen3-vl:2b-instruct          # vision model
+OLLAMA_TIMEOUT=60
+OLLAMA_KEEP_ALIVE=-1                        # keep the model resident (or e.g. 30m)
+```
+
+Prompts are read on every call (edits apply without a restart) and default to English: `config/prompt_frame.txt` (single frame) and `config/prompt_frame_multi.txt` (multi-frame). Override the paths with `OLLAMA_PROMPT_FILE` / `OLLAMA_MULTI_PROMPT_FILE` to swap prompts without editing the defaults.
+
+### Two operating modes
+
+**1. Single model.** One vision model produces the final description. With `OLLAMA_MULTI_FRAME=true` (default), a clip's frames go to the model in one multi-image call (sampled down to `OLLAMA_MULTI_MAX_FRAMES`, default 4); set it to `false` for legacy per-frame analysis plus a text-only merge. Use a vision model whose target-language output you trust, and point the prompt-file env vars at a prompt in that language.
+
+Example — a larger model (`gemma4:12b`) writing a longer, narrative Ukrainian description directly (requires a recent Ollama with gemma4 support):
+
+```env
+OLLAMA_MODEL=gemma4:12b-it-q4_K_M
+OLLAMA_REFINE_MODEL=                        # empty — single-model mode
+OLLAMA_PROMPT_FILE=config/prompt_frame_long_uk.txt
+OLLAMA_MULTI_PROMPT_FILE=config/prompt_frame_long_uk.txt
+OLLAMA_NUM_PREDICT=-1                        # let the model finish its narrative
+OLLAMA_MAX_CHARS=4000                        # allow long-form output (default 300 would retry it as a ramble)
+OLLAMA_THINK=false                           # reasoning on is far slower; off is acceptable for these low-priority clips
+OLLAMA_TEMPERATURE=0.8
+OLLAMA_REPEAT_PENALTY=1.1                     # lower than default — kinder to long prose
+OLLAMA_TIMEOUT=360                           # long-form generation is slow on CPU-bound hardware
+OLLAMA_KEEP_ALIVE=30m
+```
+
+**2. Two-stage (recommended for clean Ukrainian).** Set `OLLAMA_REFINE_MODEL` to enable a two-stage pipeline: a fast vision model describes the frames in English (grounding only), then a dedicated language model rewrites them into one cheeky, idiomatic, russism-free Ukrainian sentence via a text-only call. This gives the cleanest Ukrainian, because a native-language text model writes the output rather than the vision model.
+
+```env
+# Stage 1 — vision (English grounding)
+OLLAMA_MODEL=qwen3-vl:2b-instruct
+OLLAMA_PROMPT_FILE=config/prompt_frame.txt
+
+# Stage 2 — refine (Ukrainian)
+OLLAMA_REFINE_MODEL=hf.co/lapa-llm/lapa-v0.1.2-instruct-GGUF:Q4_K_M
+OLLAMA_REFINE_NUM_GPU=0                     # run the refiner on CPU, leaving the GPU to the vision model
+OLLAMA_REFINE_KEEP_ALIVE=-1                 # keep the (0-VRAM) refiner resident; avoids its cold load
+OLLAMA_MAX_CHARS=450                        # Ukrainian runs longer than the default 300
+OLLAMA_TIMEOUT=200
+```
+
+The refine prompt is `config/prompt_frame_refine_uk.txt` (uses a `{descriptions}` placeholder); override with `OLLAMA_REFINE_PROMPT_FILE`.
+
+### Tuning knobs
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `OLLAMA_ATTEMPTS` | `2` | Total tries per call (retries on request error, empty, or over-length response) |
+| `OLLAMA_IMAGE_MAX_DIM` | `1280` | Downscale a frame's longest side before sending (a 4K frame's vision-patch count is slow to encode); `0` disables |
+| `OLLAMA_TEMPERATURE` / `OLLAMA_TOP_K` / `OLLAMA_TOP_P` | `0.8` / `20` / `0.92` | Sampling; the tight top_k/top_p clamp keeps the high temperature coherent |
+| `OLLAMA_NUM_PREDICT` | `120` | Output length cap (`-1` for unbounded — required for reasoning models) |
+| `OLLAMA_REPEAT_PENALTY` | `1.3` | Breaks repetition loops |
+| `OLLAMA_MAX_CHARS` | `300` | A longer response is treated as a rambling loop and retried; raise it for longer-form output |
+| `OLLAMA_THINK` | unset | Set `true` for reasoning models (use with `OLLAMA_NUM_PREDICT=-1`); better grounding at a large latency cost |
+
+### Prompt files
+
+All prompts live in `config/` and are re-read on every call (edits apply without a restart). The frame prompts below can each be overridden with the env var shown; the Gemini prompt path is fixed.
+
+| File | Lang | Used by | Override env var |
+|---|---|---|---|
+| `prompt.txt` | UK | **Gemini** analysis of `significant_motion` highlight clips | *(fixed path)* |
+| `prompt_frame.txt` | EN | Single-frame local analysis; also **stage 1 (vision)** of the two-stage pipeline | `OLLAMA_PROMPT_FILE` |
+| `prompt_frame_multi.txt` | EN | Multi-frame local analysis (one multi-image call) | `OLLAMA_MULTI_PROMPT_FILE` |
+| `prompt_frame_combine.txt` | EN | Legacy per-frame **merge** (only when `OLLAMA_MULTI_FRAME=false`) | `OLLAMA_COMBINE_PROMPT_FILE` |
+| `prompt_frame_uk.txt` | UK | Ukrainian single-frame variant (single-model UK output) | `OLLAMA_PROMPT_FILE` |
+| `prompt_frame_multi_uk.txt` | UK | Ukrainian multi-frame variant | `OLLAMA_MULTI_PROMPT_FILE` |
+| `prompt_frame_combine_uk.txt` | UK | Ukrainian legacy merge variant | `OLLAMA_COMBINE_PROMPT_FILE` |
+| `prompt_frame_refine_uk.txt` | UK | **Stage 2 (refine)** of the two-stage pipeline; has a `{descriptions}` placeholder | `OLLAMA_REFINE_PROMPT_FILE` |
+| `prompt_frame_long_uk.txt` | UK | Long-form narrative Ukrainian for a single larger model (e.g. gemma4:12b) | `OLLAMA_PROMPT_FILE` / `OLLAMA_MULTI_PROMPT_FILE` |
+
+The single-frame vs multi-frame prompt is chosen automatically per clip (1 frame → single, 2+ → multi). The `_uk` and `long_uk` files are alternatives you point the same env vars at — only the prompts referenced by your active config are used.
 
 ---
 

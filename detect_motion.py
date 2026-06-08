@@ -1494,6 +1494,7 @@ def detect_motion(input_video_path, output_dir, fast_processing: bool = False):
     logger.info(f"[{file_basename}] Found {len(sub_clips)} raw motion event(s). Filtering by duration...")
     significant_sub_clips = []
     insignificant_motion_frames = []
+    event_frames = []  # All saved event frames (for local LLM analysis), independent of SEND_INSIGNIFICANT_FRAMES
     all_shorter_than_insignificant = True
     for start_frame, end_frame in sub_clips:
         duration_frames = end_frame - start_frame
@@ -1520,6 +1521,8 @@ def detect_motion(input_video_path, output_dir, fast_processing: bool = False):
                         tag="insignificant",
                         classes=DETECT_CLASSES,
                     )
+                    if frame_path:
+                        event_frames.append(frame_path)
                     if frame_path and SEND_INSIGNIFICANT_FRAMES:
                         insignificant_motion_frames.append(frame_path)
             else:
@@ -1542,7 +1545,7 @@ def detect_motion(input_video_path, output_dir, fast_processing: bool = False):
         elapsed_time = time.time() - start_time
         logger.info(f"[{file_basename}] Motion detection took {elapsed_time:.2f} seconds.")
         maybe_log_profile("no_significant_motion")
-        return {'status': 'no_significant_motion', 'clip_path': None, 'insignificant_frames': insignificant_motion_frames}
+        return {'status': 'no_significant_motion', 'clip_path': None, 'insignificant_frames': insignificant_motion_frames, 'event_frames': event_frames}
 
     # Save highlight clip to daily subfolder (YYYYMMDD) instead of directly to output_dir
     date_folder = datetime.now().strftime("%Y%m%d")
@@ -2545,6 +2548,8 @@ def detect_motion(input_video_path, output_dir, fast_processing: bool = False):
                             tag="no_person",
                             classes=DETECT_CLASSES,
                         )
+                        if frame_path:
+                            event_frames.append(frame_path)
                         if frame_path and SEND_INSIGNIFICANT_FRAMES:
                             insignificant_motion_frames.append(frame_path)
                 except Exception as e:
@@ -2556,7 +2561,7 @@ def detect_motion(input_video_path, output_dir, fast_processing: bool = False):
         elapsed_time = time.time() - start_time
         logger.info(f"[{file_basename}] No significant events with person in ROI found. Full processing took {elapsed_time:.2f} seconds.")
         maybe_log_profile("no_person")
-        return {'status': 'no_person', 'clip_path': None, 'insignificant_frames': insignificant_motion_frames}
+        return {'status': 'no_person', 'clip_path': None, 'insignificant_frames': insignificant_motion_frames, 'event_frames': event_frames}
 
     # Finalize CRF-based H.264 writer
     logger.debug("[%s] Finalizing highlight clip...", file_basename)
@@ -2903,6 +2908,7 @@ def detect_motion(input_video_path, output_dir, fast_processing: bool = False):
         'status': final_status,
         'clip_path': output_filename,
         'insignificant_frames': insignificant_motion_frames,
+        'event_frames': event_frames,
         'persons_detected': num_persons,
         'cars_detected': num_cars,
         'crossing_direction': crossing_direction,

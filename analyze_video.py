@@ -12,9 +12,11 @@ logger = logging.getLogger()
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 from path_utils import parse_datetime_from_path, format_timestamp_for_caption
+from analyze_frame import analyze_frames_local
 
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 USERNAME = os.getenv("TELEGRAM_NOTIFY_USERNAME")
+LOCAL_FRAME_ANALYSIS_ENABLED = os.getenv("LOCAL_FRAME_ANALYSIS_ENABLED", "true").lower() == "true"
 
 NO_ACTION_RESPONSES = [
     "Нема шо дивитись",
@@ -133,15 +135,43 @@ def analyze_video(motion_result, video_path):
         }
     # -----------------------------------------
 
-    # --- Skip Gemini analysis during off-peak hours to keep under rate limits ---
-    if now.hour < 9 or now.hour > 19:
+    # --- Analyze low-motion videos with the local vision model (qwen3-vl on the worker) ---
+    # These statuses (shadows/wind/passing objects) are the bulk of recordings and would otherwise
+    # burn scarce Gemini quota. The local model has no quota, so we run it at any hour and reserve
+    # Gemini for `significant_motion`. Falls back to a placeholder if the local model is unavailable.
+    if detected_motion_status in ("no_person", "no_significant_motion"):
+        event_frames = motion_result.get('event_frames') or []
+        description = analyze_frames_local(event_frames, file_basename) if event_frames else None
+        low_res_prefix = "\U0001F52C" if motion_result.get('low_res_clip') else ""
+        if description:
+            # analyze_frame.py already logs the description (with timing per stage); no need to repeat it here.
+            persons = motion_result.get('persons_detected', 0)
+            cars = motion_result.get('cars_detected', 0)
+            details = []
+            if persons > 0:
+                details.append(f"{persons} \U0001F9CD")
+            if cars > 0:
+                details.append(f"{cars} \U0001F699")
+            counts = f" ({', '.join(details)})" if details else ""
+            emoji = "❎" if detected_motion_status == "no_person" else "❇️"
+            return {
+                'response': timestamp + f"{emoji}{low_res_prefix} \U0001F916 " + description + counts + reid_text,
+                'insignificant_frames': motion_result.get('insignificant_frames', []),
+                'clip_path': motion_result.get('clip_path')
+            }
+        # Fallback: local model unavailable/failed — keep the original placeholder messages.
+        logger.info(f"[{file_basename}] Local frame analysis unavailable; using placeholder.")
+        if detected_motion_status == "no_significant_motion":
+            return {'response': timestamp + "\U0001F518 Шось там цейво...", 'insignificant_frames': motion_result.get('insignificant_frames', []), 'clip_path': None}
+        else:  # no_person
+            return {'response': timestamp + "\U0001F532 Шось нікого...", 'insignificant_frames': motion_result.get('insignificant_frames', []), 'clip_path': motion_result.get('clip_path')}
+    # -----------------------------------------
+
+    # --- Skip Gemini analysis during off-peak hours to keep under rate limits (disabled if local frame analysis is enabled) ---
+    if not LOCAL_FRAME_ANALYSIS_ENABLED and (now.hour < 9 or now.hour > 19):
         logger.info(f"[{file_basename}] Skipping Gemini analysis (off-peak hours).")
         if detected_motion_status == "error":
             return {'response': timestamp + "\U0001F4A2 Шось неясно", 'insignificant_frames': motion_result['insignificant_frames'], 'clip_path': None}
-        elif detected_motion_status == "no_significant_motion":
-            return {'response': timestamp + "\U0001F518 Шось там цейво...", 'insignificant_frames': motion_result['insignificant_frames'], 'clip_path': None}
-        elif detected_motion_status == "no_person":
-            return {'response': timestamp + "\U0001F532 Шось нікого...", 'insignificant_frames': motion_result['insignificant_frames'], 'clip_path': motion_result.get('clip_path')}
         elif detected_motion_status == "significant_motion":
             # --- MODIFIED: Append detected object counts to the off-peak message ---
             persons = motion_result.get('persons_detected', 0)

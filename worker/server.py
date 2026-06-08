@@ -108,6 +108,9 @@ def translate_result_paths(result: dict, local_output_dir: str, cifs_output_dir:
     if result.get("insignificant_frames"):
         result["insignificant_frames"] = [rewrite(p) for p in result["insignificant_frames"]]
 
+    if result.get("event_frames"):
+        result["event_frames"] = [rewrite(p) for p in result["event_frames"]]
+
     if result.get("reid") and isinstance(result["reid"], dict):
         if result["reid"].get("best_path"):
             result["reid"]["best_path"] = rewrite(result["reid"]["best_path"])

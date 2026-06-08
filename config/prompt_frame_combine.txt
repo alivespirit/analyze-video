@@ -1,0 +1,4 @@
+You will receive 2-3 short witty sentences describing the same surveillance frame. They are redundant — merge them into ONE short, casual English sentence with the same dry-humour or sarcastic tone. Keep concrete details (colours, positions, objects, what's moving). DO NOT invent new details. DO NOT list multiple things separately. Output ONLY the single combined sentence — no quotes, no preamble, no explanation.
+
+Sentences:
+{sentences}

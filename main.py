@@ -394,15 +394,29 @@ except Exception as e:
 # We limit the pool to 1 worker. This effectively creates a processing queue,
 # preventing multiple CPU-heavy 'detect_motion' tasks from running simultaneously
 # and overwhelming the system.
-max_workers = 1 
+max_workers = 1
+# Analysis runs in separate concurrency lanes, picked per video by motion status (see process loop).
+# Each lane is its own pool so lanes can't head-of-line block each other, and each pool's size is the
+# natural rate-limiter for the resource it uses:
+#   - fast:   instant work (no_motion, gate_crossing) — pure formatting, no external call
+#   - llm:    local vision LLM (Ollama) — the worker's single GPU serializes, so default 1
+#   - gemini: Gemini API — keep small to stay under the RPM quota, default 1
+# Effect: a gate_crossing returns instantly even while several no_person clips sit in the local LLM,
+# and Gemini (significant_motion) runs in parallel with the local LLM (no_person) instead of behind it.
+FAST_ANALYSIS_WORKERS = int(os.getenv("FAST_ANALYSIS_WORKERS", "2"))
+LOCAL_LLM_MAX_WORKERS = int(os.getenv("LOCAL_LLM_MAX_WORKERS", "1"))
+GEMINI_MAX_WORKERS = int(os.getenv("GEMINI_MAX_WORKERS", "1"))
 try:
     # A dedicated executor for CPU-bound motion detection to ensure it runs one at a time.
     motion_executor = concurrent.futures.ThreadPoolExecutor(max_workers=max_workers)
-    logger.info(f"ThreadPoolExecutor for motion detection initialized with a single worker.")
+    logger.info("ThreadPoolExecutor for motion detection initialized with a single worker.")
 
-    # A general-purpose executor for I/O-bound tasks like Gemini calls.
-    io_executor = concurrent.futures.ThreadPoolExecutor(max_workers=max_workers)
-    logger.info(f"ThreadPoolExecutor for I/O tasks initialized with a single worker.")
+    # I/O-bound analysis lanes (see note above).
+    fast_executor = concurrent.futures.ThreadPoolExecutor(max_workers=FAST_ANALYSIS_WORKERS)
+    llm_executor = concurrent.futures.ThreadPoolExecutor(max_workers=LOCAL_LLM_MAX_WORKERS)
+    gemini_executor = concurrent.futures.ThreadPoolExecutor(max_workers=GEMINI_MAX_WORKERS)
+    logger.info("Analysis executors initialized (fast=%d, local_llm=%d, gemini=%d).",
+                FAST_ANALYSIS_WORKERS, LOCAL_LLM_MAX_WORKERS, GEMINI_MAX_WORKERS)
 except Exception as e:
      logger.critical(f"Failed to initialize ThreadPoolExecutors: {e}", exc_info=True)
      exit(1)
@@ -491,8 +505,9 @@ class FileHandler(FileSystemEventHandler):
 
         This function orchestrates the entire pipeline for a single video:
         1.  Waits for the file to be fully written to disk.
-        2.  Schedules `detect_motion` (CPU-bound) in its dedicated executor.
-        3.  Schedules `analyze_video` (I/O-bound) in its dedicated executor.
+        2.  Runs motion detection: async on the remote worker, or in `motion_executor` (CPU-bound) locally.
+        3.  Runs `analyze_video` in a status-routed concurrency lane (fast / local-LLM / Gemini) so
+            instant work isn't blocked by slow analysis and Gemini runs in parallel with the local LLM.
         4.  Acquires a lock to safely interact with Telegram.
         5.  Sends the results (animation, text, photos) to the Telegram chat.
         6.  Groups messages for insignificant motion to avoid spam.
@@ -610,11 +625,19 @@ class FileHandler(FileSystemEventHandler):
                 motion_result = await motion_future
             self.logger.info(f"[{file_basename}] Motion detection complete. Status: {motion_result.get('status')}")
 
-            # 2. Run I/O-bound Gemini analysis in the multi-worker executor.
-            # This can run in parallel with the next video's motion detection.
-            self.logger.info(f"[{file_basename}] Queuing motion analysis...")
+            # 2. Run the analysis stage in a status-specific concurrency lane so instant work
+            # (gate_crossing/no_motion) is never queued behind slow local-LLM analysis, and Gemini
+            # (significant_motion) runs in parallel with the local LLM (no_person) — see executor note.
+            status = motion_result.get('status')
+            if status in ("no_motion", "gate_crossing"):
+                analysis_executor, lane = fast_executor, "fast"
+            elif status in ("no_person", "no_significant_motion"):
+                analysis_executor, lane = llm_executor, "llm"
+            else:  # significant_motion, error, or unknown → Gemini path (or instant off-peak placeholder)
+                analysis_executor, lane = gemini_executor, "gemini"
+            self.logger.info(f"[{file_basename}] Queuing motion analysis ({status} → {lane} lane)...")
             analysis_result = await current_loop.run_in_executor(
-                io_executor, analyze_video, motion_result, file_path
+                analysis_executor, analyze_video, motion_result, file_path
             )
 
             video_response = analysis_result['response']
@@ -1550,7 +1573,8 @@ async def main():
             logger.info("Fast shutdown for restart: Not waiting for current analysis to finish.")
             # Shutdown immediately without waiting for the worker.
             motion_executor.shutdown(wait=False, cancel_futures=True)
-            io_executor.shutdown(wait=False, cancel_futures=True)
+            for ex in (fast_executor, llm_executor, gemini_executor):
+                ex.shutdown(wait=False, cancel_futures=True)
             logger.info("Executors issued fast shutdown command.")
 
             logger.info("RESTART_REQUESTED is True. Executing self-restart...")
@@ -1572,7 +1596,8 @@ async def main():
             logger.info("Graceful shutdown: Allowing current analysis to finish...")
             # For a normal shutdown (e.g., Ctrl+C), we wait for the current task to complete.
             motion_executor.shutdown(wait=True, cancel_futures=False)
-            io_executor.shutdown(wait=True, cancel_futures=False)
+            for ex in (fast_executor, llm_executor, gemini_executor):
+                ex.shutdown(wait=True, cancel_futures=False)
             logger.info("Main application finished cleanly (no restart requested).")
 
 

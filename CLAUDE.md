@@ -33,11 +33,15 @@ There is no automated test suite. Validation is done via `tools/validate_log_rep
 
 **Pipeline**: File monitoring → Motion detection (local or remote worker) → AI analysis → Telegram notification
 
-**Dual-executor pattern** (critical design choice):
+**Executor lanes** (critical design choice):
 - `motion_executor`: ThreadPoolExecutor(max_workers=1) — CPU-bound local motion detection runs serially
-- `io_executor`: ThreadPoolExecutor(max_workers=4) — I/O-bound Gemini/Telegram calls run in parallel
+- The analysis stage runs in one of **three status-routed lanes** (separate pools so they can't head-of-line block each other; each pool size is the rate-limiter for its resource):
+  - `fast_executor` (`FAST_ANALYSIS_WORKERS`, default 4) — instant work: `no_motion`, `gate_crossing` (pure formatting, no external call)
+  - `llm_executor` (`LOCAL_LLM_MAX_WORKERS`, default 1) — `no_person`, `no_significant_motion` (local Ollama vision LLM; the worker's single GPU serializes, so 1)
+  - `gemini_executor` (`GEMINI_MAX_WORKERS`, default 1) — `significant_motion`, `error` (Gemini API; small to stay under RPM quota; off-peak these return instant placeholders)
+  - Routing is by `motion_result['status']` in `main.py`'s process loop. Net effect: a `gate_crossing` returns instantly even while several `no_person` clips sit in the local LLM, and Gemini runs **in parallel** with the local LLM instead of behind it.
 - Remote worker dispatch is fully async (no executor slot consumed while waiting on HTTP)
-- Both executors are driven by a single asyncio event loop in `main.py`
+- All executors are driven by a single asyncio event loop in `main.py`
 
 ### Core Modules
 
@@ -45,7 +49,8 @@ There is no automated test suite. Validation is done via `tools/validate_log_rep
 |--------|------|
 | `main.py` | Entry point, asyncio orchestration, watchdog file monitoring, Telegram bot setup, processing ledger, auto-restart, retention cleanup, Tesla SoC scheduler |
 | `detect_motion.py` | Core vision: background subtraction, YOLO tracking (OpenVINO), gate crossing detection, ReID triggering, highlight clip generation, car speed estimation |
-| `analyze_video.py` | Gemini API calls with dynamic model selection (time-based Pro vs Flash), fallback chains, prompt loading from `config/prompt.txt` |
+| `analyze_video.py` | Gemini API calls with dynamic model selection (time-based Pro vs Flash), fallback chains, prompt loading from `config/prompt.txt`. Routes `no_person`/`no_significant_motion` videos to the local vision model (`analyze_frame.py`) instead of Gemini |
+| `analyze_frame.py` | Local frame description via Ollama (qwen3-vl on the worker GPU). Analyzes saved event frames for low-motion videos; English output from `config/prompt_frame.txt`. Falls back to a placeholder when Ollama is unavailable |
 | `telegram_notification.py` | Message delivery with retry logic, grouped notifications, inline callbacks for full video, media validation. Respects `KEEP_HIGHLIGHTS_CLIPS` for clip cleanup. |
 | `person_id.py` | Intel OpenVINO ReID model, gallery embedding with disk caching (keyed by gallery path + model path), negative gallery support, cosine similarity matching |
 | `path_utils.py` | Timestamp extraction from video filenames |
@@ -139,6 +144,41 @@ A JSON ledger (`temp/processing_ledger.json`) tracks file processing status. Aft
 ### Fast Processing Mode
 
 When motion queue backlog exceeds a threshold, adaptive frame skipping kicks in — controlled by `FAST_MOTION_STRIDE`, `FAST_TRACK_FULL_UNTIL_SECONDS`, `FAST_TRACK_SKIP_FROM_SECONDS` env vars.
+
+### Local Frame Analysis (Ollama / qwen3-vl)
+
+Wind/sun produce many low-motion recordings (`no_person`, `no_significant_motion`) that used to consume Gemini's daily quota. These are now described by a local vision model (Ollama) running on the worker GPU, freeing Gemini for `significant_motion` videos. `analyze_frame.py` reads the saved event frames, base64-encodes them, and POSTs to Ollama's `/api/generate`. Runs at all hours (no quota); falls back to the original placeholder messages if Ollama is unreachable.
+
+**Multi-frame mode (default).** When a video has ≥2 event frames they go to Ollama in ONE multi-image call (multi-frame prompt), so the model sees the whole short clip and can narrate progression and dedup naturally — more coherent than per-frame, and for reasoning models much faster (one reasoning pass instead of N + a merge). A 1-frame video is a single-image call. Set `OLLAMA_MULTI_FRAME=false` to fall back to the legacy per-frame analysis + text-only combine merge.
+
+`detect_motion` always collects saved event-frame paths into the result dict field `event_frames` (independent of `SEND_INSIGNIFICANT_FRAMES`, which still governs Telegram sending). The worker translates these paths to master-perspective in `translate_result_paths`.
+
+Key env vars (master): `LOCAL_FRAME_ANALYSIS_ENABLED` (default `true`), `OLLAMA_URL` (default `http://10.0.0.2:11434`), `OLLAMA_MODEL` (default `qwen3-vl:2b-instruct` — use the `-instruct` variant; the plain `qwen3-vl:2b` has mandatory chain-of-thought that breaks `num_predict` and adds 30-60s of latency), `OLLAMA_TIMEOUT` (default `60`), `OLLAMA_ATTEMPTS` (default `2`, total tries per frame — retries on a request error or empty response), `OLLAMA_IMAGE_MAX_DIM` (default `1280`, longest side; frames are downscaled before sending — a 4K frame's huge vision-patch count costs the model ~30s to encode, vs ~11s at 1280 / ~6s at 896, with grounding intact; the on-disk frame is untouched; set `0` to disable). Sampling knobs: `OLLAMA_TEMPERATURE` (default `0.8`, high for livelier/funnier output), `OLLAMA_TOP_K` (default `20`) and `OLLAMA_TOP_P` (default `0.92`) — the tight top_k/top_p clamp is what keeps the high temperature coherent (blocks the long-tail tokens that otherwise cause the 2B model to ramble/loop), `OLLAMA_NUM_PREDICT` (default `80`, caps output length — prevents the small model from rambling until it fills the context and gets aborted), `OLLAMA_REPEAT_PENALTY` (default `1.3`), `OLLAMA_MAX_CHARS` (default `300`) — a response longer than this is treated as a rambling/repetition loop (the high-temperature failure mode) and triggers a retry via `OLLAMA_ATTEMPTS`, `OLLAMA_MULTI_FRAME` (default `true`, see multi-frame mode above; `false` = legacy per-frame + combine), `OLLAMA_MULTI_MAX_FRAMES` (default `4`, cap on images per multi-frame call — extras are sampled evenly across the clip and the drop is logged), `OLLAMA_COMBINE_FRAMES` (default `true`; only used in legacy mode — merges per-frame sentences via a text-only follow-up call), `OLLAMA_THINK` (default unset/omitted; set `true` for reasoning models like gemma4 — with `OLLAMA_NUM_PREDICT=-1` — see below), `OLLAMA_KEEP_ALIVE` (default `-1` = model resident forever; set e.g. `30m` to unload during idle hours and free RAM/GPU — accepts int seconds or a duration string), `OLLAMA_PROMPT_FILE` / `OLLAMA_MULTI_PROMPT_FILE` / `OLLAMA_COMBINE_PROMPT_FILE` (override prompt file paths to swap prompts per model without editing the defaults). Worker setup: run `ollama serve` with `OLLAMA_HOST=0.0.0.0:11434`; the client sends `keep_alive` per request (from `OLLAMA_KEEP_ALIVE`), which overrides the server's own keep-alive. Prompts (all English defaults, re-read every call so edits take effect without restart): `config/prompt_frame.txt` (single frame), `config/prompt_frame_multi.txt` (multi-frame), `config/prompt_frame_combine.txt` (legacy merge).
+
+#### Alternative model: gemma4 (Ukrainian output)
+
+`gemma4:e4b-it-q4_K_M` produces good Ukrainian (where qwen3-vl:2b is weak), at the cost of speed. Two model-specific gotchas, both handled by env only (no code change):
+
+- **Reasoning is the quality/speed dial.** Gemma 4 is a reasoning model: on image calls it emits ~700-1000 hidden reasoning tokens (Ollama 0.20.3 discards them — not in `response` or `thinking`) before the answer. `OLLAMA_THINK=true` (with `OLLAMA_NUM_PREDICT=-1` so the reasoning isn't truncated to an empty response) gives well-grounded Ukrainian — it reads timestamps off the frame and rarely fabricates — but costs ~50-75s/frame (CPU-bound; see below). `OLLAMA_THINK=false` is ~5-10x faster (`eval_count` ~800→~40, normal `num_predict` works) but hallucinates absent objects and produces shakier grammar. We chose thinking ON: these are low-priority clips with no quota, so quality wins over latency. Note the throughput risk: at ~2-4 min/video, busy windy days can back the queue up.
+- **It does not fit 4 GB VRAM.** E4B is ~8B total params (Per-Layer Embeddings); the q4 build loads to ~10.6 GB with only ~3 GB in VRAM, so it runs mostly on CPU. Higher precision (q8 = 12 GB) is slower, not better; the base (non-`it`) variant follows the prompt worse. E4B-q4-it is the sweet spot for quality on this hardware; the smaller E2B fits VRAM better (faster) at lower quality.
+
+Multi-frame mode helps gemma especially: one reasoning pass over all frames instead of N, so a 3-frame video drops from ~4 min to ~1.5 min, and the model narrates the clip's progression coherently (validated to be both faster and better-grounded than per-frame+combine).
+
+Recommended gemma env block: `OLLAMA_MODEL=gemma4:e4b-it-q4_K_M`, `OLLAMA_THINK=true`, `OLLAMA_NUM_PREDICT=-1`, `OLLAMA_PROMPT_FILE=config/prompt_frame_uk.txt`, `OLLAMA_MULTI_PROMPT_FILE=config/prompt_frame_multi_uk.txt`, `OLLAMA_MAX_CHARS=450` (Ukrainian runs longer), `OLLAMA_TIMEOUT=200` (thinking ON can take ~75s/frame), and optionally `OLLAMA_KEEP_ALIVE=30m` to free RAM/GPU during idle hours. Ukrainian prompts live in `config/prompt_frame_uk.txt`, `config/prompt_frame_multi_uk.txt`, `config/prompt_frame_combine_uk.txt`.
+
+#### Two-stage mode: fast vision + Ukrainian refiner (recommended for clean Ukrainian)
+
+Setting `OLLAMA_REFINE_MODEL` switches `analyze_frame.py` to a two-stage pipeline that gives the cleanest, russism-free Ukrainian:
+1. **Stage 1 — vision (English):** `OLLAMA_MODEL` (a fast vision model, e.g. `qwen3-vl:2b-instruct`) describes each frame **per-frame, single-image** (the 2B model mishandles multi-image input, so multi-frame mode is bypassed in this path). English; grounding only — language doesn't matter here.
+2. **Stage 2 — refine (Ukrainian):** `OLLAMA_REFINE_MODEL` (a dedicated Ukrainian model, e.g. `lapa` — `hf.co/lapa-llm/lapa-v0.1.2-instruct-GGUF:Q4_K_M`) merges the per-frame English descriptions into ONE cheeky Ukrainian sentence via a text-only call. lapa is Gemma-3-12B-based and native-Ukrainian, so it writes idiomatic, russism-free output and even cleans russisms in its input. The refine prompt (`config/prompt_frame_refine_uk.txt`) also strips any "camera" mentions the vision model leaks.
+
+Why two models: lapa is a strong *text* Ukrainian model but its GGUF release ships no vision projector (`mmproj`), so it can't see images — it does the writing, a small vision model does the seeing. **VRAM note:** lapa (~9 GB) and qwen can't both sit in the 4 GB GPU; lapa's mere residency slows qwen even when qwen is 100% GPU. Set `OLLAMA_REFINE_NUM_GPU=0` to run lapa fully on CPU (frees GPU for qwen). Expect ~30s/frame + ~15-37s refine ≈ ~45s (1 frame) to ~130s (multi-frame) — quality-over-speed, as chosen.
+
+Two-stage env vars: `OLLAMA_REFINE_MODEL` (unset = single-model mode; set = enable two-stage), `OLLAMA_REFINE_PROMPT_FILE` (default `config/prompt_frame_refine_uk.txt`; uses a `{descriptions}` placeholder), `OLLAMA_REFINE_NUM_GPU` (set `0` to force the refiner onto CPU), `OLLAMA_REFINE_KEEP_ALIVE` (overrides keep-alive for the refine model only; set `-1` so lapa — CPU-resident, 0 VRAM — never unloads and never pays its ~50s cold load; ~free given the worker's RAM headroom), `OLLAMA_REFINE_TEMPERATURE` (default `0.8`), `OLLAMA_REFINE_NUM_PREDICT` (default `120`), `OLLAMA_REFINE_REPEAT_PENALTY` (default `1.1`). Stage 1 uses the standard `OLLAMA_*` knobs; `OLLAMA_MAX_CHARS` (raise to ~450 for Ukrainian) guards both stages.
+
+**Switching between the two setups (env-only, no code change):**
+- *Two-stage (clean Ukrainian, recommended):* `OLLAMA_MODEL=qwen3-vl:2b-instruct`, `OLLAMA_PROMPT_FILE=config/prompt_frame.txt` (English), `OLLAMA_REFINE_MODEL=hf.co/lapa-llm/lapa-v0.1.2-instruct-GGUF:Q4_K_M`, `OLLAMA_REFINE_NUM_GPU=0`, `OLLAMA_REFINE_KEEP_ALIVE=-1` (keep lapa resident — kills its ~50s cold load; free on a 32 GB worker since it's 0 VRAM), `OLLAMA_MAX_CHARS=450`, `OLLAMA_TIMEOUT=200`. (Leave `OLLAMA_THINK` unset — qwen doesn't reason.)
+- *Single-model gemma4:* **unset `OLLAMA_REFINE_MODEL`** and use the gemma env block above.
 
 ## Log Dashboard
 
