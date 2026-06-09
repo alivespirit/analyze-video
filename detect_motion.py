@@ -1797,6 +1797,11 @@ def detect_motion(input_video_path, output_dir, fast_processing: bool = False):
         event_cross_dirs = {}
         # Minimum highlight window per entity: starts when entering tolerance
         event_highlight_until = {}
+        # Frame index of each entity's most recent visual line crossing (drives the
+        # crop-magnifier hand-off: the latest crosser wins the single PiP slot)
+        event_last_cross_frame = {}
+        # Current PiP subject entity id, persisted across frames for hysteresis
+        prev_pip_eid = None
         # Stable-side tracking and dwell confirmation per entity
         event_stable_side = {}
         event_stable_since = {}
@@ -2411,6 +2416,8 @@ def detect_motion(input_video_path, output_dir, fast_processing: bool = False):
                             # Visual crossing detection without tolerance (for highlight only)
                             if (prev_y < LINE_Y <= y_center) or (prev_y > LINE_Y >= y_center):
                                 visual_crossed = True
+                                if label_name == 'person':
+                                    event_last_cross_frame[entity_id] = frame_idx
                             event_prev_y[entity_id] = y_center
                             event_last_side[entity_id] = current_side
                             if visual_crossed:
@@ -2499,21 +2506,43 @@ def detect_motion(input_video_path, output_dir, fast_processing: bool = False):
                     GATE_CROP_OVERLAY_BAND if GATE_CROP_OVERLAY_BAND >= 0
                     else int((LINE_Y_TOLERANCE + REID_LINE_EXTRA_TOLERANCE) * GATE_CROP_OVERLAY_BAND_SCALE)
                 )
-                primary_overlay_box = None
-                primary_overlay_highlight = False
-                best_overlay_area = 0
+                # Gather in-band person candidates with their last-crossing frame.
+                overlay_candidates = []  # (eid, last_cross, box)
                 for pbox, _eid in accepted_persons:
                     yc = (pbox[1] + pbox[3]) / 2
                     if abs(yc - LINE_Y) <= overlay_band:
-                        area = (pbox[2] - pbox[0]) * (pbox[3] - pbox[1])
-                        if area > best_overlay_area:
-                            best_overlay_area = area
-                            primary_overlay_box = pbox
-                            # Match the drawn box color: red (highlight) when in
-                            # tolerance or within the highlight window, else green.
-                            in_tol = abs(yc - LINE_Y) <= LINE_Y_TOLERANCE
-                            win = (event_highlight_until.get(_eid, 0) >= frame_idx) if _eid is not None else False
-                            primary_overlay_highlight = in_tol or win
+                        last_cross = event_last_cross_frame.get(_eid, -1) if _eid is not None else -1
+                        overlay_candidates.append((_eid, last_cross, pbox))
+
+                primary_overlay_box = None
+                primary_overlay_highlight = False
+                if overlay_candidates:
+                    # Hysteresis: keep the current subject while it stays in the band,
+                    # unless another candidate has crossed the line MORE RECENTLY (that
+                    # is the hand-off trigger). This prevents frame-to-frame flicker
+                    # between two people who are both near the line but haven't crossed.
+                    chosen = None
+                    prev = next((c for c in overlay_candidates if c[0] == prev_pip_eid and c[0] is not None), None)
+                    if prev is not None:
+                        max_other_cross = max((lc for (eid, lc, _b) in overlay_candidates if eid != prev_pip_eid), default=-1)
+                        if max_other_cross <= prev[1]:
+                            chosen = prev
+                    if chosen is None:
+                        # Most-recent crosser wins; fall back to nearest-to-line, then
+                        # box area, for people who haven't crossed yet.
+                        chosen = max(
+                            overlay_candidates,
+                            key=lambda c: (c[1], -abs((c[2][1] + c[2][3]) / 2 - LINE_Y),
+                                           (c[2][2] - c[2][0]) * (c[2][3] - c[2][1])),
+                        )
+                    prev_pip_eid = chosen[0]
+                    primary_overlay_box = chosen[2]
+                    # Match the drawn box color: red (highlight) when in tolerance or
+                    # within the highlight window, else green.
+                    cyc = (chosen[2][1] + chosen[2][3]) / 2
+                    in_tol = abs(cyc - LINE_Y) <= LINE_Y_TOLERANCE
+                    win = (event_highlight_until.get(chosen[0], 0) >= frame_idx) if chosen[0] is not None else False
+                    primary_overlay_highlight = in_tol or win
                 if primary_overlay_box is not None:
                     draw_crop_overlay(
                         frame,
