@@ -18,6 +18,7 @@ This project is a Python-based application that monitors a folder for new video 
     - All suppression parameters are configurable in `detect_motion.py` (see "Customization" below).
   - **Smart Event Filtering**: Differentiates between significant, insignificant, and noisy motion events based on duration.
   - **Highlight Clips**: Generates clips for significant motions with tracked objects and bounding boxes. Uses a CRF-based H.264 writer (libx264, CRF=28, yuv420p, faststart) with the encoder preset configurable via `VIDEO_WRITER_PRESET` (default `faster`). For 1080p/4K sources, highlight output is written at 1080p. Clips are saved to daily subdirectories (`TEMP_DIR/YYYYMMDD/`) and optionally kept after Telegram send (`KEEP_HIGHLIGHTS_CLIPS=true`, default) for viewing in the Android dashboard.
+  - **Gate-Crossing Crop Magnifier**: While a person is within the gate band, a live zoomed-in picture-in-picture of their current bounding box is drawn in the lower-right corner (above the event text), connected to the box by a two-line "funnel" callout. The PiP border and funnel lines match the box color (green normally, red in the line tolerance). Single primary person (largest box); configurable via `GATE_CROP_OVERLAY_*` (see Customization).
   - **Long-Event Speed-Up**: Long events are rendered faster by writing fewer frames (frame skipping) while keeping the output FPS unchanged.
   - **Insignificant Motion Snapshots**: Can extract a representative frame for brief motion events; sending snapshots to Telegram is optional.
   - **Approximate Car Speed Estimation**:
@@ -288,6 +289,12 @@ pip install -r requirements.txt
     - `CAR_SPEEDTRAP_OVERLAY_EXTRA_GAP`: extra spacing between SpeedTrap and event overlay lines
   - `COLOR_PERSON`, `COLOR_CAR`, `COLOR_DEFAULT`, `COLOR_HIGHLIGHT`, `COLOR_LINE`: overlay colors (BGR tuples; defaults in code)
   - `OVERLAY_FONT_SCALE`, `OVERLAY_TEXT_THICKNESS`, `OVERLAY_BOX_THICKNESS`, `OVERLAY_LINE_THICKNESS`, `OVERLAY_LABEL_BG_HEIGHT`, `OVERLAY_PAD_X`, `OVERLAY_PAD_Y`: overlay appearance (resolution-dependent defaults)
+  - Gate-crossing crop magnifier (lower-right live PiP of the person at the gate):
+    - `GATE_CROP_OVERLAY_ENABLED`: enable/disable the magnifier (default: `true`)
+    - `GATE_CROP_OVERLAY_WIDTH_FRAC`: PiP width as a fraction of the frame width (default: `0.18`)
+    - `GATE_CROP_OVERLAY_BAND`: half-height (px) of the gate band within which the PiP is shown; `-1` derives it at runtime (default: `-1`)
+    - `GATE_CROP_OVERLAY_BAND_SCALE`: multiplier applied to the derived band `(LINE_Y_TOLERANCE + REID_LINE_EXTRA_TOLERANCE)` — larger keeps the PiP visible longer (default: `4.0`)
+    - `GATE_CROP_OVERLAY_UPPER_BODY`: show only the top 50% (head/torso) of the crop (default: `false`)
   - `VIDEO_WRITER_PRESET`: libx264 encoder preset for highlight and pose clips (default: `faster`)
   - `TESLA_EMAIL`, `TESLA_REFRESH_TOKEN`: Tesla API credentials (master only; `detect_motion.py` only reads the cache)
   - `TESLA_SOC_FILE`: path to Tesla SoC cache file (default: `temp/tesla_soc.txt`)

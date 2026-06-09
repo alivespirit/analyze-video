@@ -191,6 +191,19 @@ CAR_SPEEDTRAP_DISTANCE_M = float(os.getenv("CAR_SPEEDTRAP_DISTANCE_M", "5.0"))
 CAR_SPEEDTRAP_MAX_VALID_KMH = float(os.getenv("CAR_SPEEDTRAP_MAX_VALID_KMH", "100"))
 CAR_SPEEDTRAP_OVERLAY_EXTRA_GAP = 16
 
+# --- Live person-crop magnifier overlay (lower-right PiP) ---
+# Shows a zoomed-in, live view of the primary person's current bounding box in the
+# lower-right corner (above the event text) while they are within the gate band,
+# with a connector line from the box to the PiP.
+GATE_CROP_OVERLAY_ENABLED = os.getenv("GATE_CROP_OVERLAY_ENABLED", "true").lower() == "true"
+GATE_CROP_OVERLAY_WIDTH_FRAC = float(os.getenv("GATE_CROP_OVERLAY_WIDTH_FRAC", "0.18"))
+# Half-height of the gate band (px) within which the PiP is shown. -1 = derive at
+# runtime from the resolution-aware (LINE_Y_TOLERANCE + REID_LINE_EXTRA_TOLERANCE)
+# scaled by GATE_CROP_OVERLAY_BAND_SCALE (bigger band = PiP visible longer).
+GATE_CROP_OVERLAY_BAND = int(os.getenv("GATE_CROP_OVERLAY_BAND", "-1"))
+GATE_CROP_OVERLAY_BAND_SCALE = float(os.getenv("GATE_CROP_OVERLAY_BAND_SCALE", "4.0"))
+GATE_CROP_OVERLAY_UPPER_BODY = os.getenv("GATE_CROP_OVERLAY_UPPER_BODY", "false").lower() == "true"
+
 VIDEO_WRITER_PRESET = (os.getenv("VIDEO_WRITER_PRESET", "faster").strip() or "faster")
 
 # --- Thread-local Object Detection Model ---
@@ -533,6 +546,10 @@ def draw_event_overlay(frame, event_idx, total_events, seconds_from_start, frame
         seconds_from_start (int): Seconds from the start of the source video.
         frame_number (int | None): Optional source frame number for temporary calibration.
         top_line_text (str | None): Optional line rendered above the default event line.
+
+    Returns:
+        int: Top y-coordinate of the drawn black box (so callers can anchor content
+            above it, e.g. the crop magnifier).
     """
     h, w = frame.shape[:2]
     text = f"{event_idx}/{total_events} - {format_mmss(seconds_from_start)}"
@@ -575,6 +592,79 @@ def draw_event_overlay(frame, event_idx, total_events, seconds_from_start, frame
         if top_line_text and idx == 0 and len(lines) > 1:
             step += top_extra_gap
         text_y += step
+
+    return y1
+
+
+def draw_crop_overlay(frame, clean_frame, person_box, text_top_y, upper_body=False, color=COLOR_LINE):
+    """
+    Draws a live zoomed-in magnifier (picture-in-picture) of person_box in the
+    lower-right corner, above text_top_y, with a connector line from the middle of
+    the box's right border to the center of the PiP. The crop is taken from
+    clean_frame (un-annotated) so the magnifier shows a clean view of the person
+    rather than the drawn boxes/line.
+
+    Args:
+        frame (np.ndarray): BGR frame to draw onto (already annotated).
+        clean_frame (np.ndarray): Un-annotated BGR frame to crop the person from.
+        person_box (list | tuple): [x1, y1, x2, y2] of the person in frame coords.
+        text_top_y (int): Top y of the event text box; the PiP bottom sits above it.
+        upper_body (bool): If True, crop only the top 50% of person_box.
+        color (tuple): BGR color for the PiP border and connector line (matches the
+            person's bounding-box color: green normally, red near the line).
+    """
+    h, w = frame.shape[:2]
+    # Clamp the full source box to frame bounds (used for the connector anchor).
+    fx1 = max(0, min(int(person_box[0]), w - 1))
+    fy1 = max(0, min(int(person_box[1]), h - 1))
+    fx2 = max(fx1 + 1, min(int(person_box[2]), w))
+    fy2 = max(fy1 + 1, min(int(person_box[3]), h))
+    # Crop region (optionally upper body only) for the magnified image.
+    cy2 = fy1 + max(1, (fy2 - fy1) // 2) if upper_body else fy2
+    crop = clean_frame[fy1:cy2, fx1:fx2]
+    if crop is None or crop.size == 0:
+        return
+
+    # Target PiP width as a fraction of frame width; preserve the crop aspect ratio.
+    crop_h, crop_w = crop.shape[:2]
+    pip_w = max(1, int(w * GATE_CROP_OVERLAY_WIDTH_FRAC))
+    pip_h = max(1, int(round(pip_w * crop_h / crop_w)))
+
+    # Clamp so the PiP fits between the top margin and the event text box.
+    margin = OVERLAY_PAD_X
+    gap = OVERLAY_PAD_Y
+    max_h = (text_top_y - gap) - margin
+    if max_h < 1:
+        return
+    if pip_h > max_h:
+        pip_h = max_h
+        pip_w = max(1, int(round(pip_h * crop_w / crop_h)))
+    pip_w = min(pip_w, w - 2 * margin)
+    if pip_w < 1:
+        return
+
+    interp = cv2.INTER_AREA if crop_w > pip_w else cv2.INTER_LINEAR
+    pip = cv2.resize(crop, (pip_w, pip_h), interpolation=interp)
+
+    # Bottom-right placement, above the text box.
+    px2 = w - margin
+    py2 = text_top_y - gap
+    px1 = px2 - pip_w
+    py1 = py2 - pip_h
+    if px1 < 0 or py1 < 0:
+        return
+
+    thickness = max(1, OVERLAY_BOX_THICKNESS)  # match the person's bounding-box line width
+    # Connector "funnel": box right corners -> PiP left corners. Drawn first so the
+    # crop/background clip them cleanly at the PiP edge.
+    cv2.line(frame, (fx2, fy1), (px1, py1), color, thickness)  # top-right -> top-left
+    cv2.line(frame, (fx2, fy2), (px1, py2), color, thickness)  # bottom-right -> bottom-left
+
+    # Filled background + colored border for legibility against busy scenes.
+    bt = max(2, OVERLAY_LINE_THICKNESS + 1)
+    cv2.rectangle(frame, (px1 - bt, py1 - bt), (px2 + bt, py2 + bt), (0, 0, 0), -1)
+    frame[py1:py2, px1:px2] = pip
+    cv2.rectangle(frame, (px1 - 1, py1 - 1), (px2, py2), color, thickness)
 
 
 def detect_draw_and_save_snapshot(frame, soc, output_dir, input_video_path, file_basename, mid_frame_index, tag, classes=None):
@@ -1834,6 +1924,19 @@ def detect_motion(input_video_path, output_dir, fast_processing: bool = False):
                 else:
                     frame_for_pose = frame.copy()
 
+            # Clean (un-annotated) frame for the live crop magnifier. Reuse the ReID
+            # copy when present to avoid a second full-frame copy.
+            clean_frame_overlay = None
+            if GATE_CROP_OVERLAY_ENABLED:
+                if frame_for_reid is not None:
+                    clean_frame_overlay = frame_for_reid
+                elif prof.enabled:
+                    t0 = time.perf_counter()
+                    clean_frame_overlay = frame.copy()
+                    prof.add("track.frame_copy", time.perf_counter() - t0)
+                else:
+                    clean_frame_overlay = frame.copy()
+
             # Apply tracker ROI crop if available
             if track_roi_bbox is not None:
                 tx1, ty1, tx2, ty2 = track_roi_bbox
@@ -2379,7 +2482,7 @@ def detect_motion(input_video_path, output_dir, fast_processing: bool = False):
 
             # Draw static event overlay in bottom-right: "<idx>/<total> - MM:SS"
             current_seconds = int((frame_idx - 1) / fps)
-            draw_event_overlay(
+            text_top_y = draw_event_overlay(
                 frame,
                 clip_index + 1,
                 len(significant_sub_clips),
@@ -2387,6 +2490,39 @@ def detect_motion(input_video_path, output_dir, fast_processing: bool = False):
                 frame_number=(frame_idx - 1),
                 top_line_text=speedtrap_overlay_text,
             )
+
+            # Live person-crop magnifier: zoom the primary (largest) person whose
+            # center is within the gate band into the lower-right corner, above the
+            # event text, with a connector line from the box to the PiP.
+            if GATE_CROP_OVERLAY_ENABLED and clean_frame_overlay is not None and accepted_persons:
+                overlay_band = (
+                    GATE_CROP_OVERLAY_BAND if GATE_CROP_OVERLAY_BAND >= 0
+                    else int((LINE_Y_TOLERANCE + REID_LINE_EXTRA_TOLERANCE) * GATE_CROP_OVERLAY_BAND_SCALE)
+                )
+                primary_overlay_box = None
+                primary_overlay_highlight = False
+                best_overlay_area = 0
+                for pbox, _eid in accepted_persons:
+                    yc = (pbox[1] + pbox[3]) / 2
+                    if abs(yc - LINE_Y) <= overlay_band:
+                        area = (pbox[2] - pbox[0]) * (pbox[3] - pbox[1])
+                        if area > best_overlay_area:
+                            best_overlay_area = area
+                            primary_overlay_box = pbox
+                            # Match the drawn box color: red (highlight) when in
+                            # tolerance or within the highlight window, else green.
+                            in_tol = abs(yc - LINE_Y) <= LINE_Y_TOLERANCE
+                            win = (event_highlight_until.get(_eid, 0) >= frame_idx) if _eid is not None else False
+                            primary_overlay_highlight = in_tol or win
+                if primary_overlay_box is not None:
+                    draw_crop_overlay(
+                        frame,
+                        clean_frame_overlay,
+                        primary_overlay_box,
+                        text_top_y,
+                        upper_body=GATE_CROP_OVERLAY_UPPER_BODY,
+                        color=(COLOR_HIGHLIGHT if primary_overlay_highlight else COLOR_PERSON),
+                    )
 
             # Append frames to output based on output_stride to speed up render without
             # sacrificing tracking continuity (for moderate-length events)

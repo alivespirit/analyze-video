@@ -129,6 +129,18 @@ Insignificant/no_person frames and ReID crops are also saved to these daily dire
 - Frames: `{hour}H{video_stem}_{tag}_{frameIdx}.jpg` (tag = `insignificant` or `no_person`)
 - ReID crops: `{video_stem}_reid_best{N}.jpg`
 
+### Gate-Crossing Crop Magnifier (highlight PiP)
+
+A live picture-in-picture magnifier of the person at the gate, baked into the highlight clip pixels entirely within the existing per-frame draw loop in `detect_motion.py` — no buffering, no second pass, no dependency on the post-hoc ReID best-crop selection (which runs once at the end of the video, *after* frames are already written, so it isn't available at write time).
+
+Each appended frame: the largest person whose bbox center is within the gate band is cropped from a **clean (un-annotated) frame copy** (`clean_frame_overlay`, reusing the existing `frame_for_reid` copy when present), zoomed (aspect-preserving) into the lower-right corner **above** the event text — `draw_event_overlay` returns its box top-y so the PiP anchors above it — with a two-line "funnel" connector (box top-right→PiP top-left, box bottom-right→PiP bottom-left). The PiP border and funnel lines use the **same color as the drawn bounding box**: `COLOR_PERSON` (green) normally, `COLOR_HIGHLIGHT` (red) when the person is in `LINE_Y_TOLERANCE` or within the `HIGHLIGHT_WINDOW_FRAMES` highlight window. The connector lines are drawn before the crop/background so they clip cleanly at the PiP edge. Helper: `draw_crop_overlay()`.
+
+Visibility is positional, not crossing-confirmed: the PiP shows while the person's center is within the gate band (so it appears as they approach/cross and disappears once they move away), not while they linger far from the gate. The band defaults to `(LINE_Y_TOLERANCE + REID_LINE_EXTRA_TOLERANCE) * GATE_CROP_OVERLAY_BAND_SCALE` (resolution-aware); the bare tolerance is only a few frames wide, so the scale (default `4.0`) is the knob that keeps the PiP on screen long enough.
+
+Drawn on the orig-resolution frame before the existing resize-to-1080p + append path, so 4K and 1080p both carry through unchanged.
+
+Key env vars (master, read at module load): `GATE_CROP_OVERLAY_ENABLED` (default `true`), `GATE_CROP_OVERLAY_WIDTH_FRAC` (default `0.18`, PiP width as a fraction of frame width), `GATE_CROP_OVERLAY_BAND` (absolute px override; `-1` = derive at runtime), `GATE_CROP_OVERLAY_BAND_SCALE` (default `4.0`, multiplier on the derived band — bigger = visible longer), `GATE_CROP_OVERLAY_UPPER_BODY` (default `false`, crop only the top 50% / head+torso). The connector geometry uses the full bbox even when `UPPER_BODY` crops only the top half.
+
 ### Tesla SoC
 
 Tesla State of Charge is fetched by a periodic scheduler in `main.py` (`tesla_soc_scheduler`) and written to a cache file (`TESLA_SOC_FILE`, default `temp/tesla_soc.txt`). `detect_motion.py` only reads the cache — it has no Tesla credentials or API calls.
