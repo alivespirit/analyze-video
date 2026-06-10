@@ -34,6 +34,7 @@ import os
 import time
 import base64
 import logging
+import random
 
 import httpx
 
@@ -48,6 +49,9 @@ _PROMPT_FILES = {
     "multi":   ("OLLAMA_MULTI_PROMPT_FILE",   "config/prompt_frame_multi.txt"),
     "combine": ("OLLAMA_COMBINE_PROMPT_FILE", "config/prompt_frame_combine.txt"),
     "refine":  ("OLLAMA_REFINE_PROMPT_FILE",  "config/prompt_frame_refine_uk.txt"),
+    # Output-format snippets substituted into a prompt's {format} placeholder (see _apply_format).
+    "fmt_prose": ("OLLAMA_FORMAT_PROSE_FILE", "config/prompt_frame_fmt_prose_uk.txt"),
+    "fmt_hokku": ("OLLAMA_FORMAT_HOKKU_FILE", "config/prompt_frame_fmt_hokku_uk.txt"),
 }
 
 
@@ -61,6 +65,42 @@ def _load_text(path):
     # Read fresh each call so edits take effect without restart; the file is tiny next to the call.
     with open(path, "r", encoding="utf-8") as f:
         return f.read().strip()
+
+
+def _flat(text):
+    """Collapse newlines/runs of whitespace to single spaces for single-line logging.
+
+    A multi-line response (e.g. a hokku) would otherwise emit log lines whose continuations lack the
+    ``[basename] timestamp`` prefix, so the dashboard's per-video parser can't assign them. Only the
+    *logged* string is flattened — the value returned/sent to Telegram keeps its newlines.
+    """
+    return " ".join(text.split()) if text else text
+
+
+def _apply_format(text, file_basename):
+    """Substitute a prompt's optional ``{format}`` placeholder with a randomly chosen format snippet.
+
+    The output format is decided here in code, NOT in the prompt: an LLM can't make a fair random
+    choice (greedy/low-temp decoding collapses "pick a number 1-20" to a constant — almost always
+    13), so asking the model to roll a die never varies. With probability ``OLLAMA_HOKKU_PROBABILITY``
+    the prompt asks for a hokku, otherwise the default prose format. No-op for prompts that don't
+    contain ``{format}`` (the short / refine / Gemini prompts), so it's safe to apply everywhere.
+    """
+    if "{format}" not in text:
+        return text
+    try:
+        prob = float(os.getenv("OLLAMA_HOKKU_PROBABILITY", "0.5"))
+    except ValueError:
+        prob = 0.0
+    use_hokku = prob > 0 and random.random() < prob
+    kind = "fmt_hokku" if use_hokku else "fmt_prose"
+    try:
+        snippet = _load_text(_prompt_path(kind))
+    except OSError as e:
+        logger.warning("[%s] Could not load %s snippet: %s; dropping {format}.", file_basename, kind, e)
+        return text.replace("{format}", "")
+    logger.info("[%s] Long-form output format this round: %s.", file_basename, "hokku" if use_hokku else "prose")
+    return text.replace("{format}", snippet)
 
 
 def _parse_keep_alive(env="OLLAMA_KEEP_ALIVE", default="-1"):
@@ -268,7 +308,7 @@ def analyze_frames_local(frame_paths, file_basename):
                 return None
             logger.info("[%s] Stage1 vision (%s) described %d frame(s) in %.1fs: %s",
                         file_basename, model, len(descriptions), time.time() - t_stage1,
-                        " / ".join(descriptions))
+                        _flat(" / ".join(descriptions)))
 
             t_stage2 = time.time()
             refined = _refine_descriptions(client, base_url, refine_model, timeout, attempts,
@@ -276,7 +316,7 @@ def analyze_frames_local(frame_paths, file_basename):
             stage2_s = time.time() - t_stage2
             if refined:
                 logger.info("[%s] Stage2 refine (%s) in %.1fs: %s",
-                            file_basename, refine_model, stage2_s, refined)
+                            file_basename, refine_model, stage2_s, _flat(refined))
                 return refined
             logger.warning("[%s] Stage2 refine (%s) failed in %.1fs; returning raw stage-1 description(s).",
                            file_basename, refine_model, stage2_s)
@@ -294,7 +334,7 @@ def analyze_frames_local(frame_paths, file_basename):
             # 1 frame → single-frame prompt; 2+ → multi-frame prompt.
             path = _prompt_path("multi") if len(images) > 1 else _prompt_path("single")
             try:
-                prompt = _load_text(path)
+                prompt = _apply_format(_load_text(path), file_basename)
             except OSError as e:
                 logger.warning("[%s] Could not load frame prompt %s: %s", file_basename, path, e)
                 return None
@@ -304,12 +344,12 @@ def analyze_frames_local(frame_paths, file_basename):
                                       "Local frame analysis", file_basename)
             if result:
                 logger.info("[%s] Local frame analysis (%s, prompt=%s) described %d frame(s) in one call in %.1fs: %s",
-                            file_basename, model, os.path.basename(path), len(images), time.time() - t0, result)
+                            file_basename, model, os.path.basename(path), len(images), time.time() - t0, _flat(result))
             return result
 
         # --- Legacy per-frame + combine mode (OLLAMA_MULTI_FRAME=false) ---
         try:
-            prompt = _load_text(_prompt_path("single"))
+            prompt = _apply_format(_load_text(_prompt_path("single")), file_basename)
         except OSError as e:
             logger.warning("[%s] Could not load frame prompt %s: %s", file_basename, _prompt_path("single"), e)
             return None
@@ -342,10 +382,10 @@ def analyze_frames_local(frame_paths, file_basename):
                 combined = None
             if combined:
                 logger.info("[%s] Local frame analysis (%s) combined %d/%d frame(s) into one sentence in %.1fs: %s",
-                            file_basename, model, len(descriptions), len(frame_paths), time.time() - t0, combined)
+                            file_basename, model, len(descriptions), len(frame_paths), time.time() - t0, _flat(combined))
                 return combined
 
         joined = " / ".join(descriptions)
         logger.info("[%s] Local frame analysis (%s) described %d/%d frame(s) in %.1fs: %s",
-                    file_basename, model, len(descriptions), len(frame_paths), time.time() - t0, joined)
+                    file_basename, model, len(descriptions), len(frame_paths), time.time() - t0, _flat(joined))
         return joined

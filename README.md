@@ -463,6 +463,7 @@ The refine prompt is `config/prompt_frame_refine_uk.txt` (uses a `{descriptions}
 | `OLLAMA_REPEAT_PENALTY` | `1.3` | Breaks repetition loops |
 | `OLLAMA_MAX_CHARS` | `300` | A longer response is treated as a rambling loop and retried; raise it for longer-form output |
 | `OLLAMA_THINK` | unset | Set `true` for reasoning models (use with `OLLAMA_NUM_PREDICT=-1`); better grounding at a large latency cost |
+| `OLLAMA_HOKKU_PROBABILITY` | `0` | Probability (0–1) a `{format}`-placeholder prompt is answered as a hokku instead of prose (see "Random output format" below) |
 
 ### Telegram delivery
 
@@ -490,9 +491,15 @@ All prompts live in `config/` and are re-read on every call (edits apply without
 | `prompt_frame_multi_uk.txt` | UK | Ukrainian multi-frame variant | `OLLAMA_MULTI_PROMPT_FILE` |
 | `prompt_frame_combine_uk.txt` | UK | Ukrainian legacy merge variant | `OLLAMA_COMBINE_PROMPT_FILE` |
 | `prompt_frame_refine_uk.txt` | UK | **Stage 2 (refine)** of the two-stage pipeline; has a `{descriptions}` placeholder | `OLLAMA_REFINE_PROMPT_FILE` |
-| `prompt_frame_long_uk.txt` | UK | Long-form narrative Ukrainian for a single larger model (e.g. gemma4:12b) | `OLLAMA_PROMPT_FILE` / `OLLAMA_MULTI_PROMPT_FILE` |
+| `prompt_frame_long_uk.txt` | UK | Long-form narrative Ukrainian for a single larger model (e.g. gemma4:12b); contains a `{format}` placeholder | `OLLAMA_PROMPT_FILE` / `OLLAMA_MULTI_PROMPT_FILE` |
+| `prompt_frame_fmt_prose_uk.txt` | UK | Prose format snippet substituted into `{format}` (the default branch) | `OLLAMA_FORMAT_PROSE_FILE` |
+| `prompt_frame_fmt_hokku_uk.txt` | UK | Hokku format snippet substituted into `{format}` (the random branch) | `OLLAMA_FORMAT_HOKKU_FILE` |
 
 The single-frame vs multi-frame prompt is chosen automatically per clip (1 frame → single, 2+ → multi). The `_uk` and `long_uk` files are alternatives you point the same env vars at — only the prompts referenced by your active config are used.
+
+#### Random output format (prose vs hokku)
+
+A prompt containing a `{format}` placeholder (like `prompt_frame_long_uk.txt`) gets that placeholder replaced **per call** with either the prose or the hokku snippet, chosen by a real coin flip in code — `OLLAMA_HOKKU_PROBABILITY` (0–1, default `0` = always prose). The randomness must live in code: an LLM can't make a fair random choice (greedy decoding collapses "pick a number 1–20" to a constant, almost always 13), so asking the model to roll a die never varies. The shared scene/subject/anti-russism rules stay in the body; only the format line is swapped. Set `OLLAMA_HOKKU_PROBABILITY=1` to force hokku for testing. No-op for prompts without `{format}`.
 
 ---
 
