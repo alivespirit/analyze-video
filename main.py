@@ -361,7 +361,8 @@ if not os.path.exists(OBJECT_DETECTION_MODEL_PATH):
 # -----------------------------------
 
 # Import after .env and logging are configured to ensure modules read env vars
-from analyze_video import analyze_video
+from analyze_video import analyze_video, _pick_best_frame
+from analyze_frame import analyze_frames_local
 from worker.client import (
     detect_motion_local,
     detect_motion_remote_async,
@@ -370,7 +371,7 @@ from worker.client import (
     get_worker_battery,
     WORKER_ENABLED,
 )
-from telegram_notification import button_callback, send_notifications, reaction_callback, cleanup_temp_media
+from telegram_notification import button_callback, send_notifications, reaction_callback, cleanup_temp_media, send_extra_frame_reply
 from path_utils import parse_datetime_from_path
 import re
 
@@ -406,6 +407,11 @@ max_workers = 1
 FAST_ANALYSIS_WORKERS = int(os.getenv("FAST_ANALYSIS_WORKERS", "2"))
 LOCAL_LLM_MAX_WORKERS = int(os.getenv("LOCAL_LLM_MAX_WORKERS", "1"))
 GEMINI_MAX_WORKERS = int(os.getenv("GEMINI_MAX_WORKERS", "1"))
+# Clip-bearing videos (gate_crossing/significant_motion) can also produce leftover low-motion frames.
+# When enabled, the best such frame is analyzed by the local LLM (in the llm lane, off the critical
+# path) and posted as a threaded reply to the highlight — so an occasionally-interesting frame
+# (e.g. a poorly-tracked person of interest) isn't silently dropped.
+SEND_GATE_EXTRA_FRAMES = os.getenv("SEND_GATE_EXTRA_FRAMES", "true").strip().lower() in ("true", "1", "yes")
 try:
     # A dedicated executor for CPU-bound motion detection to ensure it runs one at a time.
     motion_executor = concurrent.futures.ThreadPoolExecutor(max_workers=max_workers)
@@ -643,6 +649,9 @@ class FileHandler(FileSystemEventHandler):
             video_response = analysis_result['response']
             clip_path = analysis_result.get('clip_path')
             photo_frame = analysis_result.get('photo_frame')
+            # Leftover low-motion frames from a clip-bearing video (gate_crossing/significant_motion)
+            # — analyzed and replied separately after the highlight is sent (see below).
+            extra_frames = motion_result.get('event_frames') or []
             self.logger.info(f"[{file_basename}] Analysis complete.")
             update_processing_ledger(file_path, "completed", {"end_ts": time.time()})
         except Exception as e:
@@ -650,6 +659,8 @@ class FileHandler(FileSystemEventHandler):
             video_response = f"_{timestamp_text}:_ \u274C Відео не вдалося проаналізувати: " + str(e)[:512] + "..."
             clip_path = None
             photo_frame = None
+            status = None
+            extra_frames = []
             update_processing_ledger(file_path, "failed", {"end_ts": time.time(), "error": str(e)[:256]})
 
         battery = psutil.sensors_battery()
@@ -669,8 +680,12 @@ class FileHandler(FileSystemEventHandler):
             video_response += " \u26A1\uFE0F"
 
         try:
-            await send_notifications(self.app, video_response, clip_path, file_path, file_basename, timestamp_text, preserve_media_on_failure=True, allow_plain_fallback=False, photo_frame=photo_frame)
+            primary_msg = await send_notifications(self.app, video_response, clip_path, file_path, file_basename, timestamp_text, preserve_media_on_failure=True, allow_plain_fallback=False, photo_frame=photo_frame)
             update_processing_ledger(file_path, "completed", {"telegram_status": "sent"})
+            # For clip-bearing videos, surface any leftover low-motion frame as a threaded reply (async).
+            if status in ("gate_crossing", "significant_motion"):
+                schedule_extra_frame_reply(self.app, extra_frames, file_path, file_basename,
+                                           timestamp_text, getattr(primary_msg, "message_id", None))
         except Exception as e_send:
             logger.error(f"[{file_basename}] Telegram send failed, scheduling retries: {e_send}")
             update_processing_ledger(file_path, "completed", {"telegram_status": "failed", "last_error": str(e_send)[:256]})
@@ -1022,6 +1037,34 @@ def update_processing_ledger(file_path: str, status: str, extra: dict | None = N
         ledger[file_path] = entry
         ledger = prune_processing_ledger(ledger, 100)
         write_processing_ledger(PROCESSING_LEDGER_PATH, ledger)
+
+
+def schedule_extra_frame_reply(app, frames: list, file_path: str, file_basename: str,
+                               timestamp_text: str, reply_to_message_id):
+    """Fire-and-forget: analyze leftover low-motion frames from a clip-bearing video and post the
+    best one as a threaded reply to the already-sent highlight. Runs the LLM in the `llm` lane so it
+    never delays the highlight or the fast lane. Stays quiet if the LLM has nothing to say."""
+    if not SEND_GATE_EXTRA_FRAMES or not frames:
+        return
+
+    async def runner():
+        try:
+            loop = asyncio.get_running_loop()
+            description = await loop.run_in_executor(llm_executor, analyze_frames_local, frames, file_basename)
+            if not description:
+                return  # Ollama unavailable or nothing notable — the highlight already went out
+            best = _pick_best_frame(frames)
+            if not best:
+                return
+            caption = f"_{timestamp_text}_ \U0001F916 " + description
+            await send_extra_frame_reply(app, best, caption, reply_to_message_id, file_basename)
+        except Exception as e:
+            logger.warning(f"[{file_basename}] Extra-frame reply failed: {e}")
+
+    try:
+        asyncio.create_task(runner(), name=f"ExtraFrame-{file_basename}")
+    except Exception:
+        asyncio.create_task(runner())
 
 
 def schedule_notification_retries(app,

@@ -44,6 +44,7 @@ This project is a Python-based application that monitors a folder for new video 
 - **Robust Telegram Integration**:
   - **Grouped Notifications**: Combines no-motion events into a single, editable Telegram message to reduce clutter.
   - **Event-Frame Photos**: `no_person` / `no_significant_motion` events are sent as a single photo (the most detailed event frame) with the local-LLM description as the caption and a "Глянути" full-video button — one self-contained message. The frame is downscaled before upload to cut bandwidth; toggle with `SEND_INSIGNIFICANT_FRAMES` (off → the description is delivered as a grouped text message instead).
+  - **Leftover-Frame Replies**: a `gate_crossing` / `significant_motion` video can also produce leftover low-motion frames (e.g. a second event where a poorly-tracked person appears). After the highlight is sent, the best such frame is analyzed by the local LLM (off the critical path) and posted as a threaded reply to the highlight — so an occasionally-interesting frame isn't dropped, without delaying the highlight. Toggle with `SEND_GATE_EXTRA_FRAMES` (default on).
   - **Interactive Callbacks**: Allows users to request the full original video via inline buttons.
   - **Media Handling**: Sends highlight clips as animations and event frames as photos with captions + buttons.
 - **Tesla Integration (Optional)**:
@@ -229,6 +230,7 @@ pip install -r requirements.txt
    - **Significant Motion:** A message is sent with the generated highlight clip and the AI description.
    - **Low Motion (`no_person` / `no_significant_motion`):** Sent as a single photo — the most detailed event frame — with the local-LLM description as the caption and a "Глянути" button (one self-contained, individually-actionable message). The frame is downscaled before upload (`TELEGRAM_FRAME_MAX_DIM`, default 1920px); the caption is clamped to Telegram's 1024-char limit. Disable with `SEND_INSIGNIFICANT_FRAMES=false`, which routes the description into the grouped text message instead.
    - **No Motion:** Events are grouped into a single, editable message to avoid spam.
+   - **Leftover Frames (clip-bearing videos):** after a `gate_crossing` / `significant_motion` highlight is sent, any leftover low-motion event frame is analyzed by the local LLM in the background (the `llm` lane, so the highlight isn't delayed) and posted as a threaded reply — sent only when the LLM returns a description. Toggle with `SEND_GATE_EXTRA_FRAMES` (default on).
    - **Resilient Sending:** Animation delivery is retried non-blockingly at 5/10/15 minutes. If all retries fail (e.g., corrupted or oversized media), a final plain message with a “Глянути” button is sent so you still receive a notification. The frame-photo path likewise falls back to a plain text message with the button if the photo can't be sent. Highlight clips are preserved during retries and cleaned up after a successful send or after the final fallback.
 
 4. **Callback Handling:**
@@ -471,7 +473,8 @@ The description is delivered as a single photo (the most detailed event frame) w
 
 | Variable | Default | Purpose |
 |---|---|---|
-| `SEND_INSIGNIFICANT_FRAMES` | `true` | Send the event-frame photo. `false` → the description is delivered as a grouped text message instead (no image) |
+| `SEND_INSIGNIFICANT_FRAMES` | `true` | Send the event-frame photo for `no_person`/`no_significant_motion`. `false` → the description is delivered as a grouped text message instead (no image) |
+| `SEND_GATE_EXTRA_FRAMES` | `true` | For `gate_crossing`/`significant_motion` videos, post any leftover low-motion frame (LLM-analyzed) as a threaded reply to the highlight, after it's sent |
 | `TELEGRAM_FRAME_MAX_DIM` | `1920` | Downscale the frame's longest side before upload (`0` disables); `1280` roughly halves the size again |
 | `TELEGRAM_FRAME_JPEG_QUALITY` | `88` | JPEG quality for the downscaled frame |
 

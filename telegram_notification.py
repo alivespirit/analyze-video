@@ -1074,6 +1074,32 @@ async def button_callback(update, context):
         pass
 
 
+async def send_extra_frame_reply(app, frame_path, caption, reply_to_message_id, file_basename):
+    """Send a secondary low-motion event frame as a threaded reply to an already-sent message.
+
+    Used for gate_crossing / significant_motion videos that also produced leftover low-motion frames
+    (analyzed after the primary highlight was sent). The frame is downscaled and the caption clamped,
+    like the primary photo path. No button — the parent highlight message already carries one.
+    """
+    if not (frame_path and os.path.exists(frame_path)):
+        return
+    cap = _truncate_caption(caption)
+    async with telegram_lock:
+        try:
+            await app.bot.send_photo(
+                chat_id=CHAT_ID, photo=_downscaled_jpeg_bytes(frame_path), caption=cap,
+                reply_to_message_id=reply_to_message_id, parse_mode='Markdown'
+            )
+        except telegram.error.BadRequest as e:
+            logger.warning(f"[{file_basename}] BadRequest on extra-frame reply: {e}. Retrying with escaped Markdown.")
+            await app.bot.send_photo(
+                chat_id=CHAT_ID, photo=_downscaled_jpeg_bytes(frame_path),
+                caption=_truncate_caption(escape_markdown(cap, version=1)),
+                reply_to_message_id=reply_to_message_id, parse_mode='Markdown'
+            )
+    logger.info(f"[{file_basename}] Sent extra event-frame reply.")
+
+
 async def send_notifications(app, video_response, clip_path, file_path, file_basename, timestamp_text, preserve_media_on_failure: bool = False, allow_plain_fallback: bool = True, photo_frame: str | None = None):
     """
     Sends Telegram notifications based on analysis results, including:
@@ -1413,4 +1439,5 @@ async def send_notifications(app, video_response, clip_path, file_path, file_bas
                     raise
 
         logger.info(f"[{file_basename}] Telegram interaction finished.")
+        return sent_message  # primary message (e.g. the highlight) — used as the reply anchor for extra frames
 
