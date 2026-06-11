@@ -203,6 +203,11 @@ GATE_CROP_OVERLAY_WIDTH_FRAC = float(os.getenv("GATE_CROP_OVERLAY_WIDTH_FRAC", "
 GATE_CROP_OVERLAY_BAND = int(os.getenv("GATE_CROP_OVERLAY_BAND", "-1"))
 GATE_CROP_OVERLAY_BAND_SCALE = float(os.getenv("GATE_CROP_OVERLAY_BAND_SCALE", "4.0"))
 GATE_CROP_OVERLAY_UPPER_BODY = os.getenv("GATE_CROP_OVERLAY_UPPER_BODY", "false").lower() == "true"
+# When false, the PiP is never enlarged beyond the person's native crop
+# pixels — the magnifier only ever downscales the (4K) source crop, which is the
+# sharpest result (a 4K crop shown at native size is already ~2x vs the 1080p output).
+# Set true to allow upscaling up to GATE_CROP_OVERLAY_WIDTH_FRAC for a bigger PiP.
+GATE_CROP_OVERLAY_ALLOW_UPSCALE = os.getenv("GATE_CROP_OVERLAY_ALLOW_UPSCALE", "true").lower() == "true"
 
 VIDEO_WRITER_PRESET = (os.getenv("VIDEO_WRITER_PRESET", "faster").strip() or "faster")
 
@@ -596,43 +601,59 @@ def draw_event_overlay(frame, event_idx, total_events, seconds_from_start, frame
     return y1
 
 
-def draw_crop_overlay(frame, clean_frame, person_box, text_top_y, upper_body=False, color=COLOR_LINE):
+def draw_crop_overlay(frame, crop_src, person_box, text_top_y, scale=1.0, upper_body=False, color=COLOR_LINE):
     """
     Draws a live zoomed-in magnifier (picture-in-picture) of person_box in the
-    lower-right corner, above text_top_y, with a connector line from the middle of
-    the box's right border to the center of the PiP. The crop is taken from
-    clean_frame (un-annotated) so the magnifier shows a clean view of the person
-    rather than the drawn boxes/line.
+    lower-right corner of `frame`, above text_top_y, with a two-line "funnel"
+    connector from the box's right corners to the PiP's left corners.
+
+    The crop is taken from `crop_src` — a clean (un-annotated) frame that may be
+    HIGHER resolution than `frame` (e.g. the native 4K frame while `frame` is the
+    1080p output). The magnifier is resized **once, directly** from those native
+    pixels to its final on-screen size, so it exploits the full source detail
+    instead of round-tripping through an upscale + the whole-frame downscale.
 
     Args:
-        frame (np.ndarray): BGR frame to draw onto (already annotated).
-        clean_frame (np.ndarray): Un-annotated BGR frame to crop the person from.
-        person_box (list | tuple): [x1, y1, x2, y2] of the person in frame coords.
-        text_top_y (int): Top y of the event text box; the PiP bottom sits above it.
+        frame (np.ndarray): BGR target frame to draw onto (output resolution).
+        crop_src (np.ndarray): Clean BGR frame to crop from (source/native resolution).
+        person_box (list | tuple): [x1, y1, x2, y2] of the person in `crop_src` coords.
+        text_top_y (int): Top y of the event text box, in `frame` (target) coords.
+        scale (float): crop_src -> frame scale (target px per source px). Funnel
+            anchors are person_box * scale; overlay paddings/thickness are scaled too
+            so they match the downscaled bounding boxes/text.
         upper_body (bool): If True, crop only the top 50% of person_box.
-        color (tuple): BGR color for the PiP border and connector line (matches the
-            person's bounding-box color: green normally, red near the line).
+        color (tuple): BGR color for the PiP border and funnel (matches the person's
+            bounding-box color: green normally, red near the line).
     """
     h, w = frame.shape[:2]
-    # Clamp the full source box to frame bounds (used for the connector anchor).
-    fx1 = max(0, min(int(person_box[0]), w - 1))
-    fy1 = max(0, min(int(person_box[1]), h - 1))
-    fx2 = max(fx1 + 1, min(int(person_box[2]), w))
-    fy2 = max(fy1 + 1, min(int(person_box[3]), h))
+    H, W = crop_src.shape[:2]
+    # Clamp the full source box to source bounds (used for both crop and connector).
+    fx1 = max(0, min(int(person_box[0]), W - 1))
+    fy1 = max(0, min(int(person_box[1]), H - 1))
+    fx2 = max(fx1 + 1, min(int(person_box[2]), W))
+    fy2 = max(fy1 + 1, min(int(person_box[3]), H))
     # Crop region (optionally upper body only) for the magnified image.
     cy2 = fy1 + max(1, (fy2 - fy1) // 2) if upper_body else fy2
-    crop = clean_frame[fy1:cy2, fx1:fx2]
+    crop = crop_src[fy1:cy2, fx1:fx2]
     if crop is None or crop.size == 0:
         return
-
-    # Target PiP width as a fraction of frame width; preserve the crop aspect ratio.
     crop_h, crop_w = crop.shape[:2]
+
+    # Paddings/thickness are resolution-aware source-space constants; scale them into
+    # target space so the PiP matches the (downscaled) bounding boxes and text.
+    margin = max(1, int(round(OVERLAY_PAD_X * scale)))
+    gap = max(1, int(round(OVERLAY_PAD_Y * scale)))
+    thickness = max(1, int(round(OVERLAY_BOX_THICKNESS * scale)))
+
+    # Target PiP width as a fraction of the (target) frame width; preserve aspect.
     pip_w = max(1, int(w * GATE_CROP_OVERLAY_WIDTH_FRAC))
+    # Never enlarge beyond native crop pixels unless explicitly allowed — keeps the
+    # magnifier a pure downscale of the source crop (sharpest).
+    if not GATE_CROP_OVERLAY_ALLOW_UPSCALE:
+        pip_w = min(pip_w, crop_w)
     pip_h = max(1, int(round(pip_w * crop_h / crop_w)))
 
     # Clamp so the PiP fits between the top margin and the event text box.
-    margin = OVERLAY_PAD_X
-    gap = OVERLAY_PAD_Y
     max_h = (text_top_y - gap) - margin
     if max_h < 1:
         return
@@ -643,7 +664,7 @@ def draw_crop_overlay(frame, clean_frame, person_box, text_top_y, upper_body=Fal
     if pip_w < 1:
         return
 
-    interp = cv2.INTER_AREA if crop_w > pip_w else cv2.INTER_LINEAR
+    interp = cv2.INTER_AREA if pip_w <= crop_w else cv2.INTER_CUBIC
     pip = cv2.resize(crop, (pip_w, pip_h), interpolation=interp)
 
     # Bottom-right placement, above the text box.
@@ -654,14 +675,15 @@ def draw_crop_overlay(frame, clean_frame, person_box, text_top_y, upper_body=Fal
     if px1 < 0 or py1 < 0:
         return
 
-    thickness = max(1, OVERLAY_BOX_THICKNESS)  # match the person's bounding-box line width
-    # Connector "funnel": box right corners -> PiP left corners. Drawn first so the
-    # crop/background clip them cleanly at the PiP edge.
-    cv2.line(frame, (fx2, fy1), (px1, py1), color, thickness)  # top-right -> top-left
-    cv2.line(frame, (fx2, fy2), (px1, py2), color, thickness)  # bottom-right -> bottom-left
+    # Connector "funnel" in target coords (full bbox even when cropping upper body).
+    bx2 = int(fx2 * scale)
+    by1 = int(fy1 * scale)
+    by2 = int(fy2 * scale)
+    cv2.line(frame, (bx2, by1), (px1, py1), color, thickness)  # box top-right -> PiP top-left
+    cv2.line(frame, (bx2, by2), (px1, py2), color, thickness)  # box bottom-right -> PiP bottom-left
 
     # Filled background + colored border for legibility against busy scenes.
-    bt = max(2, OVERLAY_LINE_THICKNESS + 1)
+    bt = max(2, thickness + 1)
     cv2.rectangle(frame, (px1 - bt, py1 - bt), (px2 + bt, py2 + bt), (0, 0, 0), -1)
     frame[py1:py2, px1:px2] = pip
     cv2.rectangle(frame, (px1 - 1, py1 - 1), (px2, py2), color, thickness)
@@ -2498,9 +2520,11 @@ def detect_motion(input_video_path, output_dir, fast_processing: bool = False):
                 top_line_text=speedtrap_overlay_text,
             )
 
-            # Live person-crop magnifier: zoom the primary (largest) person whose
-            # center is within the gate band into the lower-right corner, above the
-            # event text, with a connector line from the box to the PiP.
+            # Live person-crop magnifier: select the primary in-band person here (the
+            # most-recent crosser, with hysteresis). The PiP itself is drawn later, on
+            # the downscaled output frame, from the native (4K) crop for max sharpness.
+            primary_overlay_box = None
+            primary_overlay_highlight = False
             if GATE_CROP_OVERLAY_ENABLED and clean_frame_overlay is not None and accepted_persons:
                 overlay_band = (
                     GATE_CROP_OVERLAY_BAND if GATE_CROP_OVERLAY_BAND >= 0
@@ -2514,8 +2538,6 @@ def detect_motion(input_video_path, output_dir, fast_processing: bool = False):
                         last_cross = event_last_cross_frame.get(_eid, -1) if _eid is not None else -1
                         overlay_candidates.append((_eid, last_cross, pbox))
 
-                primary_overlay_box = None
-                primary_overlay_highlight = False
                 if overlay_candidates:
                     # Hysteresis: keep the current subject while it stays in the band,
                     # unless another candidate has crossed the line MORE RECENTLY (that
@@ -2543,15 +2565,6 @@ def detect_motion(input_video_path, output_dir, fast_processing: bool = False):
                     in_tol = abs(cyc - LINE_Y) <= LINE_Y_TOLERANCE
                     win = (event_highlight_until.get(chosen[0], 0) >= frame_idx) if chosen[0] is not None else False
                     primary_overlay_highlight = in_tol or win
-                if primary_overlay_box is not None:
-                    draw_crop_overlay(
-                        frame,
-                        clean_frame_overlay,
-                        primary_overlay_box,
-                        text_top_y,
-                        upper_body=GATE_CROP_OVERLAY_UPPER_BODY,
-                        color=(COLOR_HIGHLIGHT if primary_overlay_highlight else COLOR_PERSON),
-                    )
 
             # Append frames to output based on output_stride to speed up render without
             # sacrificing tracking continuity (for moderate-length events)
@@ -2563,9 +2576,23 @@ def detect_motion(input_video_path, output_dir, fast_processing: bool = False):
                 # This reduces memory pressure substantially on low-power machines.
                 h_out, w_out = output_size[1], output_size[0]
                 frame_out = frame
+                overlay_scale = 1.0
                 if frame.shape[0] != h_out or frame.shape[1] != w_out:
                     render_resize_interpolation = cv2.INTER_LINEAR if is_4k else cv2.INTER_AREA
                     frame_out = cv2.resize(frame, (w_out, h_out), interpolation=render_resize_interpolation)
+                    overlay_scale = w_out / orig_w
+                # Draw the magnifier on the (downscaled) output frame, cropping from the
+                # native clean frame so the PiP keeps full source detail.
+                if GATE_CROP_OVERLAY_ENABLED and primary_overlay_box is not None and clean_frame_overlay is not None:
+                    draw_crop_overlay(
+                        frame_out,
+                        clean_frame_overlay,
+                        primary_overlay_box,
+                        int(text_top_y * overlay_scale),
+                        scale=overlay_scale,
+                        upper_body=GATE_CROP_OVERLAY_UPPER_BODY,
+                        color=(COLOR_HIGHLIGHT if primary_overlay_highlight else COLOR_PERSON),
+                    )
                 rgb_frame = cv2.cvtColor(frame_out, cv2.COLOR_BGR2RGB)
                 event_frames_rgb.append(rgb_frame)
                 if prof.enabled:

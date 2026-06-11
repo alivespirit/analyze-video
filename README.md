@@ -297,6 +297,7 @@ pip install -r requirements.txt
     - `GATE_CROP_OVERLAY_BAND`: half-height (px) of the gate band within which the PiP is shown; `-1` derives it at runtime (default: `-1`)
     - `GATE_CROP_OVERLAY_BAND_SCALE`: multiplier applied to the derived band `(LINE_Y_TOLERANCE + REID_LINE_EXTRA_TOLERANCE)` — larger keeps the PiP visible longer (default: `4.0`)
     - `GATE_CROP_OVERLAY_UPPER_BODY`: show only the top 50% (head/torso) of the crop (default: `false`)
+    - `GATE_CROP_OVERLAY_ALLOW_UPSCALE`: allow enlarging the PiP beyond the native crop size. If `false` — the magnifier crops from the native (4K) frame and only downscales, so it stays sharp (~2× vs the 1080p output); set `true` (and raise `WIDTH_FRAC`) for a bigger but upscaled PiP
   - `VIDEO_WRITER_PRESET`: libx264 encoder preset for highlight and pose clips (default: `faster`)
   - `TESLA_EMAIL`, `TESLA_REFRESH_TOKEN`: Tesla API credentials (master only; `detect_motion.py` only reads the cache)
   - `TESLA_SOC_FILE`: path to Tesla SoC cache file (default: `temp/tesla_soc.txt`)
