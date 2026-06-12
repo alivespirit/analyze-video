@@ -1056,7 +1056,7 @@ def schedule_extra_frame_reply(app, frames: list, file_path: str, file_basename:
             best = _pick_best_frame(frames)
             if not best:
                 return
-            caption = f"_{timestamp_text}_ \U0001F916 " + description
+            caption = f"_{timestamp_text}_: \U0001F916 " + description
             await send_extra_frame_reply(app, best, caption, reply_to_message_id, file_basename)
         except Exception as e:
             logger.warning(f"[{file_basename}] Extra-frame reply failed: {e}")
