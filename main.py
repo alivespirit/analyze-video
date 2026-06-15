@@ -938,6 +938,33 @@ TESLA_SOC_FRESH_SECONDS = 7200   # skip API if cache is younger than 2 hours
 TESLA_SOC_POLL_SECONDS = 600     # try API every 10 minutes when cache is stale
 
 
+def _mount_tls13_adapter(tesla):
+    """Force the teslapy session onto TLS 1.3.
+
+    Since ~June 2026 Tesla's legacy Owner API (owner-api.teslamotors.com) rejects
+    access tokens that were NOT minted over TLS 1.3 with `403 forbidden, see
+    .../fleet-api` -- even for old vehicles that can't use the Fleet API. Minting
+    the token over TLS 1.3 makes the Owner API accept it again (teslapy already
+    lists vehicles via /api/1/products, which still works; only /api/1/vehicles
+    became Fleet-only). Mirrors teslamate's fix (PRs #5390 / #5406). The mounted
+    adapter covers token refresh (the part that matters) and all data calls.
+    """
+    import ssl
+    import requests
+    from urllib3.poolmanager import PoolManager
+
+    class _TLS13HTTPAdapter(requests.adapters.HTTPAdapter):
+        def init_poolmanager(self, connections, maxsize, block=False, **kwargs):
+            ctx = ssl.create_default_context()
+            ctx.minimum_version = ssl.TLSVersion.TLSv1_3
+            kwargs["ssl_context"] = ctx
+            self.poolmanager = PoolManager(
+                num_pools=connections, maxsize=maxsize, block=block, **kwargs
+            )
+
+    tesla.mount("https://", _TLS13HTTPAdapter(max_retries=3))
+
+
 def fetch_tesla_soc():
     """Fetch Tesla SoC from the API and write to cache file. Returns battery_level or None."""
     try:
@@ -946,17 +973,34 @@ def fetch_tesla_soc():
         logger.warning("teslapy not installed, cannot fetch Tesla SoC.")
         return None
 
+    def _read_charge_state(tesla):
+        vehicles = tesla.vehicle_list()
+        if not vehicles:
+            return None
+        return vehicles[0].get_vehicle_data().get("charge_state", {})
+
     logger.debug("Tesla SoC: calling API...")
     try:
         with teslapy.Tesla(email=TESLA_EMAIL, cache_file=os.path.join(TEMP_DIR, "tesla_token_cache.json")) as tesla:
+            _mount_tls13_adapter(tesla)
             if not tesla.authorized:
                 tesla.refresh_token(refresh_token=TESLA_REFRESH_TOKEN)
-            vehicles = tesla.vehicle_list()
-            if not vehicles:
+            try:
+                charge_state = _read_charge_state(tesla)
+            except Exception as e:
+                # A token cached before this fix was minted over <TLS1.3, so the
+                # Owner API rejects it with 403. Re-mint over TLS 1.3 (the adapter
+                # is already mounted) and retry once; this also heals the cache.
+                status = getattr(getattr(e, "response", None), "status_code", None)
+                if status == 403 and tesla.authorized:
+                    logger.debug("Tesla SoC: Owner API rejected cached token (403); re-minting over TLS 1.3.")
+                    tesla.refresh_token()
+                    charge_state = _read_charge_state(tesla)
+                else:
+                    raise
+            if charge_state is None:
                 logger.debug("Tesla SoC: no vehicles found.")
                 return None
-            vehicle = vehicles[0]
-            charge_state = vehicle.get_vehicle_data().get("charge_state", {})
             battery_level = charge_state.get("battery_level")
             if battery_level is not None:
                 try:
@@ -972,7 +1016,7 @@ def fetch_tesla_soc():
         if "408 Client Error" in str(e):
             logger.debug("Tesla SoC: vehicle is asleep.")
         else:
-            logger.debug("Tesla SoC: API call failed: %s", e)
+            logger.warning("Tesla SoC: API call failed: %s", e)
         return None
 
 
