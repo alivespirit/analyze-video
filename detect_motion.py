@@ -111,11 +111,11 @@ TESLA_SOC_DISPLAY_ENABLED = os.getenv("TESLA_SOC_DISPLAY_ENABLED", "true").lower
 
 # --- Object Detection Configuration ---
 OBJECT_DETECTION_MODEL_PATH = os.getenv("OBJECT_DETECTION_MODEL_PATH", default=os.path.join("models", "yolo12n_openvino_model"))
-CONF_THRESHOLD = float(os.getenv("CONF_THRESHOLD", "0.35"))
+CONF_THRESHOLD = float(os.getenv("CONF_THRESHOLD", "0.5"))
 DETECT_CLASSES = [0, 1]  # 0: person, 1: car
 TRACK_ROI_ENABLED = os.getenv("TRACK_ROI_ENABLED", "true").lower() == "true"  # Enable tracker ROI crop (from roi.json: 'tracker_roi' or fallback to motion_detection_roi/legacy)
 TRACKER_CONFIG = os.getenv("TRACKER_CONFIG", os.path.join(SCRIPT_DIR, "config", "tracker.yaml"))
-IOU_THRESHOLD = float(os.getenv("IOU_THRESHOLD", "0.7"))
+IOU_THRESHOLD = float(os.getenv("IOU_THRESHOLD", "0.5"))
 IMGSZ = int(os.getenv("IMGSZ", "640"))
 COLOR_PERSON = (100, 200, 0)
 COLOR_CAR = (200, 120, 0)

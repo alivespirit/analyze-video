@@ -1,7 +1,7 @@
 description: Ultralytics YOLOv12n model trained on config.yaml
 author: Ultralytics
-date: '2026-03-22T08:33:40.240579'
-version: 8.4.19
+date: '2026-06-16T10:00:50.306368'
+version: 8.4.30
 license: AGPL-3.0 License (https://ultralytics.com/license)
 docs: https://docs.ultralytics.com
 stride: 32
@@ -16,7 +16,7 @@ names:
 args:
   batch: 1
   fraction: 1.0
-  half: false
+  half: true
   int8: false
   dynamic: false
   nms: false
