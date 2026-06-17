@@ -202,6 +202,11 @@ GATE_CROP_OVERLAY_WIDTH_FRAC = float(os.getenv("GATE_CROP_OVERLAY_WIDTH_FRAC", "
 # scaled by GATE_CROP_OVERLAY_BAND_SCALE (bigger band = PiP visible longer).
 GATE_CROP_OVERLAY_BAND = int(os.getenv("GATE_CROP_OVERLAY_BAND", "-1"))
 GATE_CROP_OVERLAY_BAND_SCALE = float(os.getenv("GATE_CROP_OVERLAY_BAND_SCALE", "4.0"))
+# Keep the PiP visible for this many frames after the subject last sat inside the
+# band, as long as its track is still alive. Debounces bbox-center jitter at the
+# band edge (which otherwise blinks the PiP on/off) without keeping it on once the
+# person has actually walked away. 0 disables the linger.
+GATE_CROP_OVERLAY_LINGER_FRAMES = int(os.getenv("GATE_CROP_OVERLAY_LINGER_FRAMES", "10"))
 GATE_CROP_OVERLAY_UPPER_BODY = os.getenv("GATE_CROP_OVERLAY_UPPER_BODY", "false").lower() == "true"
 # When false, the PiP is never enlarged beyond the person's native crop
 # pixels — the magnifier only ever downscales the (4K) source crop, which is the
@@ -1824,6 +1829,9 @@ def detect_motion(input_video_path, output_dir, fast_processing: bool = False):
         event_last_cross_frame = {}
         # Current PiP subject entity id, persisted across frames for hysteresis
         prev_pip_eid = None
+        # Frame up to which the PiP stays visible after the subject last sat in-band
+        # (linger/debounce for band-edge jitter)
+        overlay_visible_until = -1
         # Stable-side tracking and dwell confirmation per entity
         event_stable_side = {}
         event_stable_since = {}
@@ -2530,14 +2538,21 @@ def detect_motion(input_video_path, output_dir, fast_processing: bool = False):
                     GATE_CROP_OVERLAY_BAND if GATE_CROP_OVERLAY_BAND >= 0
                     else int((LINE_Y_TOLERANCE + REID_LINE_EXTRA_TOLERANCE) * GATE_CROP_OVERLAY_BAND_SCALE)
                 )
-                # Gather in-band person candidates with their last-crossing frame.
+                # Gather in-band candidates (with last-crossing frame) plus a lookup of
+                # every tracked person's current box, so we can "linger" on the current
+                # subject through brief dips out of the band without blinking.
                 overlay_candidates = []  # (eid, last_cross, box)
+                persons_by_eid = {}
                 for pbox, _eid in accepted_persons:
+                    if _eid is not None:
+                        persons_by_eid[_eid] = pbox
                     yc = (pbox[1] + pbox[3]) / 2
                     if abs(yc - LINE_Y) <= overlay_band:
                         last_cross = event_last_cross_frame.get(_eid, -1) if _eid is not None else -1
                         overlay_candidates.append((_eid, last_cross, pbox))
 
+                chosen_eid = None
+                chosen_box = None
                 if overlay_candidates:
                     # Hysteresis: keep the current subject while it stays in the band,
                     # unless another candidate has crossed the line MORE RECENTLY (that
@@ -2557,13 +2572,25 @@ def detect_motion(input_video_path, output_dir, fast_processing: bool = False):
                             key=lambda c: (c[1], -abs((c[2][1] + c[2][3]) / 2 - LINE_Y),
                                            (c[2][2] - c[2][0]) * (c[2][3] - c[2][1])),
                         )
-                    prev_pip_eid = chosen[0]
-                    primary_overlay_box = chosen[2]
+                    chosen_eid = chosen[0]
+                    chosen_box = chosen[2]
+                    prev_pip_eid = chosen_eid
+                    overlay_visible_until = frame_idx + GATE_CROP_OVERLAY_LINGER_FRAMES
+                elif (prev_pip_eid is not None and prev_pip_eid in persons_by_eid
+                        and frame_idx <= overlay_visible_until):
+                    # Linger: the subject momentarily left the band (band-edge jitter)
+                    # but is still tracked — keep showing it with its current box until
+                    # the linger window expires.
+                    chosen_eid = prev_pip_eid
+                    chosen_box = persons_by_eid[prev_pip_eid]
+
+                if chosen_box is not None:
+                    primary_overlay_box = chosen_box
                     # Match the drawn box color: red (highlight) when in tolerance or
                     # within the highlight window, else green.
-                    cyc = (chosen[2][1] + chosen[2][3]) / 2
+                    cyc = (chosen_box[1] + chosen_box[3]) / 2
                     in_tol = abs(cyc - LINE_Y) <= LINE_Y_TOLERANCE
-                    win = (event_highlight_until.get(chosen[0], 0) >= frame_idx) if chosen[0] is not None else False
+                    win = (event_highlight_until.get(chosen_eid, 0) >= frame_idx) if chosen_eid is not None else False
                     primary_overlay_highlight = in_tol or win
 
             # Append frames to output based on output_stride to speed up render without

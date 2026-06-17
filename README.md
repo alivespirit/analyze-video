@@ -296,6 +296,7 @@ pip install -r requirements.txt
     - `GATE_CROP_OVERLAY_WIDTH_FRAC`: PiP width as a fraction of the frame width (default: `0.18`)
     - `GATE_CROP_OVERLAY_BAND`: half-height (px) of the gate band within which the PiP is shown; `-1` derives it at runtime (default: `-1`)
     - `GATE_CROP_OVERLAY_BAND_SCALE`: multiplier applied to the derived band `(LINE_Y_TOLERANCE + REID_LINE_EXTRA_TOLERANCE)` — larger keeps the PiP visible longer (default: `4.0`)
+    - `GATE_CROP_OVERLAY_LINGER_FRAMES`: keep the PiP on for this many frames after the subject last sat in-band (as long as its track is alive), debouncing bbox-center jitter at the band edge so the PiP doesn't blink on/off. `0` disables (default: `10`)
     - `GATE_CROP_OVERLAY_UPPER_BODY`: show only the top 50% (head/torso) of the crop (default: `false`)
     - `GATE_CROP_OVERLAY_ALLOW_UPSCALE`: allow enlarging the PiP beyond the native crop size. If `false` — the magnifier crops from the native (4K) frame and only downscales, so it stays sharp (~2× vs the 1080p output); set `true` (and raise `WIDTH_FRAC`) for a bigger but upscaled PiP
   - `VIDEO_WRITER_PRESET`: libx264 encoder preset for highlight and pose clips (default: `faster`)
