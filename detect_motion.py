@@ -2863,24 +2863,72 @@ def detect_motion(input_video_path, output_dir, fast_processing: bool = False):
                     except Exception:
                         continue
 
-                # Margin-based decision vs negatives (if present)
-                best_neg = 0.0
-                if scored:
-                    try:
-                        best_neg = max(item.get("neg", 0.0) for item in scored)
-                    except Exception:
-                        best_neg = 0.0
-                reid_result["matched"] = (best_score >= REID_THRESHOLD) and ((best_score - best_neg) >= REID_NEGATIVE_MARGIN)
-                reid_result["score"] = round(best_score, 4)
-                reid_result["neg_score"] = round(best_neg, 4)
+                # Per-entity margin decision vs negatives.
+                #
+                # Each crossing person's crops are aggregated SEPARATELY: an
+                # entity matches only if its OWN best positive clears the
+                # threshold AND beats its OWN best negative by the margin. This
+                # avoids cross-person contamination — pooling a single global
+                # max-pos against a global max-neg let a *different* person who
+                # matched the negative gallery shrink the POI's margin and reject
+                # a true match when several people cross together.
+                #
+                # Crops without a stable entity_id (composite_eid is None) each
+                # form their own singleton group so unknown persons are never
+                # conflated into one.
+                entity_groups = {}  # key -> {"pos","neg","best","neg_path"}
+                for none_idx, item in enumerate(scored):
+                    eid = item.get("entity_id")
+                    key = eid if eid is not None else ("__none__", none_idx)
+                    g = entity_groups.get(key)
+                    if g is None:
+                        entity_groups[key] = {
+                            "pos": item["score"], "neg": item["neg"],
+                            "best": item, "neg_path": item.get("best_neg_gallery_path"),
+                        }
+                    else:
+                        if item["score"] > g["pos"]:
+                            g["pos"] = item["score"]
+                            g["best"] = item
+                        if item["neg"] > g["neg"]:
+                            g["neg"] = item["neg"]
+                            g["neg_path"] = item.get("best_neg_gallery_path")
+
+                matching = [
+                    g for g in entity_groups.values()
+                    if g["pos"] >= REID_THRESHOLD and (g["pos"] - g["neg"]) >= REID_NEGATIVE_MARGIN
+                ]
+                if matching:
+                    # Highest-positive entity among those that pass — the POI.
+                    decision = max(matching, key=lambda g: g["pos"])
+                elif entity_groups:
+                    # None matched: report the strongest-positive entity (with
+                    # its OWN negative) for diagnostics.
+                    decision = max(entity_groups.values(), key=lambda g: g["pos"])
+                else:
+                    decision = None
+
+                if decision is not None:
+                    best_crop = decision["best"]
+                    decided_pos = decision["pos"]
+                    decided_neg = decision["neg"]
+                    decided_neg_path = decision["neg_path"]
+                else:
+                    best_crop = None
+                    decided_pos = best_score
+                    decided_neg = best_neg_score_global
+                    decided_neg_path = best_neg_gallery_path
+
+                reid_result["matched"] = bool(matching)
+                reid_result["score"] = round(decided_pos, 4)
+                reid_result["neg_score"] = round(decided_neg, 4)
                 reid_result["margin"] = REID_NEGATIVE_MARGIN
-                reid_result["best_gallery_path"] = best_gallery_path
-                reid_result["best_neg_gallery_path"] = best_neg_gallery_path
+                reid_result["best_gallery_path"] = best_crop["best_gallery_path"] if best_crop else best_gallery_path
+                reid_result["best_neg_gallery_path"] = decided_neg_path
 
                 # Link the match to the specific person's crossing direction so
                 # downstream code can emit the correct AUTO Reaction when multiple
                 # people cross in different directions within one video.
-                best_crop = max(scored, key=lambda x: x["score"]) if scored else None
                 if reid_result["matched"]:
                     best_eid = best_crop.get("entity_id") if best_crop else None
                     matched_dir = entity_directions.get(best_eid) if best_eid is not None else None
@@ -3074,7 +3122,7 @@ def detect_motion(input_video_path, output_dir, fast_processing: bool = False):
                     except Exception as e:
                         logger.warning(f"[{file_basename}] Failed to save ReID crops: {e}")
 
-                logger.info(f"[{file_basename}] ReID result: matched={reid_result['matched']}, pos={best_score:.3f}, neg={best_neg:.3f}, delta={(best_score - best_neg):.3f}, thr={REID_THRESHOLD:.3f}, margin={REID_NEGATIVE_MARGIN:.3f}.")
+                logger.info(f"[{file_basename}] ReID result: matched={reid_result['matched']}, pos={decided_pos:.3f}, neg={decided_neg:.3f}, delta={(decided_pos - decided_neg):.3f}, thr={REID_THRESHOLD:.3f}, margin={REID_NEGATIVE_MARGIN:.3f}. (entities={len(entity_groups)}, matched_entities={len(matching)})")
             else:
                 logger.info(f"[{file_basename}] No ReID candidate crops collected.")
         except Exception as e:
