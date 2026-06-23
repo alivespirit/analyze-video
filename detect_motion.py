@@ -139,16 +139,16 @@ REID_MODEL_PATH = os.getenv("REID_MODEL_PATH", os.path.join(
 ))
 REID_GALLERY_PATH = os.getenv("REID_GALLERY_PATH", os.path.join(SCRIPT_DIR, "person_of_interest"))
 REID_THRESHOLD = float(os.getenv("REID_THRESHOLD", "0.6")) # cosine similarity threshold
-REID_SAMPLING_STRIDE = 2  # sample every Nth frame near the line for ReID
-REID_MAX_SAMPLES = 128 # maximum number of ReID samples to collect per event
-SAVE_REID_BEST_CROP = True
-REID_TOP_K = 3  # save up to K best, diverse crops per event
-REID_MATCHED_CROPS_MAX = 2  # when matched, reserve up to this many slots for pose-diverse crops of the matched person (remainder filled with other persons)
-REID_DIVERSITY_MIN_DIST = 0.2  # min cosine distance between selected embeddings
-REID_SAME_PERSON_SIM = 0.75  # cosine similarity above this = likely same physical person
+REID_SAMPLING_STRIDE = int(os.getenv("REID_SAMPLING_STRIDE", "2"))  # sample every Nth frame near the line for ReID
+REID_MAX_SAMPLES = int(os.getenv("REID_MAX_SAMPLES", "128")) # maximum number of ReID samples to collect per event
+SAVE_REID_BEST_CROP = os.getenv("SAVE_REID_BEST_CROP", "true").lower() == "true"
+REID_TOP_K = int(os.getenv("REID_TOP_K", "3"))  # save up to K best, diverse crops per event
+REID_MATCHED_CROPS_MAX = int(os.getenv("REID_MATCHED_CROPS_MAX", "2"))  # when matched, reserve up to this many slots for pose-diverse crops of the matched person (remainder filled with other persons)
+REID_DIVERSITY_MIN_DIST = float(os.getenv("REID_DIVERSITY_MIN_DIST", "0.2"))  # min cosine distance between selected embeddings
+REID_SAME_PERSON_SIM = float(os.getenv("REID_SAME_PERSON_SIM", "0.75"))  # cosine similarity above this = likely same physical person
                               # (used to dedupe crops from fragmented tracker IDs)
 REID_NEGATIVE_GALLERY_PATH = os.getenv("REID_NEGATIVE_GALLERY_PATH", os.path.join(SCRIPT_DIR, "person_of_interest_negative"))
-REID_NEGATIVE_MARGIN = 0.08  # match must exceed negatives by at least this cosine margin
+REID_NEGATIVE_MARGIN = float(os.getenv("REID_NEGATIVE_MARGIN", "0.08"))  # match must exceed negatives by at least this cosine margin
 
 # --- Optional person pose estimation (post-tracking, crop-only) ---
 POSE_ENABLED = os.getenv("POSE_ENABLED", "false").lower() == "true"
@@ -163,7 +163,7 @@ POSE_ABOVE_LINE_Y = int(os.getenv("POSE_ABOVE_LINE_Y", "2100"))
 # The speed estimate is intentionally lightweight and heuristic-based.
 # It converts pixel motion to km/h using configurable meters-per-pixel,
 # with extra correction for perspective (y position) and wide-angle edges (x position).
-CAR_SPEED_ENABLED = True
+CAR_SPEED_ENABLED = os.getenv("CAR_SPEED_ENABLED", "true").lower() == "true"
 # Default tuned down for this camera setup; can be overridden via env.
 CAR_SPEED_BASE_MPP = float(os.getenv("CAR_SPEED_BASE_MPP", "0.0051"))
 CAR_SPEED_REF_Y_NORM = float(os.getenv("CAR_SPEED_REF_Y_NORM", "0.60"))
