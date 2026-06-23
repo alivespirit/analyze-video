@@ -140,7 +140,7 @@ REID_MODEL_PATH = os.getenv("REID_MODEL_PATH", os.path.join(
 REID_GALLERY_PATH = os.getenv("REID_GALLERY_PATH", os.path.join(SCRIPT_DIR, "person_of_interest"))
 REID_THRESHOLD = float(os.getenv("REID_THRESHOLD", "0.6")) # cosine similarity threshold
 REID_SAMPLING_STRIDE = int(os.getenv("REID_SAMPLING_STRIDE", "2"))  # sample every Nth frame near the line for ReID
-REID_MAX_SAMPLES = int(os.getenv("REID_MAX_SAMPLES", "128")) # maximum number of ReID samples to collect per event
+REID_MAX_SAMPLES = int(os.getenv("REID_MAX_SAMPLES", "128")) # maximum number of ReID samples to collect per video
 SAVE_REID_BEST_CROP = os.getenv("SAVE_REID_BEST_CROP", "true").lower() == "true"
 REID_TOP_K = int(os.getenv("REID_TOP_K", "3"))  # save up to K best, diverse crops per event
 REID_MATCHED_CROPS_MAX = int(os.getenv("REID_MATCHED_CROPS_MAX", "2"))  # when matched, reserve up to this many slots for pose-diverse crops of the matched person (remainder filled with other persons)
@@ -184,7 +184,7 @@ CAR_TRAIL_COLOR = (255, 255, 255)
 
 # --- Car speedtrap configuration ---
 # Computes speed from frame count between two vertical X-lines with known distance.
-CAR_SPEEDTRAP_ENABLED = True
+CAR_SPEEDTRAP_ENABLED = os.getenv("CAR_SPEEDTRAP_ENABLED", "true").lower() == "true"
 CAR_SPEEDTRAP_X1 = int(os.getenv("CAR_SPEEDTRAP_X1", "1860"))
 CAR_SPEEDTRAP_X2 = int(os.getenv("CAR_SPEEDTRAP_X2", "2620"))
 CAR_SPEEDTRAP_DISTANCE_M = float(os.getenv("CAR_SPEEDTRAP_DISTANCE_M", "5.0"))
