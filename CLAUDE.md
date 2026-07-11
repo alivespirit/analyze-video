@@ -19,7 +19,7 @@ pip install -r requirements.txt
 python main.py
 ```
 
-The app auto-restarts when any `.py` file is modified (via watchdog + `os.execv`).
+The app auto-restarts when any `.py` file is modified (via watchdog + `os.execv`). In a supervised deployment set `RESTART_VIA_SUPERVISOR=true` so the restart exits (code `RESTART_EXIT_CODE`, default `42`) and the supervisor relaunches instead of `os.execv` — see the **Master Service (Windows / shawl)** section below.
 
 ## Testing a Single Video
 
@@ -152,6 +152,21 @@ Tesla State of Charge is fetched by a periodic scheduler in `main.py` (`tesla_so
 ### Restart Recovery
 
 A JSON ledger (`temp/processing_ledger.json`) tracks file processing status. After restart, files within `RESTART_RECOVERY_WINDOW_SECONDS` (default 180s) are re-queued.
+
+### Master Service (Windows / shawl)
+
+In production the master (native Windows 10) runs as a Windows service via **shawl** (a maintained Rust service wrapper; NSSM is the common alternative but unmaintained since 2017), not the old Startup-folder `.bat`. This gives start-at-boot **without an interactive login** (survives an unattended power-cycle) and **auto-restart on crash** — the app has no crash supervisor of its own, so an unhandled exception otherwise exits for good ([main.py](main.py) top-level `except`).
+
+- **Target a real interpreter, not the Microsoft Store alias.** `...\AppData\Local\Microsoft\WindowsApps\python.exe` is a per-user reparse stub that fails under a service with `os error 1920` ("file cannot be accessed by the system") and whose path moves on every Store update. Install python.org Python (all-users), disable the Store aliases, and point the service at a project venv's `.venv\Scripts\python.exe`.
+- **`RESTART_VIA_SUPERVISOR`** (`main.py`, default `false`): set `true` on the master. The `.py`-change self-restart then exits with `RESTART_EXIT_CODE` (default `42`) and lets shawl relaunch, instead of `os.execv`. On Windows `os.execv` spawns a *new* PID and exits the current one, so under a PID-tracking supervisor the supervisor's fresh copy **and** the exec'd child both run → duplicate instance (double Telegram polling, dashboard port clash). `false` preserves the original in-process `os.execv` (correct only with no supervisor).
+- **Service creation** — `--restart` relaunches on any unexpected exit but not on a commanded `sc stop`; `--no-log-cmd` stops shawl from capturing the app's stdout (the app already writes its own rotating logs to `LOG_PATH`, which the dashboard reads — otherwise logs are duplicated), keeping only shawl's own start/stop/restart log:
+  ```bat
+  shawl add --name AnalyzeVideo --cwd "C:\NAS\analyze-video" --restart --no-log-cmd ^
+    --log-dir "C:\NAS\logs\shawl" -- "C:\NAS\analyze-video\.venv\Scripts\python.exe" "C:\NAS\analyze-video\main.py"
+  sc config AnalyzeVideo start= delayed-auto
+  ```
+- **Dashboard firewall.** The service runs as LocalSystem under a *different* `python.exe` than any interactive run, so a previously-approved inbound rule doesn't apply — add one for the dashboard port or remote clients get `ERR_CONNECTION_TIMED_OUT` (silent drop, not refusal): `netsh advfirewall firewall add rule name="AnalyzeVideo Dashboard 8192" dir=in action=allow protocol=TCP localport=8192`. Set `LOG_DASHBOARD_HOST=0.0.0.0` so a boot-time or IP change can't strand the bind.
+- **Deploy cycle:** `sc stop AnalyzeVideo` → copy files → `sc start AnalyzeVideo` (clean), rather than relying on the file-watch restart under the supervisor.
 
 ### Fast Processing Mode
 

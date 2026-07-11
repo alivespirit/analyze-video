@@ -139,6 +139,13 @@ ENABLE_LOG_DASHBOARD = os.getenv("ENABLE_LOG_DASHBOARD", "false").lower() == "tr
 LOG_DASHBOARD_PORT = int(os.getenv("LOG_DASHBOARD_PORT", "8000"))
 LOG_DASHBOARD_HOST = os.getenv("LOG_DASHBOARD_HOST", "0.0.0.0")
 RESTART_RECOVERY_WINDOW_SECONDS = int(os.getenv("RESTART_RECOVERY_WINDOW_SECONDS", "180"))
+# When running under an external service supervisor (shawl/NSSM/Task Scheduler), restart by
+# exiting with RESTART_EXIT_CODE and letting the supervisor relaunch us, instead of os.execv.
+# On Windows os.execv spawns a NEW pid and lets this process exit, so a supervisor sees "its"
+# process die and starts a SECOND instance (duplicate Telegram polling + dashboard port clash).
+# Default false preserves the original in-process os.execv self-restart (correct with no supervisor).
+RESTART_VIA_SUPERVISOR = os.getenv("RESTART_VIA_SUPERVISOR", "false").lower() == "true"
+RESTART_EXIT_CODE = int(os.getenv("RESTART_EXIT_CODE", "42"))
 RETENTION_DAYS = int(os.getenv("RETENTION_DAYS", "8"))
 RETENTION_CLEANUP_TIME = os.getenv("RETENTION_CLEANUP_TIME", "00:10")  # HH:MM
 TEMP_RETENTION_DAYS = 30
@@ -1664,21 +1671,35 @@ async def main():
                 ex.shutdown(wait=False, cancel_futures=True)
             logger.info("Executors issued fast shutdown command.")
 
-            logger.info("RESTART_REQUESTED is True. Executing self-restart...")
-            # Write restart marker before replacing the process
+            # Write restart marker before restarting so files missed during the
+            # restart window are recovered on the next startup.
             write_restart_marker(RESTART_MARKER_PATH)
-            # Flush standard streams before exec, as they might be inherited
+            # Flush standard streams before exiting/exec, as they might be inherited
             sys.stdout.flush()
             sys.stderr.flush()
-            # Replace the current process with a new one
-            # sys.executable is the path to the Python interpreter
-            # sys.argv are the original command-line arguments
-            try:
-                os.execv(sys.executable, [sys.executable] + sys.argv)
-            except Exception as e_exec:
-                # This part will only be reached if os.execv fails, which is rare
-                logger.critical(f"FATAL: os.execv failed during restart attempt: {e_exec}", exc_info=True)
-                # At this point, the script cannot restart itself and will exit.
+
+            if RESTART_VIA_SUPERVISOR:
+                # Supervisor-driven restart: exit and let shawl/NSSM/Task Scheduler
+                # relaunch us. Avoids os.execv's duplicate-instance trap on Windows
+                # (see RESTART_VIA_SUPERVISOR definition above). Use os._exit so we
+                # terminate immediately without asyncio loop teardown, mirroring the
+                # abrupt hand-off os.execv used to do.
+                logger.info(
+                    f"RESTART_REQUESTED is True. Exiting with code {RESTART_EXIT_CODE} "
+                    "for supervisor-driven restart (RESTART_VIA_SUPERVISOR=true)."
+                )
+                os._exit(RESTART_EXIT_CODE)
+            else:
+                logger.info("RESTART_REQUESTED is True. Executing self-restart via os.execv...")
+                # Replace the current process with a new one
+                # sys.executable is the path to the Python interpreter
+                # sys.argv are the original command-line arguments
+                try:
+                    os.execv(sys.executable, [sys.executable] + sys.argv)
+                except Exception as e_exec:
+                    # This part will only be reached if os.execv fails, which is rare
+                    logger.critical(f"FATAL: os.execv failed during restart attempt: {e_exec}", exc_info=True)
+                    # At this point, the script cannot restart itself and will exit.
         else:
             logger.info("Graceful shutdown: Allowing current analysis to finish...")
             # For a normal shutdown (e.g., Ctrl+C), we wait for the current task to complete.

@@ -203,6 +203,58 @@ pip install -r requirements.txt
 
 ---
 
+## Running as a Windows Service (Master)
+
+For unattended, long-running deployment the master should run as a **Windows service** instead of a Startup-folder `.bat`. A service starts at boot **without an interactive login** (so it survives an unattended power-cycle) and is **restarted automatically on crash** — `main.py` has no crash supervisor of its own, so an unhandled exception otherwise leaves it dead until someone notices.
+
+We use [**shawl**](https://github.com/mtkennerly/shawl), a small, actively maintained Rust service wrapper (NSSM is a common alternative but has been unmaintained since 2017).
+
+**1. Use a real Python interpreter — not the Microsoft Store alias.**
+The `python.exe` under `C:\Users\<you>\AppData\Local\Microsoft\WindowsApps\` is a per-user reparse-point stub. It works in an interactive shell but fails under a service with `os error 1920` ("file cannot be accessed by the system"), and its path changes whenever the Store updates Python. Install Python from python.org with **"Install for all users"**, disable the Store aliases (Settings → Apps → Advanced app settings → App execution aliases → turn off `python.exe`/`python3.exe`), then create a project venv:
+```bat
+"C:\Program Files\Python311\python.exe" -m venv C:\NAS\analyze-video\.venv
+C:\NAS\analyze-video\.venv\Scripts\python.exe -m pip install -r C:\NAS\analyze-video\requirements.txt
+```
+
+**2. Set the supervisor restart flag** in the master's `.env`:
+```env
+RESTART_VIA_SUPERVISOR=true    # exit-and-be-relaunched instead of os.execv (see below)
+# RESTART_EXIT_CODE=42         # exit code used for an intentional restart (default 42)
+LOG_DASHBOARD_HOST=0.0.0.0     # bind all interfaces so an IP change can't strand the dashboard
+```
+The `.py`-change self-restart normally uses `os.execv`. On Windows that **spawns a new process and exits the current one**, so a service supervisor sees "its" process die, starts a fresh copy, and ends up with **two** instances running (duplicate Telegram polling, dashboard port conflict). With `RESTART_VIA_SUPERVISOR=true` the app instead exits with `RESTART_EXIT_CODE` and lets shawl relaunch it — a single supervised process. Leave it unset (`false`) when running without a supervisor.
+
+**3. Create and start the service** (elevated `cmd`):
+```bat
+shawl add --name AnalyzeVideo --cwd "C:\NAS\analyze-video" --restart --no-log-cmd ^
+  --log-dir "C:\NAS\logs\shawl" ^
+  -- "C:\NAS\analyze-video\.venv\Scripts\python.exe" "C:\NAS\analyze-video\main.py"
+sc config AnalyzeVideo start= delayed-auto
+sc start AnalyzeVideo
+```
+- `--restart` — relaunch on any unexpected exit (a crash, or the intentional restart above); a commanded `sc stop` does **not** trigger a relaunch.
+- `--no-log-cmd` — don't let shawl capture the app's stdout/stderr. The app already writes its own rotating logs to `LOG_PATH` (which the dashboard reads), so this avoids **duplicated logs**; shawl keeps only its own small start/stop/restart log under `--log-dir`.
+- `start= delayed-auto` — start at boot once the network/disk have settled.
+
+**4. Open the dashboard port in Windows Firewall.**
+The service runs as LocalSystem under a *different* `python.exe` than any interactive run, so a firewall "allow" you approved before does **not** apply — remote clients (e.g. the Android app) get `ERR_CONNECTION_TIMED_OUT` (a silent drop, not a refusal). Add an inbound rule for the dashboard port:
+```bat
+netsh advfirewall firewall add rule name="AnalyzeVideo Dashboard 8192" dir=in action=allow protocol=TCP localport=8192 profile=private
+```
+
+**5. Deploying code updates** — stop, copy, start; don't rely on the file-watch restart under a supervisor:
+```bat
+sc stop AnalyzeVideo
+:: copy updated files
+sc start AnalyzeVideo
+```
+
+**Verify:** `sc query AnalyzeVideo` shows `RUNNING`; `C:\NAS\logs\shawl` shows the command launching with no `os error 1920`; the app's normal log under `LOG_PATH` shows startup; and a test `.mp4` produces a Telegram notification.
+
+> **Power/boot caveat:** the service covers software-level recovery (boot start, crash restart). Physical auto-power-on after a *full battery drain* depends on a BIOS "Power On AC" option, which many laptops lack — verify it on your hardware; without it, a fully-drained shutdown needs a manual power-on.
+
+---
+
 ## How It Works
 
 1. **File Monitoring:**
