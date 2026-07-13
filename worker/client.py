@@ -11,9 +11,11 @@ concurrently (utilizing its 2+ slots), while local fallback uses the
 single-worker motion_executor to avoid overloading the master CPU.
 """
 
+import asyncio
 import logging
 import os
 import re
+import socket
 import time
 
 import httpx
@@ -24,6 +26,16 @@ logger = logging.getLogger()
 WORKER_URL = os.getenv("WORKER_URL", "http://10.0.0.2:8741")
 WORKER_ENABLED = os.getenv("WORKER_ENABLED", "false").lower() == "true"
 WORKER_TIMEOUT = float(os.getenv("WORKER_TIMEOUT", "120"))
+# Dispatch retry policy. The direct master<->worker link can briefly flap (NIC
+# EEE/power-save renegotiation) and drop the idle HTTP connection while the worker
+# processes. Retry a few times with a backoff long enough for the link to re-establish,
+# rather than immediately falling back to the (much slower) local path.
+WORKER_DISPATCH_ATTEMPTS = int(os.getenv("WORKER_DISPATCH_ATTEMPTS", "3"))
+WORKER_DISPATCH_BACKOFF = float(os.getenv("WORKER_DISPATCH_BACKOFF", "10.0"))
+WORKER_TCP_KEEPALIVE_IDLE = int(os.getenv("WORKER_TCP_KEEPALIVE_IDLE", "15"))
+# Cap the connect phase so a retry against a still-down link fails fast instead of
+# hanging for the full WORKER_TIMEOUT (which is meant for the read/processing wait).
+WORKER_CONNECT_TIMEOUT = float(os.getenv("WORKER_CONNECT_TIMEOUT", "10.0"))
 WORKER_HEALTH_CACHE_SECONDS = float(os.getenv("WORKER_HEALTH_CACHE_SECONDS", "30"))
 WORKER_MIN_BATTERY = int(os.getenv("WORKER_MIN_BATTERY", "5"))
 
@@ -185,6 +197,31 @@ def _replay_worker_logs(logs):
                 pass
 
 
+def _keepalive_socket_options():
+    """TCP keep-alive tuning for the dispatch connection. The socket sits idle while
+    the worker processes (video/artifacts move over SMB, not this socket), so keep-alive
+    probes keep the link warm — defeating NIC idle power-down — and surface a dropped
+    peer quickly. The TCP_KEEP* constants vary by platform/Python, hence the hasattr guards."""
+    opts = [(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)]
+    if hasattr(socket, "TCP_KEEPIDLE"):
+        opts.append((socket.IPPROTO_TCP, socket.TCP_KEEPIDLE, WORKER_TCP_KEEPALIVE_IDLE))
+    if hasattr(socket, "TCP_KEEPINTVL"):
+        opts.append((socket.IPPROTO_TCP, socket.TCP_KEEPINTVL, 5))
+    if hasattr(socket, "TCP_KEEPCNT"):
+        opts.append((socket.IPPROTO_TCP, socket.TCP_KEEPCNT, 3))
+    return opts
+
+
+def _new_worker_client():
+    """AsyncClient with TCP keep-alive enabled. Falls back to a default client if the
+    installed httpx predates `socket_options` support (added in httpx 0.26)."""
+    try:
+        transport = httpx.AsyncHTTPTransport(socket_options=_keepalive_socket_options())
+        return httpx.AsyncClient(transport=transport)
+    except TypeError:
+        return httpx.AsyncClient()
+
+
 async def detect_motion_remote_async(file_path, output_dir, fast_processing=False):
     """
     Async dispatch of detect_motion to the remote worker via HTTP.
@@ -192,8 +229,13 @@ async def detect_motion_remote_async(file_path, output_dir, fast_processing=Fals
     Sends master-perspective paths; worker handles translation, local copy,
     processing, and copying results back to CIFS mount.
 
-    On ReadError (connection dropped mid-response) retries once — the worker
-    processes a video in ~20 s so a duplicate run is cheaper than local fallback.
+    Transient transport errors (a link flap dropping the idle connection, connect
+    failures) are retried up to WORKER_DISPATCH_ATTEMPTS times with a
+    WORKER_DISPATCH_BACKOFF pause between tries — long enough for a flapped NIC link
+    to re-establish. The connection uses TCP keep-alive to stay warm during the
+    worker's idle processing window. A duplicate worker run is cheaper than the local
+    fallback. HTTP status errors and read timeouts are not retried (real failures /
+    genuinely-slow processing → fall back to local).
 
     Returns the same dict as detect_motion() with master-perspective paths.
     Raises on any failure (caller should catch and fall back to local).
@@ -204,20 +246,39 @@ async def detect_motion_remote_async(file_path, output_dir, fast_processing=Fals
         "fast_processing": fast_processing,
     }
     file_basename = os.path.basename(file_path)
-    for attempt in range(2):
+    # Retry only transport-level failures (link flap / connect drop). NOT ReadTimeout
+    # (worker genuinely too slow) or HTTPStatusError (real processing error) — those
+    # propagate so the caller falls back to local.
+    retryable = (
+        httpx.ConnectError,
+        httpx.ConnectTimeout,
+        httpx.ReadError,
+        httpx.WriteError,
+        httpx.RemoteProtocolError,
+    )
+    for attempt in range(WORKER_DISPATCH_ATTEMPTS):
         try:
-            async with httpx.AsyncClient() as client:
+            async with _new_worker_client() as client:
                 resp = await client.post(
                     f"{WORKER_URL}/detect-motion",
                     json=payload,
-                    timeout=WORKER_TIMEOUT,
+                    timeout=httpx.Timeout(WORKER_TIMEOUT, connect=WORKER_CONNECT_TIMEOUT),
                 )
             resp.raise_for_status()
             data = resp.json()
             _replay_worker_logs(data.get("logs"))
             return data["result"]
-        except httpx.ReadError as e:
-            if attempt == 0:
-                logger.warning("[%s] Worker ReadError on attempt 1, retrying: %r", file_basename, e)
+        except retryable as e:
+            if attempt < WORKER_DISPATCH_ATTEMPTS - 1:
+                logger.warning(
+                    "[%s] Worker transport error on attempt %d/%d, retrying in %.0fs: %r",
+                    file_basename, attempt + 1, WORKER_DISPATCH_ATTEMPTS,
+                    WORKER_DISPATCH_BACKOFF, e,
+                )
+                await asyncio.sleep(WORKER_DISPATCH_BACKOFF)
             else:
+                logger.warning(
+                    "[%s] Worker dispatch failed after %d attempts: %r",
+                    file_basename, WORKER_DISPATCH_ATTEMPTS, e,
+                )
                 raise
